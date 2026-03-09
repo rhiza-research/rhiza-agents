@@ -1,0 +1,54 @@
+# Default values for rhiza-agents.
+
+# Container image configuration
+image:
+  repository: ghcr.io/rhiza-research/rhiza-agents
+  tag: latest
+  pullPolicy: Always
+
+# Image pull secrets (not needed for public GHCR repos)
+imagePullSecrets: []
+
+# Service configuration
+service:
+  type: ClusterIP
+  port: 8080
+
+# Resource configuration
+resources:
+  limits:
+    cpu: 1000m
+    memory: 2Gi
+  requests:
+    cpu: 250m
+    memory: 512Mi
+
+# Ingress configuration
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts: []
+  tls: []
+
+# Persistent volume for SQLite database, LangGraph checkpoints, and ChromaDB
+persistence:
+  size: 5Gi
+  storageClassName: standard-rwo
+
+# Name of the Kubernetes secret containing sensitive env vars.
+# This secret is created by Terraform, NOT by this chart.
+# Keys: KEYCLOAK_CLIENT_SECRET, ANTHROPIC_API_KEY, DAYTONA_API_KEY, SECRET_KEY, LANGSMITH_API_KEY
+secretName: rhiza-agents-secrets
+
+# Non-secret environment variables
+env:
+  KEYCLOAK_URL: ""
+  KEYCLOAK_PUBLIC_URL: ""
+  KEYCLOAK_REALM: ""
+  KEYCLOAK_CLIENT_ID: ""
+  MCP_SERVER_URL: ""
+  BASE_URL: ""
+  # DATABASE_URL is set automatically to point at the PVC-mounted SQLite file
+  # CHECKPOINT_DB_PATH is set automatically to point at the PVC-mounted checkpoints file
+  # CHROMA_PERSIST_DIR is set automatically to point at the PVC-mounted chroma directory

@@ -1,0 +1,51 @@
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:25.0
+    command: start-dev --import-realm
+    restart: unless-stopped
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+    ports:
+      - "8180:8080"
+    volumes:
+      - ./keycloak/realm.json:/opt/keycloak/data/import/realm.json:ro
+
+  sheerwater-mcp:
+    image: ghcr.io/rhiza-research/sheerwater/mcp:latest
+    build:
+      context: ../sheerwater
+      dockerfile: mcp/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ../sheerwater/sheerwater:/app/sheerwater:ro
+      - ~/.config/gcloud:/root/.config/gcloud:ro
+    environment:
+      GOOGLE_CLOUD_PROJECT: sheerwater
+      CHART_BUCKET_NAME: sheerwater-mcp-charts
+      SIGNING_SERVICE_ACCOUNT: ${SIGNING_SERVICE_ACCOUNT}
+
+  rhiza-agents:
+    image: ghcr.io/rhiza-research/rhiza-agents:latest
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./src:/app/src:ro
+    environment:
+      KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_PUBLIC_URL: http://localhost:8180
+      KEYCLOAK_REALM: sheerwater
+      KEYCLOAK_CLIENT_ID: rhiza-agents
+      KEYCLOAK_CLIENT_SECRET: dev-secret
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      SECRET_KEY: dev-secret-key
+      MCP_SERVER_URL: http://sheerwater-mcp:8000/sse
+      BASE_URL: http://localhost:8080
+      DAYTONA_API_KEY: ${DAYTONA_API_KEY:-}
+    depends_on:
+      - keycloak
+      - sheerwater-mcp

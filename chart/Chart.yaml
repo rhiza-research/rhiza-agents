@@ -1,0 +1,8 @@
+apiVersion: v2
+name: rhiza-agents
+description: Multi-agent chat platform with user-editable agent configs
+
+type: application
+
+version: 0.1.0
+appVersion: "0.1.0"
