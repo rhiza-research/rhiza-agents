@@ -51,7 +51,7 @@ The project is built incrementally. Each phase has a self-contained spec in `doc
 | Phase | Spec | Description |
 |-------|------|-------------|
 | 0 | — | Repo scaffolding + documentation (done) |
-| 1 | [01-mvp-single-agent.md](docs/specs/01-mvp-single-agent.md) | Single agent with MCP tools, Keycloak auth, chat UI |
+| 1 | [01-mvp-single-agent.md](docs/specs/01-mvp-single-agent.md) | Single agent with MCP tools, Keycloak auth, chat UI (done) |
 | 2 | [02-multi-agent-supervisor.md](docs/specs/02-multi-agent-supervisor.md) | Supervisor routing to specialized sub-agents |
 | 3 | [03-user-editable-config.md](docs/specs/03-user-editable-config.md) | User-editable agent configs via UI |
 | 4 | [04-sandbox-execution.md](docs/specs/04-sandbox-execution.md) | Sandboxed Python execution via Daytona |

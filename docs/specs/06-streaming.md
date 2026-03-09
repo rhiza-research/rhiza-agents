@@ -165,9 +165,9 @@ async def stream_chat_message(
 
 ### Modifications to `templates/chat.html`
 
-Minimal changes -- the template still renders server-side messages the same way. The main change is that the "Thinking..." loading state is replaced by actual streaming content.
+Minimal changes -- the template already has the activity panel (from Phase 1) and renders server-side messages the same way. The main change is that the "Thinking..." loading state is replaced by actual streaming content.
 
-No structural HTML changes needed. The JavaScript handles all the streaming UI.
+No structural HTML changes needed. The JavaScript handles all the streaming UI. Tool call events stream into the existing activity panel (not as inline indicators on messages).
 
 ### Modifications to `static/chat.js`
 
@@ -254,6 +254,8 @@ function parseSSEEvents(buffer) {
 
 3. **Stream event handler:**
 
+Tool events (`tool_start`, `tool_end`) should render in the existing activity panel (right-side panel from Phase 1), not as inline indicators on the message. Use the existing `renderActivityTurn()` infrastructure to add activity items in real-time.
+
 ```javascript
 function handleStreamEvent(event, msgDiv) {
     switch (event.type) {
@@ -273,11 +275,12 @@ function handleStreamEvent(event, msgDiv) {
             break;
 
         case 'tool_start':
-            addToolCallIndicator(msgDiv, event.data.name, event.data.input);
+            // Add to activity panel (not inline on the message)
+            addActivityItem({type: 'tool_call', name: event.data.name, args: event.data.input});
             break;
 
         case 'tool_end':
-            updateToolCallResult(msgDiv, event.data.name, event.data.output);
+            addActivityItem({type: 'tool_result', name: event.data.name, content: event.data.output});
             break;
 
         case 'error':
@@ -285,13 +288,15 @@ function handleStreamEvent(event, msgDiv) {
             break;
 
         case 'done':
-            finalizeMessage(msgDiv, event.data.tool_calls);
+            finalizeMessage(msgDiv);
             break;
     }
 }
 ```
 
 4. **Streaming message display:**
+
+Tool calls are rendered in the activity panel (right-side panel from Phase 1), not inline on messages. The streaming message just handles text tokens and agent badges.
 
 ```javascript
 let streamedContent = '';
@@ -303,7 +308,6 @@ function addStreamingMessage() {
     div.innerHTML = `
         <div class="agent-badge-container"></div>
         <div class="message-content"></div>
-        <div class="tool-calls-stream"></div>
     `;
     messagesDiv.appendChild(div);
     messagesDiv.scrollTop = messagesDiv.scrollHeight;
@@ -319,35 +323,17 @@ function appendToken(msgDiv, token) {
 
 function updateAgentBadge(msgDiv, agentName) {
     const container = msgDiv.querySelector('.agent-badge-container');
-    // Format agent ID to display name
     const displayName = agentName.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
     container.innerHTML = `<span class="agent-badge">${displayName}</span>`;
 }
 
-function addToolCallIndicator(msgDiv, toolName, toolInput) {
-    const toolsDiv = msgDiv.querySelector('.tool-calls-stream');
-    const toolDiv = document.createElement('div');
-    toolDiv.className = 'tool-call-stream';
-    toolDiv.dataset.toolName = toolName;
-    toolDiv.innerHTML = `
-        <span class="tool-name">${toolName}</span>
-        <span class="tool-status running">running...</span>
-    `;
-    toolsDiv.appendChild(toolDiv);
-    messagesDiv.scrollTop = messagesDiv.scrollHeight;
+// Add activity items to the existing activity panel (Phase 1 infrastructure)
+function addActivityItem(item) {
+    // Use the existing renderActivityTurn or append to the current turn
+    // in the activity panel on the right side
 }
 
-function updateToolCallResult(msgDiv, toolName, output) {
-    const toolsDiv = msgDiv.querySelector('.tool-calls-stream');
-    const toolDiv = toolsDiv.querySelector(`[data-tool-name="${toolName}"]`);
-    if (toolDiv) {
-        const status = toolDiv.querySelector('.tool-status');
-        status.textContent = 'done';
-        status.className = 'tool-status done';
-    }
-}
-
-function finalizeMessage(msgDiv, toolCalls) {
+function finalizeMessage(msgDiv) {
     msgDiv.classList.remove('streaming');
     streamedContent = '';
 }
@@ -355,7 +341,7 @@ function finalizeMessage(msgDiv, toolCalls) {
 
 ### Modifications to `static/style.css`
 
-Add styles for streaming state:
+Add styles for streaming state. Note: tool call activity is rendered in the existing activity panel (from Phase 1) — no inline tool call styles needed on messages.
 
 ```css
 /* Streaming indicator */
@@ -374,43 +360,9 @@ Add styles for streaming state:
 .agent-badge-container {
     margin-bottom: 0.25rem;
 }
-
-/* Tool call streaming indicators */
-.tool-calls-stream {
-    margin-top: 0.5rem;
-}
-
-.tool-call-stream {
-    font-size: 0.8rem;
-    color: #888;
-    padding: 0.25rem 0;
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-}
-
-.tool-status {
-    font-size: 0.75rem;
-    padding: 0.1rem 0.4rem;
-    border-radius: 3px;
-}
-
-.tool-status.running {
-    color: #f0c040;
-    background: rgba(240, 192, 64, 0.15);
-    animation: pulse 2s infinite;
-}
-
-.tool-status.done {
-    color: #4a9a4a;
-    background: rgba(74, 154, 74, 0.15);
-}
-
-@keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.5; }
-}
 ```
+
+The activity panel styles (`.activity-item.tool-call`, `.activity-item.tool-result`, etc.) already exist from Phase 1.
 
 ### Considerations
 
@@ -478,9 +430,9 @@ Key v2 event fields:
 3. When the stream completes, the cursor disappears
 4. Agent badge appears at the top of the message as soon as the agent starts processing (e.g., "Data Analyst")
 5. When the supervisor routes to a different agent, the agent badge updates
-6. Tool calls appear in real-time as they start (with "running..." status)
-7. Tool calls update to "done" when they complete
-8. Send "list available forecast models" -- see MCP tool calls stream, then response tokens stream
+6. Tool calls appear in real-time in the activity panel as they start
+7. Tool results appear in the activity panel when they complete
+8. Send "list available forecast models" -- see MCP tool calls stream in activity panel, then response tokens stream in main chat
 9. Start a new conversation -- conversation_id is received via the first SSE event and URL updates
 10. If an error occurs mid-stream, an error message appears in the chat
 11. Refreshing the page loads the full conversation from the checkpointer (server-side rendering works as before)

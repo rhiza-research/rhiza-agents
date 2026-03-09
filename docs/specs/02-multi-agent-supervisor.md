@@ -9,6 +9,8 @@ Replace the single ReAct agent from Phase 1 with a supervisor + sub-agent archit
 Phase 1 must be complete and working:
 - FastAPI app with Keycloak auth, conversation persistence, MCP tools
 - `create_react_agent` with `AsyncSqliteSaver` checkpointer
+- Activity panel showing agent thinking, tool calls, and results (separate from main chat)
+- `_process_messages()` helper separating main messages from activity data
 - All files from Phase 1 exist and the app runs via `docker compose up`
 
 ## Files to Create
@@ -219,23 +221,27 @@ This exists so `main.py` has a single function to call. In Phase 3, this functio
 
 **Response format changes:**
 
-Add `agent_name` to the response:
+Add `agent_name` to the response. Note: Phase 1 uses `activity` (not `tool_calls`) in the response — this carries forward:
 ```json
 {
     "conversation_id": "...",
     "response": "...",
-    "tool_calls": [...],
+    "activity": [...],
     "agent_name": "data_analyst"
 }
 ```
 
 To determine which agent produced the final response, look at the messages in the result. The last `AIMessage` before the supervisor's final response will have a `name` attribute set to the worker agent's ID. Walk backward through `result["messages"]` to find the last AI message with actual content (not just a handoff).
 
+The `activity` field is processed by `_process_messages()` (from Phase 1) and contains thinking text, tool calls, and tool results for the current turn. These are displayed in the activity panel, not in the main chat.
+
 **GET /c/{conversation_id} changes:**
 - When extracting messages for display, include the `name` attribute from AIMessages so the UI can show which agent responded
+- Continue using `_process_messages()` to separate main chat from activity panel data
 
 ### Modifications to `templates/chat.html`
 
+The activity panel already exists from Phase 1 (shows thinking, tool calls, tool results). Changes needed:
 - Add agent name badge to assistant messages: if a message has an `agent_name`, display it as a small label above or next to the message content
 - Example: `<span class="agent-badge">Data Analyst</span>` before the message content
 
@@ -243,6 +249,7 @@ To determine which agent produced the final response, look at the messages in th
 
 - When rendering a new assistant message from the API response, include the `agent_name` as a badge
 - When rendering server-side messages, look for the `agent_name` data attribute
+- Activity panel rendering (`renderActivityTurn`) already works from Phase 1
 
 ### Modifications to `static/style.css`
 

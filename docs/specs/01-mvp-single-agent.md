@@ -139,13 +139,9 @@ Use `langchain-mcp-adapters` to connect to the sheerwater MCP server and get Lan
 ```python
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
-async def get_mcp_tools(mcp_server_url: str) -> list:
-    """Load tools from the MCP server.
-
-    Returns LangChain-compatible tool objects that can be passed
-    directly to create_react_agent.
-    """
-    client = MultiServerMCPClient(
+def create_mcp_client(mcp_server_url: str) -> MultiServerMCPClient:
+    """Create an MCP client configured for the sheerwater server."""
+    return MultiServerMCPClient(
         {
             "sheerwater": {
                 "url": mcp_server_url,
@@ -153,29 +149,36 @@ async def get_mcp_tools(mcp_server_url: str) -> list:
             }
         }
     )
-    # MultiServerMCPClient is an async context manager
-    # The caller must manage its lifecycle
-    return client
 ```
 
-The `MultiServerMCPClient` must be used as an async context manager. During lifespan startup, enter the context manager and call `client.get_tools()` to get the list of LangChain tool objects. Store the client and tools as module-level globals (same pattern as sheerwater-chat's global `mcp_client`).
+**Important**: As of `langchain-mcp-adapters` 0.1.0+, `MultiServerMCPClient` is NOT an async context manager. Call `await client.get_tools()` directly to get the list of LangChain tool objects. Store the tools as a module-level global.
+
+The MCP server may not be ready when the app starts (especially in Docker Compose). Use a retry loop with backoff when calling `client.get_tools()` during startup.
 
 ### `main.py` -- FastAPI Application
 
 **Lifespan handler** (async context manager):
 1. Load config from env
 2. Connect to app database
-3. Enter `MultiServerMCPClient` context manager, load MCP tools
-4. Create `AsyncSqliteSaver` checkpointer (from `CHECKPOINT_DB_PATH`)
+3. Create MCP client and load tools with retry loop (MCP server may not be ready in Docker Compose)
+4. Create `AsyncSqliteSaver` checkpointer (from `CHECKPOINT_DB_PATH`) as async context manager
 5. Create `ChatAnthropic` model instance
 6. Build the LangGraph agent with `create_react_agent(model, tools, checkpointer=checkpointer)`
 7. Create OAuth client
 8. Yield (app runs)
-9. Cleanup: disconnect database (checkpointer and MCP client clean up via their context managers)
+9. Cleanup: disconnect database (checkpointer cleans up via its context manager)
 
-Store these as module-level globals: `config`, `db`, `agent`, `oauth`, `checkpointer`.
+Store these as module-level globals: `config`, `db`, `agent`, `oauth`, `mcp_tools`.
 
-**Session middleware**: Add `SessionMiddleware` with `config.secret_key`.
+**Session middleware**: Add `SessionMiddleware` at module level (not inside `run()`) so it works with uvicorn reload:
+```python
+app.add_middleware(SessionMiddleware, secret_key=os.environ.get("SECRET_KEY", "dev-secret-key"))
+```
+
+**Uvicorn reload**: Use import string format with `reload_dirs` for hot reload in Docker:
+```python
+uvicorn.run("rhiza_agents.main:app", host="0.0.0.0", port=8080, reload=True, reload_dirs=["/app/src"])
+```
 
 **Auth dependency**: `require_auth(request)` -- returns user dict or raises 401.
 
@@ -191,6 +194,7 @@ Store these as module-level globals: `config`, `db`, `agent`, `oauth`, `checkpoi
 | POST | `/api/chat` | required | Send a message, get agent response |
 | GET | `/api/conversations` | required | List user's conversations |
 | DELETE | `/api/conversations/{id}` | required | Delete a conversation |
+| GET | `/api/conversations/{id}/messages` | required | Full message history (debug/evaluation) |
 | GET | `/api/tools` | required | List available MCP tools |
 
 **POST /api/chat** request/response:
@@ -206,26 +210,52 @@ Request body:
 Handler logic:
 1. If no `conversation_id`, generate a UUID, create conversation in app DB
 2. Invoke the agent: `await agent.ainvoke({"messages": [HumanMessage(content=message)]}, config={"configurable": {"thread_id": conversation_id}})`
-3. Extract the last AI message from the response state
-4. Extract tool call information from the message history
-5. Update conversation title if it's the first message (first 50 chars of user message)
-6. Touch the conversation's `updated_at`
-7. Return response
+3. Find the new turn's messages: scan backward through `result["messages"]` for the last `HumanMessage`, slice from there
+4. Process with `_process_messages()` to separate main chat messages from activity data
+5. Extract the final AI text from the processed messages
+6. Update conversation title if it's the first message (first 50 chars of user message)
+7. Touch the conversation's `updated_at`
+8. Return response
 
 Response body:
 ```json
 {
     "conversation_id": "string",
     "response": "string",
-    "tool_calls": [{"name": "string", "input": {}}]
+    "activity": [
+        {"type": "thinking", "content": "Let me look up..."},
+        {"type": "tool_call", "name": "tool_run_metric", "args": {...}},
+        {"type": "tool_result", "name": "tool_run_metric", "content": {...}}
+    ]
 }
 ```
 
+The `activity` field contains the agent's intermediate work for this turn — thinking text from intermediate AI messages, tool calls with their parameters, and tool results. This data is displayed in the activity panel, not in the main chat.
+
 **GET `/c/{conversation_id}`** handler:
 1. Verify conversation belongs to user
-2. Load conversation history from checkpointer: `await checkpointer.aget({"configurable": {"thread_id": conversation_id}})`
-3. Extract messages from the checkpoint state
-4. Render chat.html with messages
+2. Load conversation history: `await agent.aget_state({"configurable": {"thread_id": conversation_id}})`
+3. Process messages with `_process_messages()` to separate main chat from activity
+4. Render chat.html with messages and activity data (activity embedded as JSON in a `<script>` tag)
+
+**GET `/api/conversations/{conversation_id}/messages`** — debug/evaluation endpoint:
+
+Returns the full raw message history for a conversation, including all intermediate messages. Useful for evaluating agent performance and debugging tool call sequences.
+
+Response body:
+```json
+{
+    "conversation_id": "string",
+    "messages": [
+        {"type": "human", "content": "..."},
+        {"type": "ai", "content": "...", "tool_calls": [{"name": "...", "args": {...}}]},
+        {"type": "tool", "name": "...", "content": {...}},
+        {"type": "ai", "content": "final response text"}
+    ]
+}
+```
+
+Unlike the main chat view which filters to only show final responses, this endpoint returns every message in order: human messages, all AI messages (including intermediate ones with tool calls), and all tool result messages. AI messages may have a `tool_calls` array when they triggered tool use. Tool result content is parsed as JSON when possible.
 
 **GET `/api/tools`** handler:
 1. Return list of tool names and descriptions from the loaded MCP tools
@@ -236,40 +266,55 @@ Simple centered page with app title "Rhiza Agents" and a "Sign in with Keycloak"
 
 ### `templates/chat.html` -- Chat UI
 
-Adapt from sheerwater-chat's chat.html. Key differences:
-- Title: "Rhiza Agents" instead of "Sheerwater Chat"
+Three-column layout: sidebar | chat area | activity panel.
+
+```
+┌──────────┬─────────────────────┬───────────────┐
+│ sidebar  │  chat-area          │ activity-panel│
+│ 260px    │  flex: 1            │ 380px         │
+│          │                     │ (toggleable)  │
+└──────────┴─────────────────────┴───────────────┘
+```
+
+Key elements:
+- Title: "Rhiza Agents"
 - Welcome message: "Ask questions about weather forecast models and data analysis."
-- Remove settings modal (no per-user settings in phase 1)
-- Keep: conversation sidebar, message display with markdown rendering, tool call display
-- Remove: chart iframe rendering (not needed -- MCP tools return text data in this stack), rate limit bar, MCP version display
-- Add: display tool call inputs as expandable JSON in the tool-call elements
+- No settings modal (no per-user settings in phase 1)
+- Chat header with "Activity" toggle button (top-right of chat area)
+- Activity panel on the right with header (title + close button) and scrollable content
+- Activity data embedded as `<script id="activity-data" type="application/json">` for server-side pages
 
 Message rendering for server-rendered messages (on page load via Jinja):
 - User messages: render the `content` field
-- AI messages: render the `content` field with markdown
-- Tool messages: skip (they are intermediate -- only show tool names as badges on the AI message that triggered them)
+- AI messages: render the `content` field with markdown (CSS class `needs-render`, rendered client-side by `marked`)
+- Tool calls and intermediate thinking are NOT shown in the main chat — they appear only in the activity panel
 
 The template receives:
-- `request`, `user_name`, `conversations` (list), `current_conversation` (dict or None), `messages` (list of dicts with `type`, `content`, `name`, `tool_calls` fields)
+- `request`, `user_name`, `conversations` (list), `current_conversation` (dict or None), `messages` (list of human + final AI messages), `activity_json` (JSON string of per-turn activity data)
 
 ### `static/chat.js` -- Chat JavaScript
 
-Adapt from sheerwater-chat's chat.js. Key pieces:
-- `marked` + `highlight.js` for markdown rendering (same CDN imports)
+Key pieces:
+- `marked` + `highlight.js` for markdown rendering (ESM CDN imports)
 - Form submit handler: POST to `/api/chat`, handle response
 - Auto-resize textarea
 - Enter to send, Shift+Enter for newline
 - Loading state with "Thinking..." animation
 - On new conversation: update URL to `/c/{id}` via `history.pushState`
-- Render tool calls as small badges below assistant messages
 - Render server-side messages (those with `needs-render` class) through marked on page load
-- Remove: settings modal JS, rate limit display, chart URL handling
+- Activity panel toggle with localStorage persistence
+- `renderActivityTurn(turnIndex, items)` — renders thinking, tool calls, and tool results in the activity panel
+- On page load: parse embedded `<script id="activity-data">` JSON and render each turn
+- On live chat: use `data.activity` from API response to render new activity turn
 
 ### `static/style.css` -- Dark Theme
 
-Copy directly from sheerwater-chat's style.css. Changes:
-- Remove: rate-limit styles, chart-container/chart-iframe styles (not needed in phase 1)
-- Keep everything else: login page, sidebar, messages, input area, tool calls, markdown styles, modal base styles, loading animation
+Dark theme with activity panel styles:
+- Login page, sidebar, messages, input area, markdown styles, loading animation
+- Chat header with activity toggle button
+- Activity panel (380px, dark background `#16162a`, toggleable via `.hidden` class with smooth CSS transition)
+- Activity items styled by type: thinking (italic, muted), tool-call (blue left border `#4a90d9`), tool-result (green left border `#2ea043`)
+- Collapsible details for tool parameters and results
 
 ### `Dockerfile`
 
@@ -322,21 +367,24 @@ environment:
 
 Copy from sheerwater-chat's keycloak/realm.json. Update the client ID from "sheerwater-chat" to "rhiza-agents" and the client secret to "dev-secret". The realm name stays "sheerwater" (it's the shared Keycloak realm).
 
-### Message Extraction from Checkpointer
+### Message Extraction and Processing
 
 When loading a conversation for display, get the checkpoint state and extract messages:
 
 ```python
 state = await agent.aget_state({"configurable": {"thread_id": conversation_id}})
-messages = state.values.get("messages", [])
+raw_messages = state.values.get("messages", [])
 ```
 
-Each message in the list is a LangChain message object. Convert to display format:
-- `HumanMessage` -> `{"type": "human", "content": msg.content}`
-- `AIMessage` -> `{"type": "ai", "content": msg.content, "tool_calls": [...]}`
-- `ToolMessage` -> skip for display (tool results are shown as badges on the preceding AI message)
+Each message in the list is a LangChain message object. **Important**: `AIMessage.content` can be either a string or a list of content blocks (e.g., `[{"type": "text", "text": "..."}, {"type": "tool_use", ...}]`). Use a helper function to extract text content from either format.
 
-For tool calls on an `AIMessage`, access `msg.tool_calls` which is a list of dicts with `name`, `args`, `id` keys.
+The `_process_messages(raw_messages)` helper function separates raw messages into two outputs:
+- **Main chat messages**: only `HumanMessage` and the final `AIMessage` (no tool calls) per turn
+- **Activity data**: per-turn lists of intermediate items (thinking text, tool calls, tool results)
+
+Logic: An `AIMessage` with `tool_calls` is intermediate — its text becomes a "thinking" activity item, and its tool calls become "tool_call" items. A `ToolMessage` becomes a "tool_result" item. The `AIMessage` without tool calls is the final response shown in the main chat.
+
+This separation keeps the main chat clean (just human questions and AI answers) while the activity panel shows the agent's behind-the-scenes work.
 
 ## Reference Files
 
@@ -365,7 +413,7 @@ Read these files to understand the patterns being adapted:
 3. Click "Sign in with Keycloak", authenticate (create a user in Keycloak dev mode first)
 4. After login, see the chat UI with empty conversation list
 5. Type "list available forecast models" and send
-6. Agent calls the MCP tool, response appears with tool call badges
+6. Agent calls the MCP tool, final response appears in the main chat. Tool calls and intermediate thinking appear in the activity panel on the right.
 7. Conversation appears in the sidebar with the first message as the title
 8. Refresh the page -- conversation and messages persist
 9. Click the conversation in the sidebar -- messages reload from checkpointer

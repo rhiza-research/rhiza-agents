@@ -7,10 +7,10 @@ rhiza-agents is a multi-agent chat platform built on LangGraph. Users log in, in
 ## System Architecture
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                    Web Browser                       │
-│  Chat UI  │  Config Editor  │  Auth (Keycloak)       │
-└────────────────────┬────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                        Web Browser                           │
+│  Chat UI  │  Activity Panel  │  Config Editor  │  Auth       │
+└────────────────────────┬────────────────────────────────────┘
                      │ HTTP
 ┌────────────────────▼────────────────────────────────┐
 │              FastAPI Application                     │
@@ -114,6 +114,8 @@ enabled: bool        # whether this agent is active
 6. Sub-agent executes with its tools (MCP calls, sandbox execution, RAG retrieval)
 7. Response flows back through supervisor to user
 8. All state persisted by LangGraph checkpointer
+9. `_process_messages()` separates raw messages into main chat (final responses) and activity data (thinking, tool calls, tool results)
+10. Main chat shows only human messages + final AI response; activity panel shows intermediate agent work
 
 ### Config Change Flow
 

@@ -167,7 +167,7 @@ app = FastAPI(title="App Name", lifespan=lifespan)
 Key points:
 - Global state is initialized in the lifespan, not at module level
 - Database connection is opened at startup, closed on shutdown
-- MCP client uses an async context manager that stays open for the app's lifetime
+- **Note**: The sheerwater-chat MCP client uses an async context manager (`async with mcp_client.connection()`). In rhiza-agents, `langchain-mcp-adapters` `MultiServerMCPClient` is NOT an async context manager — call `await client.get_tools()` directly. Use a retry loop with backoff during startup since the MCP server may not be ready in Docker Compose.
 
 ### Templates and Static Files
 
@@ -191,14 +191,16 @@ Routes are split between:
 ### Running the App
 
 ```python
+# SessionMiddleware MUST be added at module level (not in run()) for uvicorn reload to work
+app.add_middleware(SessionMiddleware, secret_key=os.environ.get("SECRET_KEY", "dev-secret-key"))
+
 def run():
     import uvicorn
-    config = Config.from_env()
-    app.add_middleware(SessionMiddleware, secret_key=config.secret_key)
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+    # Use import string format with reload_dirs for hot reload in Docker
+    uvicorn.run("rhiza_agents.main:app", host="0.0.0.0", port=8080, reload=True, reload_dirs=["/app/src"])
 ```
 
-Note: `SessionMiddleware` is added in `run()`, not at module level, because it needs the config.
+**Important**: The sheerwater-chat pattern of adding `SessionMiddleware` in `run()` does not work with uvicorn's `reload=True` because on reload, `run()` is not called again — only the module is re-imported. Add middleware at module level instead.
 
 ---
 
@@ -569,8 +571,8 @@ Key points:
 
 To create a realm for the new app:
 1. Copy the realm JSON
-2. Change `realm` name (e.g., `"rhiza-agents"`)
-3. Update `clientId` and `secret`
+2. Keep the `realm` name as `"sheerwater"` (it's the shared Keycloak realm)
+3. Update `clientId` (e.g., `"rhiza-agents"`) and `secret`
 4. Update `redirectUris` and `webOrigins` to match the new app's port
 5. Keep the dev user for local development
 6. Set `sslRequired: "none"` for local dev, Keycloak enforces SSL in production by default
