@@ -35,6 +35,7 @@ services:
       - "8080:8080"
     volumes:
       - ./src:/app/src:ro
+      - rhiza-data:/data
     environment:
       KEYCLOAK_URL: http://keycloak:8080
       KEYCLOAK_PUBLIC_URL: http://localhost:8180
@@ -45,7 +46,12 @@ services:
       SECRET_KEY: dev-secret-key
       MCP_SERVER_URL: http://sheerwater-mcp:8000/sse
       BASE_URL: http://localhost:8080
+      DATABASE_URL: sqlite:////data/rhiza_agents.db
+      CHECKPOINT_DB_PATH: /data/checkpoints.db
       DAYTONA_API_KEY: ${DAYTONA_API_KEY:-}
     depends_on:
       - keycloak
       - sheerwater-mcp
+
+volumes:
+  rhiza-data:

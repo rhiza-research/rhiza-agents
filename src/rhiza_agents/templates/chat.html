@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rhiza Agents</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+    <div class="app">
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <button id="new-chat" class="new-chat-btn">+ New Chat</button>
+            </div>
+            <nav class="conversations">
+                {% for conv in conversations %}
+                <a href="/c/{{ conv.id }}" class="conversation-item {% if current_conversation and current_conversation.id == conv.id %}active{% endif %}">
+                    {{ conv.title or "New conversation" }}
+                </a>
+                {% endfor %}
+            </nav>
+            <div class="sidebar-footer">
+                <div class="user-info">
+                    <span class="user-name">{{ user_name }}</span>
+                </div>
+                <a href="/logout" class="logout-link">Logout</a>
+            </div>
+        </aside>
+
+        <main class="chat-area">
+            <div class="chat-header">
+                <button id="activity-toggle" class="activity-toggle-btn" title="Toggle activity panel">Activity</button>
+            </div>
+            <div class="messages" id="messages">
+                {% if not messages %}
+                <div class="welcome">
+                    <h2>Rhiza Agents</h2>
+                    <p>Ask questions about weather forecast models and data analysis.</p>
+                </div>
+                {% endif %}
+                {% for msg in messages %}
+                <div class="message {% if msg.type == 'human' %}user{% else %}assistant{% endif %}">
+                    <div class="message-content needs-render">{{ msg.content | e }}</div>
+                </div>
+                {% endfor %}
+            </div>
+
+            <form class="input-area" id="chat-form">
+                <input type="hidden" id="conversation-id" value="{{ current_conversation.id if current_conversation else '' }}">
+                <textarea id="message-input" placeholder="Ask about forecast models..." rows="1"></textarea>
+                <button type="submit" id="send-btn">Send</button>
+            </form>
+        </main>
+
+        <aside class="activity-panel" id="activity-panel">
+            <div class="activity-header">
+                <span class="activity-title">Activity</span>
+                <button id="activity-close" class="activity-close-btn" title="Close panel">&times;</button>
+            </div>
+            <div class="activity-content" id="activity-content"></div>
+        </aside>
+    </div>
+
+    <script id="activity-data" type="application/json">{{ activity_json | safe }}</script>
+    <script type="module" src="/static/chat.js"></script>
+</body>
+</html>
