@@ -233,11 +233,28 @@ async def build_graph(
 ) -> CompiledGraph:
 ```
 
+**LLM retry:** When creating `ChatAnthropic` model instances in `build_graph`, wrap them with `.with_retry()` to handle transient API failures (rate limits, 5xx errors):
+
+```python
+model = ChatAnthropic(model=config.model).with_retry(
+    stop_after_attempt=3,
+)
+```
+
+This applies to both the supervisor model and all worker agent models.
+
 ### Modifications to `main.py`
 
 1. Add `DAYTONA_API_KEY` to the config loaded at startup
 2. Pass `daytona_api_key=config.daytona_api_key` through to `get_agent_graph` and then to `build_graph`. Note: after Phase 3, `get_agent_graph` signature is `get_agent_graph(mcp_tools, checkpointer, user_configs=None, user_id=None, db=None)` and it may need a `daytona_api_key` parameter added, which it passes through to `get_or_build_graph` and `build_graph`.
-3. Start the sandbox cleanup background task in the lifespan:
+3. **Add `recursion_limit`** to the `graph.ainvoke()` call in `POST /api/chat` to prevent runaway agent loops:
+   ```python
+   result = await graph.ainvoke(
+       {"messages": [HumanMessage(content=message)]},
+       config={"configurable": {"thread_id": conversation_id}, "recursion_limit": 50},
+   )
+   ```
+5. Start the sandbox cleanup background task in the lifespan:
 
 ```python
 async def _sandbox_cleanup_loop():
@@ -254,7 +271,7 @@ yield
 cleanup_task.cancel()
 ```
 
-4. When a conversation is deleted (DELETE /api/conversations/{id}), also call `cleanup_sandbox(conversation_id)`.
+6. When a conversation is deleted (DELETE /api/conversations/{id}), also call `cleanup_sandbox(conversation_id)`.
 
 ### Modifications to `docker-compose.yml`
 
@@ -382,6 +399,8 @@ help(daytona_sdk.Daytona)
 9. After 15 minutes of inactivity, the sandbox is cleaned up (verify in logs)
 10. In the config editor, "sandbox:daytona" checkbox is now functional (not greyed out)
 11. If `DAYTONA_API_KEY` is not set, code_runner responds conversationally without code execution
+12. Agent loops are capped at 50 recursion steps (graph raises `GraphRecursionError` if exceeded)
+13. Transient LLM API failures (rate limits, 5xx) are retried up to 3 times automatically
 
 ## What NOT to Do
 

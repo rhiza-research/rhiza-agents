@@ -90,7 +90,7 @@ async def stream_chat_message(
         try:
             async for event in graph.astream_events(
                 {"messages": [HumanMessage(content=body.message)]},
-                config={"configurable": {"thread_id": conversation_id}},
+                config={"configurable": {"thread_id": conversation_id}, "recursion_limit": 50},
                 version="v2",
             ):
                 kind = event["event"]
