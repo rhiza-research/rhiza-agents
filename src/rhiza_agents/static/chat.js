@@ -54,76 +54,62 @@ if (localStorage.getItem('activityPanelOpen') === 'false') {
     activityPanel.classList.add('hidden');
 }
 
-function renderActivityTurn(turnIndex, items) {
-    if (!items || items.length === 0) return;
+function renderActivityItem(item) {
+    const itemDiv = document.createElement('div');
 
-    const turnDiv = document.createElement('div');
-    turnDiv.className = 'activity-turn';
+    if (item.type === 'thinking') {
+        itemDiv.className = 'activity-item thinking';
+        const lbl = document.createElement('div');
+        lbl.className = 'item-label';
+        lbl.textContent = 'Thinking';
+        itemDiv.appendChild(lbl);
+        const content = document.createElement('div');
+        content.className = 'item-content';
+        content.textContent = item.content;
+        itemDiv.appendChild(content);
 
-    const label = document.createElement('div');
-    label.className = 'activity-turn-label';
-    label.textContent = `Turn ${turnIndex + 1}`;
-    turnDiv.appendChild(label);
-
-    for (const item of items) {
-        const itemDiv = document.createElement('div');
-
-        if (item.type === 'thinking') {
-            itemDiv.className = 'activity-item thinking';
-            const lbl = document.createElement('div');
-            lbl.className = 'item-label';
-            lbl.textContent = 'Thinking';
-            itemDiv.appendChild(lbl);
-            const content = document.createElement('div');
-            content.className = 'item-content';
-            content.textContent = item.content;
-            itemDiv.appendChild(content);
-
-        } else if (item.type === 'tool_call') {
-            itemDiv.className = 'activity-item tool-call';
-            const lbl = document.createElement('div');
-            lbl.className = 'item-label';
-            lbl.textContent = 'Tool Call';
-            itemDiv.appendChild(lbl);
-            const name = document.createElement('div');
-            name.className = 'item-name';
-            name.textContent = item.name;
-            itemDiv.appendChild(name);
-            if (item.args && Object.keys(item.args).length > 0) {
-                const details = document.createElement('details');
-                const summary = document.createElement('summary');
-                summary.textContent = 'parameters';
-                details.appendChild(summary);
-                const pre = document.createElement('pre');
-                pre.textContent = JSON.stringify(item.args, null, 2);
-                details.appendChild(pre);
-                itemDiv.appendChild(details);
-            }
-
-        } else if (item.type === 'tool_result') {
-            itemDiv.className = 'activity-item tool-result';
-            const lbl = document.createElement('div');
-            lbl.className = 'item-label';
-            lbl.textContent = 'Result';
-            itemDiv.appendChild(lbl);
-            const name = document.createElement('div');
-            name.className = 'item-name';
-            name.textContent = item.name;
-            itemDiv.appendChild(name);
+    } else if (item.type === 'tool_call') {
+        itemDiv.className = 'activity-item tool-call';
+        const lbl = document.createElement('div');
+        lbl.className = 'item-label';
+        lbl.textContent = 'Tool Call';
+        itemDiv.appendChild(lbl);
+        const name = document.createElement('div');
+        name.className = 'item-name';
+        name.textContent = item.name;
+        itemDiv.appendChild(name);
+        if (item.args && Object.keys(item.args).length > 0) {
             const details = document.createElement('details');
             const summary = document.createElement('summary');
-            summary.textContent = 'output';
+            summary.textContent = 'parameters';
             details.appendChild(summary);
             const pre = document.createElement('pre');
-            pre.textContent = typeof item.content === 'string' ? item.content : JSON.stringify(item.content, null, 2);
+            pre.textContent = JSON.stringify(item.args, null, 2);
             details.appendChild(pre);
             itemDiv.appendChild(details);
         }
 
-        turnDiv.appendChild(itemDiv);
+    } else if (item.type === 'tool_result') {
+        itemDiv.className = 'activity-item tool-result';
+        const lbl = document.createElement('div');
+        lbl.className = 'item-label';
+        lbl.textContent = 'Result';
+        itemDiv.appendChild(lbl);
+        const name = document.createElement('div');
+        name.className = 'item-name';
+        name.textContent = item.name;
+        itemDiv.appendChild(name);
+        const details = document.createElement('details');
+        const summary = document.createElement('summary');
+        summary.textContent = 'output';
+        details.appendChild(summary);
+        const pre = document.createElement('pre');
+        pre.textContent = typeof item.content === 'string' ? item.content : JSON.stringify(item.content, null, 2);
+        details.appendChild(pre);
+        itemDiv.appendChild(details);
     }
 
-    activityContent.appendChild(turnDiv);
+    activityContent.appendChild(itemDiv);
     activityContent.scrollTop = activityContent.scrollHeight;
 }
 
@@ -132,9 +118,7 @@ const activityDataEl = document.getElementById('activity-data');
 if (activityDataEl) {
     try {
         const activityData = JSON.parse(activityDataEl.textContent);
-        activityData.forEach((turnActivity, index) => {
-            renderActivityTurn(index, turnActivity);
-        });
+        activityData.forEach(item => renderActivityItem(item));
     } catch (e) {
         console.error('Failed to parse activity data:', e);
     }
@@ -203,12 +187,11 @@ if (form) form.addEventListener('submit', async (e) => {
         }
 
         loadingMsg.remove();
-        addMessage('assistant', data.response);
+        addMessage('assistant', data.response, false, data.agent_name);
 
         // Render activity in the side panel
         if (data.activity && data.activity.length > 0) {
-            const turnIndex = activityContent.querySelectorAll('.activity-turn').length;
-            renderActivityTurn(turnIndex, data.activity);
+            data.activity.forEach(item => renderActivityItem(item));
         }
 
     } catch (error) {
@@ -221,9 +204,16 @@ if (form) form.addEventListener('submit', async (e) => {
     }
 });
 
-function addMessage(role, content, loading = false) {
+function addMessage(role, content, loading = false, agentName = null) {
     const div = document.createElement('div');
     div.className = `message ${role}` + (loading ? ' loading' : '');
+
+    if (agentName) {
+        const badge = document.createElement('span');
+        badge.className = 'agent-badge';
+        badge.textContent = agentName;
+        div.appendChild(badge);
+    }
 
     const contentDiv = document.createElement('div');
     contentDiv.className = 'message-content';

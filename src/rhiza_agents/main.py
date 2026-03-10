@@ -12,13 +12,13 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-from langgraph.prebuilt import create_react_agent
 from pydantic import BaseModel
 from starlette.middleware.sessions import SessionMiddleware
 
+from .agents.registry import get_default_configs_by_id
+from .agents.supervisor import get_agent_graph
 from .agents.tools.mcp import create_mcp_client
 from .auth import create_oauth, get_user_from_session, get_user_id, get_user_name
 from .config import Config
@@ -30,15 +30,17 @@ logger = logging.getLogger(__name__)
 # Global instances
 config: Config = None
 db: Database = None
-agent = None
+checkpointer = None
 oauth = None
 mcp_tools: list = []
+_agent_names: dict[str, str] = {}  # agent_id -> display name
+_tool_to_agent: dict[str, str] = {}  # tool_name -> agent_id
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler."""
-    global config, db, agent, oauth, mcp_tools
+    global config, db, checkpointer, oauth, mcp_tools, _agent_names, _tool_to_agent
 
     config = Config.from_env()
     db = Database(config.database_url)
@@ -59,10 +61,18 @@ async def lifespan(app: FastAPI):
             await asyncio.sleep(attempt + 1)
     logger.info("Loaded %d MCP tools", len(mcp_tools))
 
-    async with AsyncSqliteSaver.from_conn_string(config.checkpoint_db_path) as checkpointer:
-        model = ChatAnthropic(model="claude-sonnet-4-20250514", api_key=config.anthropic_api_key)
-        agent = create_react_agent(model, mcp_tools, checkpointer=checkpointer)
-        logger.info("Agent created")
+    configs_by_id = get_default_configs_by_id()
+    _agent_names = {agent_id: c.name for agent_id, c in configs_by_id.items()}
+
+    # Build tool -> agent mapping for agent name tracking
+    for agent_id, c in configs_by_id.items():
+        if "mcp:sheerwater" in c.tools:
+            for t in mcp_tools:
+                _tool_to_agent[t.name] = agent_id
+
+    async with AsyncSqliteSaver.from_conn_string(config.checkpoint_db_path) as cp:
+        checkpointer = cp
+        logger.info("Supervisor graph ready (built on first request)")
 
         yield
 
@@ -78,6 +88,10 @@ templates = Jinja2Templates(directory=BASE_DIR / "templates")
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 
 
+_THINKING_TAG = "[THINKING]"
+_RESPONSE_TAG = "[RESPONSE]"
+
+
 def _extract_text(content) -> str:
     """Extract text from AIMessage content (string or list of content blocks)."""
     if isinstance(content, list):
@@ -87,54 +101,87 @@ def _extract_text(content) -> str:
     return (content or "").strip()
 
 
-def _process_messages(raw_messages):
-    """Process raw LangGraph messages into chat messages and activity data.
+def _classify_text(text: str, has_tool_calls: bool) -> tuple[str, str]:
+    """Classify text as thinking or response.
 
-    Returns (messages, activity_by_turn) where:
-    - messages: list of {"type": "human"|"ai", "content": str} for main chat
-    - activity_by_turn: list of activity item lists, one per AI turn
+    Priority:
+    1. Explicit [THINKING] / [RESPONSE] tags (highest priority)
+    2. If the AIMessage also has tool_calls, the text is thinking (intermediate step)
+    3. Otherwise, the text is a response
+
+    Returns (phase, content) where phase is "thinking" or "response".
+    """
+    stripped = text.strip()
+    if stripped.startswith(_THINKING_TAG):
+        return "thinking", stripped[len(_THINKING_TAG) :].strip()
+    if stripped.startswith(_RESPONSE_TAG):
+        return "response", stripped[len(_RESPONSE_TAG) :].strip()
+    if has_tool_calls:
+        return "thinking", text
+    return "response", text
+
+
+_HANDOFF_BACK_KEY = "__is_handoff_back"
+_TRANSFER_PREFIX = "transfer_to_"
+
+
+def _process_messages(raw_messages):
+    """Process raw LangGraph messages into a single ordered list.
+
+    Each item has a "type" field: "human", "ai", "thinking", "tool_call", "tool_result".
+    AI responses include "agent_name" when known. Handoff messages are filtered out.
     """
     messages = []
-    activity_by_turn = []
-    current_activity = []
+    current_agent = None  # track which worker agent is active
 
     for msg in raw_messages:
         if isinstance(msg, HumanMessage):
-            # Flush any pending activity from previous turn
-            if current_activity:
-                activity_by_turn.append(current_activity)
-                current_activity = []
+            current_agent = None
             messages.append({"type": "human", "content": msg.content})
 
         elif isinstance(msg, AIMessage):
+            # Skip handoff-back messages
+            if msg.response_metadata.get(_HANDOFF_BACK_KEY, False):
+                continue
+
             text = _extract_text(msg.content)
             tool_calls = msg.tool_calls or []
 
-            if tool_calls:
-                # Intermediate message: text is "thinking", tool_calls go to activity
-                if text:
-                    current_activity.append({"type": "thinking", "content": text})
-                for tc in tool_calls:
-                    current_activity.append({"type": "tool_call", "name": tc["name"], "args": tc["args"]})
-            elif text:
-                # Final response for this turn (no tool calls)
-                messages.append({"type": "ai", "content": text})
-                activity_by_turn.append(current_activity)
-                current_activity = []
+            # Track current agent from tool calls
+            for tc in tool_calls:
+                if tc["name"].startswith(_TRANSFER_PREFIX):
+                    agent_id = tc["name"][len(_TRANSFER_PREFIX) :]
+                    if agent_id in _agent_names:
+                        current_agent = agent_id
+                elif tc["name"] in _tool_to_agent:
+                    current_agent = _tool_to_agent[tc["name"]]
+
+            agent_name = _agent_names.get(msg.name) or _agent_names.get(current_agent)
+
+            if text:
+                phase, content = _classify_text(text, bool(tool_calls))
+                entry = {"type": "ai" if phase == "response" else "thinking", "content": content}
+                if agent_name:
+                    entry["agent_name"] = agent_name
+                messages.append(entry)
+
+            for tc in tool_calls:
+                if tc["name"].startswith(("transfer_to_", "transfer_back_to_")):
+                    continue
+                messages.append({"type": "tool_call", "name": tc["name"], "args": tc["args"]})
 
         elif isinstance(msg, ToolMessage):
+            # Skip handoff tool messages
+            if msg.response_metadata.get(_HANDOFF_BACK_KEY, False):
+                continue
             content = msg.content
             try:
                 content = json.loads(content)
             except (json.JSONDecodeError, TypeError):
                 pass
-            current_activity.append({"type": "tool_result", "name": msg.name, "content": content})
+            messages.append({"type": "tool_result", "name": msg.name, "content": content})
 
-    # Flush any remaining activity (turn ended without a final text response)
-    if current_activity:
-        activity_by_turn.append(current_activity)
-
-    return messages, activity_by_turn
+    return messages
 
 
 def require_auth(request: Request):
@@ -209,9 +256,12 @@ async def conversation_page(request: Request, conversation_id: str, user: dict =
     conversations = await db.list_conversations(user_id)
 
     # Load messages from LangGraph checkpointer
-    state = await agent.aget_state({"configurable": {"thread_id": conversation_id}})
+    graph = await get_agent_graph(mcp_tools, checkpointer)
+    state = await graph.aget_state({"configurable": {"thread_id": conversation_id}})
     raw_messages = state.values.get("messages", [])
-    messages, activity_by_turn = _process_messages(raw_messages)
+    all_messages = _process_messages(raw_messages)
+    chat_messages = [m for m in all_messages if m["type"] in ("human", "ai")]
+    activity = [m for m in all_messages if m["type"] in ("thinking", "tool_call", "tool_result")]
 
     return templates.TemplateResponse(
         "chat.html",
@@ -220,8 +270,8 @@ async def conversation_page(request: Request, conversation_id: str, user: dict =
             "user_name": get_user_name(request),
             "conversations": conversations,
             "current_conversation": conversation,
-            "messages": messages,
-            "activity_json": json.dumps(activity_by_turn, default=str),
+            "messages": chat_messages,
+            "activity_json": json.dumps(activity, default=str),
         },
     )
 
@@ -238,6 +288,7 @@ class SendMessageResponse(BaseModel):
     conversation_id: str
     response: str
     activity: list[dict]
+    agent_name: str | None = None
 
 
 @app.post("/api/chat", response_model=SendMessageResponse)
@@ -254,8 +305,9 @@ async def send_chat_message(request: Request, body: SendMessageRequest, user: di
         conversation_id = str(uuid.uuid4())
         await db.create_conversation(conversation_id, user_id)
 
-    # Invoke the agent
-    result = await agent.ainvoke(
+    # Invoke the supervisor graph
+    graph = await get_agent_graph(mcp_tools, checkpointer)
+    result = await graph.ainvoke(
         {"messages": [HumanMessage(content=body.message)]},
         config={"configurable": {"thread_id": conversation_id}},
     )
@@ -269,10 +321,11 @@ async def send_chat_message(request: Request, body: SendMessageRequest, user: di
             break
     turn_messages = all_msgs[turn_start:]
 
-    messages, activity_by_turn = _process_messages(turn_messages)
-    ai_msgs = [m for m in messages if m["type"] == "ai"]
+    all_messages = _process_messages(turn_messages)
+    ai_msgs = [m for m in all_messages if m["type"] == "ai"]
     response_text = ai_msgs[-1]["content"] if ai_msgs else ""
-    activity = activity_by_turn[0] if activity_by_turn else []
+    agent_name = ai_msgs[-1].get("agent_name") if ai_msgs else None
+    activity = [m for m in all_messages if m["type"] in ("thinking", "tool_call", "tool_result")]
 
     # Update conversation title if first message
     conversation = await db.get_conversation(conversation_id, user_id)
@@ -286,6 +339,7 @@ async def send_chat_message(request: Request, body: SendMessageRequest, user: di
         conversation_id=conversation_id,
         response=response_text,
         activity=activity,
+        agent_name=agent_name,
     )
 
 
@@ -312,41 +366,17 @@ async def list_tools(user: dict = Depends(require_auth)):
 
 @app.get("/api/conversations/{conversation_id}/messages")
 async def get_conversation_messages(request: Request, conversation_id: str, user: dict = Depends(require_auth)):
-    """Get full message history for a conversation, including tool calls and results."""
+    """Get full ordered message history for a conversation, for debugging and analysis."""
     user_id = get_user_id(request)
     conversation = await db.get_conversation(conversation_id, user_id)
     if not conversation:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
-    state = await agent.aget_state({"configurable": {"thread_id": conversation_id}})
+    graph = await get_agent_graph(mcp_tools, checkpointer)
+    state = await graph.aget_state({"configurable": {"thread_id": conversation_id}})
     raw_messages = state.values.get("messages", [])
 
-    messages = []
-    for msg in raw_messages:
-        if isinstance(msg, HumanMessage):
-            messages.append({"type": "human", "content": msg.content})
-        elif isinstance(msg, AIMessage):
-            content = msg.content
-            if isinstance(content, list):
-                content = "\n".join(
-                    block.get("text", "")
-                    for block in content
-                    if isinstance(block, dict) and block.get("type") == "text"
-                )
-            entry = {"type": "ai", "content": content or ""}
-            if msg.tool_calls:
-                entry["tool_calls"] = [{"name": tc["name"], "args": tc["args"]} for tc in msg.tool_calls]
-            messages.append(entry)
-        elif isinstance(msg, ToolMessage):
-            content = msg.content
-            # Try to parse JSON tool results for readability
-            try:
-                content = json.loads(content)
-            except (json.JSONDecodeError, TypeError):
-                pass
-            messages.append({"type": "tool", "name": msg.name, "content": content})
-
-    return {"conversation_id": conversation_id, "messages": messages}
+    return {"conversation_id": conversation_id, "messages": _process_messages(raw_messages)}
 
 
 def run():

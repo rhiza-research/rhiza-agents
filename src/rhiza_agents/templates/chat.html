@@ -41,6 +41,7 @@
                 {% endif %}
                 {% for msg in messages %}
                 <div class="message {% if msg.type == 'human' %}user{% else %}assistant{% endif %}">
+                    {% if msg.agent_name %}<span class="agent-badge">{{ msg.agent_name }}</span>{% endif %}
                     <div class="message-content needs-render">{{ msg.content | e }}</div>
                 </div>
                 {% endfor %}

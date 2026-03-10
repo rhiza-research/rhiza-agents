@@ -172,6 +172,17 @@ body {
     background: #1e3a5f;
 }
 
+.agent-badge {
+    display: inline-block;
+    font-size: 0.75rem;
+    color: #4a90d9;
+    background: rgba(74, 144, 217, 0.15);
+    padding: 0.15rem 0.5rem;
+    border-radius: 3px;
+    margin-bottom: 0.5rem;
+    font-weight: 500;
+}
+
 .message-content {
     line-height: 1.6;
 }
