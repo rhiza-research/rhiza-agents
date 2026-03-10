@@ -87,23 +87,29 @@ Contains a function `get_default_configs() -> list[AgentConfig]` that returns th
 
 2. **Data Analyst** (`data_analyst`):
    - type: "worker"
-   - system_prompt: "You are a data analyst specializing in weather forecast models and benchmarking. Use your tools to fetch data, run evaluations, and create visualizations. Do not make up data -- always use tools to get real information. Be concise and format data clearly."
+   - system_prompt: Workflow instructions for data gathering + response, with output format rules (see below)
    - tools: ["mcp:sheerwater"]
    - model: "claude-sonnet-4-20250514"
 
 3. **Code Runner** (`code_runner`):
    - type: "worker"
-   - system_prompt: "You are a code execution assistant. You help users write and run Python code for data analysis, computation, and visualization. Write clean, well-commented code."
+   - system_prompt: Workflow instructions for code execution + response, with output format rules (see below)
    - tools: [] (sandbox tool added in Phase 4)
    - model: "claude-sonnet-4-20250514"
    - enabled: true (responds conversationally without tools for now)
 
 4. **Research Assistant** (`research_assistant`):
    - type: "worker"
-   - system_prompt: "You are a research assistant. You answer questions using knowledge from uploaded documents and knowledge bases. Cite your sources when possible. If you don't have relevant documents, say so."
+   - system_prompt: Workflow instructions for retrieval + response, with output format rules (see below)
    - tools: [] (vector store tools added in Phase 5)
    - model: "claude-sonnet-4-20250514"
    - enabled: true (responds conversationally without tools for now)
+
+**Output format tags** — All worker agent prompts include a shared output format section requiring every text message to begin with `[THINKING]` or `[RESPONSE]`:
+- `[THINKING]` — Status updates while gathering data (brief)
+- `[RESPONSE]` — Final answer to the user (no tool calls after this)
+
+These tags are used by `_classify_text()` as the highest-priority signal for separating thinking from response text. Without tags, the fallback heuristic uses `tool_calls` presence (see Phase 1 spec).
 
 Also provide a helper:
 
@@ -210,34 +216,37 @@ This exists so `main.py` has a single function to call. In Phase 3, this functio
 
 **Lifespan changes:**
 - Remove the single `create_react_agent` call
-- Instead, after loading MCP tools and creating the checkpointer, just store them as globals
-- The agent graph is built lazily on first chat request (or eagerly, either works)
+- After loading MCP tools and creating the checkpointer, store them as globals
+- Build `_agent_names` (agent_id → display name) and `_tool_to_agent` (tool_name → agent_id) mappings from the default agent configs and MCP tools — these are used by `_process_messages()` for agent name tracking
+- The agent graph is built lazily on first chat request via `get_agent_graph()`
 
 **POST /api/chat changes:**
 - Before invoking, get the graph: `graph = await get_agent_graph(mcp_tools, checkpointer)`
 - Invoke: `result = await graph.ainvoke({"messages": [HumanMessage(content=message)]}, config={"configurable": {"thread_id": conversation_id}})`
-- Extract response: the last message in `result["messages"]` should be the final AI response
-- Extract which agent responded: check the `name` field on the AI message (LangGraph sets this to the node/agent name)
+- Extract current turn's messages by finding the last `HumanMessage` and slicing from there
+- Process through `_process_messages()` which returns a flat ordered list
+- Filter by type to extract final response and activity data
 
 **Response format changes:**
 
-Add `agent_name` to the response. Note: Phase 1 uses `activity` (not `tool_calls`) in the response — this carries forward:
+Add `agent_name` to the response. The `agent_name` is the display name (e.g., "Data Analyst"), not the agent ID.
 ```json
 {
     "conversation_id": "...",
     "response": "...",
     "activity": [...],
-    "agent_name": "data_analyst"
+    "agent_name": "Data Analyst"
 }
 ```
 
-To determine which agent produced the final response, look at the messages in the result. The last `AIMessage` before the supervisor's final response will have a `name` attribute set to the worker agent's ID. Walk backward through `result["messages"]` to find the last AI message with actual content (not just a handoff).
+**Agent name tracking** — `AIMessage.name` is always `None` after SQLite checkpoint round-trip (despite `create_react_agent` setting it). Agent names are tracked via a `_tool_to_agent` mapping built at startup: MCP tool names are mapped to the agent ID that uses them. During `_process_messages()`, a `current_agent` variable tracks which worker is active based on `transfer_to_X` tool calls and MCP tool usage.
 
-The `activity` field is processed by `_process_messages()` (from Phase 1) and contains thinking text, tool calls, and tool results for the current turn. These are displayed in the activity panel, not in the main chat.
+The `activity` field is processed by `_process_messages()` and contains thinking text, tool calls, and tool results for the current turn. These are displayed in the activity panel, not in the main chat.
 
 **GET /c/{conversation_id} changes:**
-- When extracting messages for display, include the `name` attribute from AIMessages so the UI can show which agent responded
-- Continue using `_process_messages()` to separate main chat from activity panel data
+- Process all messages through `_process_messages()` which returns a flat ordered list
+- Filter `type in ("human", "ai")` for main chat, `type in ("thinking", "tool_call", "tool_result")` for activity panel
+- AI messages include `agent_name` when known (tracked via tool-to-agent mapping)
 
 ### Modifications to `templates/chat.html`
 
@@ -249,7 +258,7 @@ The activity panel already exists from Phase 1 (shows thinking, tool calls, tool
 
 - When rendering a new assistant message from the API response, include the `agent_name` as a badge
 - When rendering server-side messages, look for the `agent_name` data attribute
-- Activity panel rendering (`renderActivityTurn`) already works from Phase 1
+- Activity panel uses `renderActivityItem(item)` to render individual items (thinking, tool_call, tool_result)
 
 ### Modifications to `static/style.css`
 

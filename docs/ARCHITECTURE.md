@@ -114,8 +114,22 @@ enabled: bool        # whether this agent is active
 6. Sub-agent executes with its tools (MCP calls, sandbox execution, RAG retrieval)
 7. Response flows back through supervisor to user
 8. All state persisted by LangGraph checkpointer
-9. `_process_messages()` separates raw messages into main chat (final responses) and activity data (thinking, tool calls, tool results)
-10. Main chat shows only human messages + final AI response; activity panel shows intermediate agent work
+9. `_process_messages()` converts raw LangGraph messages into a single flat ordered list with type fields (`human`, `ai`, `thinking`, `tool_call`, `tool_result`)
+10. Callers filter by type: `("human", "ai")` for main chat, `("thinking", "tool_call", "tool_result")` for the activity panel
+
+### Message Classification
+
+Agent prompts instruct workers to tag output with `[THINKING]` or `[RESPONSE]`. The `_classify_text()` function uses a three-tier priority:
+1. Explicit `[THINKING]`/`[RESPONSE]` tags (highest priority)
+2. `AIMessage` with `tool_calls` → thinking (intermediate step)
+3. Otherwise → response (shown in main chat)
+
+### Agent Name Tracking
+
+`AIMessage.name` is always `None` after SQLite checkpoint serialization round-trip. Agent names are tracked via:
+- `_agent_names`: dict mapping agent_id → display name, built from registry at startup
+- `_tool_to_agent`: dict mapping MCP tool names → agent_id, built at startup
+- `current_agent`: tracked during `_process_messages()` by observing `transfer_to_X` tool calls and MCP tool usage
 
 ### Config Change Flow
 

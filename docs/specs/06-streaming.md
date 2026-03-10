@@ -78,9 +78,7 @@ async def stream_chat_message(
         await db.create_conversation(conversation_id, user_id)
 
     # Build the graph
-    graph = await get_agent_graph(user_id, db, mcp_tools, checkpointer,
-                                   daytona_api_key=config.daytona_api_key,
-                                   vectorstore_manager=vectorstore_manager)
+    graph = await get_agent_graph(mcp_tools, checkpointer, user_id=user_id, db=db)
 
     async def event_generator():
         # Send conversation_id as the first event (needed for new conversations)
@@ -254,7 +252,7 @@ function parseSSEEvents(buffer) {
 
 3. **Stream event handler:**
 
-Tool events (`tool_start`, `tool_end`) should render in the existing activity panel (right-side panel from Phase 1), not as inline indicators on the message. Use the existing `renderActivityTurn()` infrastructure to add activity items in real-time.
+Tool events (`tool_start`, `tool_end`) should render in the existing activity panel (right-side panel from Phase 1), not as inline indicators on the message. Use the existing `renderActivityItem()` function to add activity items in real-time.
 
 ```javascript
 function handleStreamEvent(event, msgDiv) {
@@ -329,8 +327,8 @@ function updateAgentBadge(msgDiv, agentName) {
 
 // Add activity items to the existing activity panel (Phase 1 infrastructure)
 function addActivityItem(item) {
-    // Use the existing renderActivityTurn or append to the current turn
-    // in the activity panel on the right side
+    // Use the existing renderActivityItem() function from Phase 1
+    renderActivityItem(item);
 }
 
 function finalizeMessage(msgDiv) {
@@ -362,7 +360,7 @@ Add styles for streaming state. Note: tool call activity is rendered in the exis
 }
 ```
 
-The activity panel styles (`.activity-item.tool-call`, `.activity-item.tool-result`, etc.) already exist from Phase 1.
+The activity panel styles (`.activity-item.tool-call`, `.activity-item.tool-result`, etc.) and the `renderActivityItem()` function already exist from Phase 1.
 
 ### Considerations
 

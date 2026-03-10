@@ -118,26 +118,33 @@ Key rules:
 
 ### Modifications to `agents/supervisor.py`
 
-Update `get_agent_graph` to accept user_id and load configs from the database:
+Update `get_agent_graph` to accept user_id and load configs from the database. The current signature is `get_agent_graph(mcp_tools, checkpointer, user_configs=None)` — extend it to load user overrides:
 
 ```python
 async def get_agent_graph(
-    user_id: str,
-    db: Database,
     mcp_tools: list,
     checkpointer,
+    user_configs: list[AgentConfig] | None = None,
+    user_id: str | None = None,
+    db: Database | None = None,
 ) -> CompiledGraph:
     """Get the compiled agent graph for a user.
 
-    Loads default configs, overlays user overrides from the database,
-    and builds/caches the resulting graph.
+    If user_id and db are provided, loads overrides from the database.
+    If user_configs is provided directly, uses those.
+    Otherwise uses defaults.
     """
-    defaults = get_default_configs()
-    overrides_rows = await db.get_user_agent_configs(user_id)
-    overrides = [json.loads(row["config_json"]) for row in overrides_rows]
-    effective_configs = merge_configs(defaults, overrides)
-    return await get_or_build_graph(effective_configs, mcp_tools, checkpointer)
+    if user_id and db:
+        defaults = get_default_configs()
+        overrides_rows = await db.get_user_agent_configs(user_id)
+        overrides = [json.loads(row["config_json"]) for row in overrides_rows]
+        configs = merge_configs(defaults, overrides)
+    else:
+        configs = user_configs or get_default_configs()
+    return await get_or_build_graph(configs, mcp_tools, checkpointer)
 ```
+
+**Important: `_tool_to_agent` mapping** — When user configs change which agents have which tools, the `_tool_to_agent` mapping in `main.py` needs to be rebuilt. Currently it's built once at startup from default configs. When per-user configs are introduced, this mapping should be derived from the effective configs used to build the graph, not the global defaults.
 
 ### Modifications to `main.py`
 
@@ -237,7 +244,7 @@ Handler:
 3. Return the default config list
 
 **Modify POST /api/chat:**
-- Change graph retrieval to: `graph = await get_agent_graph(user_id, db, mcp_tools, checkpointer)`
+- Change graph retrieval to: `graph = await get_agent_graph(mcp_tools, checkpointer, user_id=user_id, db=db)`
 
 ### `templates/config_editor.html` -- Config Editor Page
 

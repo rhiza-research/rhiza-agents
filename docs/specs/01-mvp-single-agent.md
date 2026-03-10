@@ -240,7 +240,7 @@ The `activity` field contains the agent's intermediate work for this turn — th
 
 **GET `/api/conversations/{conversation_id}/messages`** — debug/evaluation endpoint:
 
-Returns the full raw message history for a conversation, including all intermediate messages. Useful for evaluating agent performance and debugging tool call sequences.
+Returns the full ordered message history for a conversation, processed through `_process_messages()`. Useful for debugging and evaluating agent performance.
 
 Response body:
 ```json
@@ -248,14 +248,15 @@ Response body:
     "conversation_id": "string",
     "messages": [
         {"type": "human", "content": "..."},
-        {"type": "ai", "content": "...", "tool_calls": [{"name": "...", "args": {...}}]},
-        {"type": "tool", "name": "...", "content": {...}},
-        {"type": "ai", "content": "final response text"}
+        {"type": "thinking", "content": "Let me look up...", "agent_name": "Data Analyst"},
+        {"type": "tool_call", "name": "tool_run_metric", "args": {...}},
+        {"type": "tool_result", "name": "tool_run_metric", "content": {...}},
+        {"type": "ai", "content": "final response text", "agent_name": "Data Analyst"}
     ]
 }
 ```
 
-Unlike the main chat view which filters to only show final responses, this endpoint returns every message in order: human messages, all AI messages (including intermediate ones with tool calls), and all tool result messages. AI messages may have a `tool_calls` array when they triggered tool use. Tool result content is parsed as JSON when possible.
+Uses the same `_process_messages()` as the chat UI and API. Messages are returned as a single flat ordered list with type fields. AI responses and thinking items include `agent_name` when known. Handoff messages are filtered out. Tool result content is parsed as JSON when possible.
 
 **GET `/api/tools`** handler:
 1. Return list of tool names and descriptions from the loaded MCP tools
@@ -303,9 +304,9 @@ Key pieces:
 - On new conversation: update URL to `/c/{id}` via `history.pushState`
 - Render server-side messages (those with `needs-render` class) through marked on page load
 - Activity panel toggle with localStorage persistence
-- `renderActivityTurn(turnIndex, items)` — renders thinking, tool calls, and tool results in the activity panel
-- On page load: parse embedded `<script id="activity-data">` JSON and render each turn
-- On live chat: use `data.activity` from API response to render new activity turn
+- `renderActivityItem(item)` — renders a single activity item (thinking, tool call, or tool result) in the activity panel
+- On page load: parse embedded `<script id="activity-data">` JSON and render each item via `activityData.forEach(item => renderActivityItem(item))`
+- On live chat: use `data.activity` from API response to render new activity items
 
 ### `static/style.css` -- Dark Theme
 
@@ -378,13 +379,20 @@ raw_messages = state.values.get("messages", [])
 
 Each message in the list is a LangChain message object. **Important**: `AIMessage.content` can be either a string or a list of content blocks (e.g., `[{"type": "text", "text": "..."}, {"type": "tool_use", ...}]`). Use a helper function to extract text content from either format.
 
-The `_process_messages(raw_messages)` helper function separates raw messages into two outputs:
-- **Main chat messages**: only `HumanMessage` and the final `AIMessage` (no tool calls) per turn
-- **Activity data**: per-turn lists of intermediate items (thinking text, tool calls, tool results)
+The `_process_messages(raw_messages)` helper function returns a single flat ordered list. Each item has a `type` field (`"human"`, `"ai"`, `"thinking"`, `"tool_call"`, `"tool_result"`). Callers filter by type to separate main chat messages from activity data:
 
-Logic: An `AIMessage` with `tool_calls` is intermediate — its text becomes a "thinking" activity item, and its tool calls become "tool_call" items. A `ToolMessage` becomes a "tool_result" item. The `AIMessage` without tool calls is the final response shown in the main chat.
+```python
+all_messages = _process_messages(raw_messages)
+chat_messages = [m for m in all_messages if m["type"] in ("human", "ai")]
+activity = [m for m in all_messages if m["type"] in ("thinking", "tool_call", "tool_result")]
+```
 
-This separation keeps the main chat clean (just human questions and AI answers) while the activity panel shows the agent's behind-the-scenes work.
+Classification logic uses `_classify_text(text, has_tool_calls)` with three-tier priority:
+1. Explicit `[THINKING]` / `[RESPONSE]` tags in agent output (highest priority)
+2. If the `AIMessage` has `tool_calls`, its text is classified as `"thinking"`
+3. Otherwise, the text is classified as `"ai"` (response)
+
+This keeps the main chat clean (just human questions and AI answers) while the activity panel shows the agent's behind-the-scenes work.
 
 ## Reference Files
 

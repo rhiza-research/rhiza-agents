@@ -203,11 +203,11 @@ AgentConfig(
 
 ### Modifications to `agents/graph.py`
 
-Update the tool resolution logic in `build_graph` to handle `sandbox:daytona`:
+Update the existing `_resolve_tools` function in `graph.py` to handle `sandbox:daytona`. The function already exists as a standalone function (not a method):
 
 ```python
-async def _resolve_tools(config: AgentConfig, mcp_tools: list, daytona_api_key: str) -> list:
-    """Resolve tool identifiers to actual LangChain tool objects."""
+def _resolve_tools(config: AgentConfig, mcp_tools: list, daytona_api_key: str = "") -> list:
+    """Resolve tool identifiers to actual tool objects."""
     tools = []
     for tool_id in config.tools:
         if tool_id == "mcp:sheerwater":
@@ -217,6 +217,8 @@ async def _resolve_tools(config: AgentConfig, mcp_tools: list, daytona_api_key: 
                 from .tools.sandbox import create_sandbox_tool
                 tools.append(create_sandbox_tool(daytona_api_key))
             # If no API key, silently skip -- agent works without tools
+        else:
+            logger.info("Tool type %s not yet implemented, skipping", tool_id)
     return tools
 ```
 

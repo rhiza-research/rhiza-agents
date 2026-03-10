@@ -78,6 +78,18 @@ src/rhiza_agents/
   static/           # CSS, JS
 ```
 
+## Phase Completion Process
+
+After completing implementation for a phase, before considering the phase done:
+
+1. **Update the phase spec** (`docs/specs/XX-*.md`) to reflect what was actually built. Document deviations from the original spec: workarounds, changed approaches, discovered constraints (e.g., checkpoint serialization losing `msg.name`).
+2. **Update earlier phase specs** if the implementation changed shared interfaces (e.g., `_process_messages()` return format).
+3. **Update future phase specs** that reference changed interfaces (e.g., function signatures, JS function names, API response formats). These specs are used as implementation guides, so they must reference the correct current APIs.
+4. **Update `docs/ARCHITECTURE.md`** with any new architectural patterns, data flows, or constraints discovered during implementation.
+5. **Commit the doc updates** as a separate commit from the implementation.
+
+The goal is that specs always reflect the current state of the code, not the original plan. Future phases build on what was actually implemented, not what was originally specified.
+
 ## Reference Files (in sibling repos)
 
 These files contain patterns to reuse:
