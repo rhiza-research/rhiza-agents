@@ -345,3 +345,25 @@ Add styles for the config editor:
 - **No streaming** -- Phase 6.
 - **No multi-user config isolation testing** -- configs are per-user via `user_id`, but don't add complex access control. Each user sees only their own overrides.
 - **Do not modify the graph caching to be per-user keyed** -- the cache is keyed by config hash, which naturally handles per-user uniqueness (different config = different hash). If two users have the same effective config, they share the cached graph, which is fine.
+
+## Implementation Notes (Post-Implementation)
+
+### Key changes to `main.py` beyond spec
+
+- **`_build_name_mappings(configs)`**: New helper that builds both `agent_names` and `tool_to_agent` dicts from a config list, enabling per-user name/tool tracking.
+- **`_process_messages()` signature changed**: Now accepts optional `agent_names` and `tool_to_agent_map` parameters to support per-user effective configs. Falls back to the global defaults (built at startup) if not provided.
+- **`_get_effective_configs(user_id)`**: Async helper that loads defaults + user overrides from DB and merges them. Used by all routes that need the user's current config.
+- **`_configs_to_api_response(configs)`**: Converts `AgentConfig` list to API response format with `is_default` field.
+- **`_AGENT_ID_PATTERN`**: Regex pattern for validating agent IDs (`^[a-zA-Z][a-zA-Z0-9_]*$`).
+
+### GET /api/agents includes disabled agents
+
+The endpoint returns both enabled (effective) configs AND disabled agents that have overrides in the DB. This allows the UI to show disabled agents with strikethrough so users can re-enable them.
+
+### Graph cache invalidation
+
+All config mutations call `invalidate_graph_cache()` with no arguments (clears entire cache). This is simple and correct since the cache is small. Per-entry invalidation is available but not needed.
+
+### Conversation page and messages API use per-user configs
+
+`GET /c/{conversation_id}` and `GET /api/conversations/{conversation_id}/messages` now call `get_agent_graph(mcp_tools, checkpointer, user_id=user_id, db=db)` and build per-user name mappings for accurate agent name tracking in `_process_messages()`.

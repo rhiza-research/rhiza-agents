@@ -241,6 +241,8 @@ Add `agent_name` to the response. The `agent_name` is the display name (e.g., "D
 
 **Agent name tracking** — `AIMessage.name` is always `None` after SQLite checkpoint round-trip (despite `create_react_agent` setting it). Agent names are tracked via a `_tool_to_agent` mapping built at startup: MCP tool names are mapped to the agent ID that uses them. During `_process_messages()`, a `current_agent` variable tracks which worker is active based on `transfer_to_X` tool calls and MCP tool usage.
 
+**Note (Phase 3 update):** `_process_messages()` was extended with optional `agent_names` and `tool_to_agent_map` parameters to support per-user configs. When called without these params, it falls back to the global startup defaults. `_build_name_mappings(configs)` builds both mappings from an effective config list.
+
 The `activity` field is processed by `_process_messages()` and contains thinking text, tool calls, and tool results for the current turn. These are displayed in the activity panel, not in the main chat.
 
 **GET /c/{conversation_id} changes:**

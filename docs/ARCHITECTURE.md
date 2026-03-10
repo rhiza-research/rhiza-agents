@@ -127,9 +127,12 @@ Agent prompts instruct workers to tag output with `[THINKING]` or `[RESPONSE]`. 
 ### Agent Name Tracking
 
 `AIMessage.name` is always `None` after SQLite checkpoint serialization round-trip. Agent names are tracked via:
-- `_agent_names`: dict mapping agent_id → display name, built from registry at startup
-- `_tool_to_agent`: dict mapping MCP tool names → agent_id, built at startup
+- `_agent_names`: dict mapping agent_id → display name, built from registry at startup (global defaults)
+- `_tool_to_agent`: dict mapping MCP tool names → agent_id, built at startup (global defaults)
+- `_build_name_mappings(configs)`: helper that builds both mappings from an effective config list (used per-user when user overrides exist)
 - `current_agent`: tracked during `_process_messages()` by observing `transfer_to_X` tool calls and MCP tool usage
+
+`_process_messages()` accepts optional `agent_names` and `tool_to_agent_map` params. When called with per-user effective configs, these override the global defaults.
 
 ### Config Change Flow
 

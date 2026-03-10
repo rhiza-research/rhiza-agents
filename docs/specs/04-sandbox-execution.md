@@ -236,7 +236,7 @@ async def build_graph(
 ### Modifications to `main.py`
 
 1. Add `DAYTONA_API_KEY` to the config loaded at startup
-2. Pass `daytona_api_key=config.daytona_api_key` through to `get_agent_graph` and then to `build_graph`
+2. Pass `daytona_api_key=config.daytona_api_key` through to `get_agent_graph` and then to `build_graph`. Note: after Phase 3, `get_agent_graph` signature is `get_agent_graph(mcp_tools, checkpointer, user_configs=None, user_id=None, db=None)` and it may need a `daytona_api_key` parameter added, which it passes through to `get_or_build_graph` and `build_graph`.
 3. Start the sandbox cleanup background task in the lifespan:
 
 ```python

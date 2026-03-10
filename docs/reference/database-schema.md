@@ -96,16 +96,17 @@ Stores per-user, per-agent configuration as a JSON blob. This allows users to cu
 
 **Disabling agents**: To disable an agent, the config JSON includes `"enabled": false`. This acts as a tombstone -- the agent exists in the registry but is excluded from the user's supervisor graph.
 
-**Example config_json**:
+**Example config_json** (matches `AgentConfig` model fields):
 ```json
 {
-  "agent_id": "sheerwater_agent",
-  "display_name": "Weather Data Agent",
-  "description": "Analyzes forecast benchmarking data",
-  "enabled": true,
+  "id": "data_analyst",
+  "name": "Data Analyst",
+  "type": "worker",
+  "system_prompt": "You are a data analyst specializing in weather forecast models...",
   "model": "claude-sonnet-4-20250514",
-  "system_prompt": "You analyze weather forecast data.",
-  "tool_ids": ["mcp:sheerwater"]
+  "tools": ["mcp:sheerwater"],
+  "vectorstore_ids": [],
+  "enabled": true
 }
 ```
 
