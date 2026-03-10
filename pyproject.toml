@@ -1,7 +1,7 @@
 [project]
 name = "rhiza-agents"
 version = "0.1.0"
-description = "Multi-agent chat platform with user-editable agent configs, MCP tools, sandboxed execution, and vector store integration"
+description = "Multi-agent chat platform built on LangChain Deep Agents and LangGraph"
 readme = "README.md"
 requires-python = ">=3.12"
 license = {text = "MIT"}
@@ -10,40 +10,17 @@ authors = [
 ]
 
 dependencies = [
-    "fastapi",
-    "uvicorn[standard]",
-    "httpx",
-    "httpx-sse",
-    "authlib",
-    "itsdangerous",
-    "python-multipart",
-    "jinja2",
-    # LangGraph + LangChain
-    "langgraph>=1.0.10",
-    "langgraph-supervisor>=0.0.31",
+    "deepagents>=0.4.9",
     "langchain-anthropic>=1.3.4",
     "langchain-mcp-adapters>=0.2.1",
-    "langgraph-checkpoint-sqlite>=3.0.3",
+    "langgraph",
     "langsmith",
-    # App database
-    "databases[aiosqlite]",
 ]
 
 [project.optional-dependencies]
-postgres = [
-    "databases[asyncpg]",
-    "langgraph-checkpoint-postgres>=3.0.4",
-]
 sandbox = [
     "daytona-sdk>=0.149.0",
 ]
-vectorstore = [
-    "langchain-chroma>=1.1.0",
-    "langchain-text-splitters",
-]
-
-[project.scripts]
-rhiza-agents = "rhiza_agents.main:run"
 
 [build-system]
 requires = ["hatchling"]

@@ -12,7 +12,7 @@ imagePullSecrets: []
 # Service configuration
 service:
   type: ClusterIP
-  port: 8080
+  port: 8123
 
 # Resource configuration
 resources:
@@ -31,24 +31,18 @@ ingress:
   hosts: []
   tls: []
 
-# Persistent volume for SQLite database, LangGraph checkpoints, and ChromaDB
+# Persistent volume for LangGraph Server data
 persistence:
   size: 5Gi
   storageClassName: standard-rwo
 
 # Name of the Kubernetes secret containing sensitive env vars.
 # This secret is created by Terraform, NOT by this chart.
-# Keys: KEYCLOAK_CLIENT_SECRET, ANTHROPIC_API_KEY, DAYTONA_API_KEY, SECRET_KEY, LANGSMITH_API_KEY
+# Keys: ANTHROPIC_API_KEY, DAYTONA_API_KEY, LANGCHAIN_API_KEY
 secretName: rhiza-agents-secrets
 
 # Non-secret environment variables
 env:
-  KEYCLOAK_URL: ""
-  KEYCLOAK_PUBLIC_URL: ""
-  KEYCLOAK_REALM: ""
-  KEYCLOAK_CLIENT_ID: ""
   MCP_SERVER_URL: ""
-  BASE_URL: ""
-  # DATABASE_URL is set automatically to point at the PVC-mounted SQLite file
-  # CHECKPOINT_DB_PATH is set automatically to point at the PVC-mounted checkpoints file
-  # CHROMA_PERSIST_DIR is set automatically to point at the PVC-mounted chroma directory
+  LANGCHAIN_TRACING_V2: "true"
+  LANGCHAIN_PROJECT: "rhiza-agents"

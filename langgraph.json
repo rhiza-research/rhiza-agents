@@ -1,0 +1,5 @@
+{
+  "graphs": {
+    "agent": "./src/rhiza_agents/agent.py:graph"
+  }
+}

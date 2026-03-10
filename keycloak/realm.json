@@ -9,8 +9,8 @@
       "enabled": true,
       "publicClient": false,
       "secret": "dev-secret",
-      "redirectUris": ["http://localhost:8080/*"],
-      "webOrigins": ["http://localhost:8080"],
+      "redirectUris": ["http://localhost:3000/*"],
+      "webOrigins": ["http://localhost:3000"],
       "standardFlowEnabled": true,
       "directAccessGrantsEnabled": true
     }

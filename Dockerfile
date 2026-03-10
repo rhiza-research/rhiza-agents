@@ -12,13 +12,14 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 # Copy project files
 COPY pyproject.toml uv.lock ./
 COPY src ./src
+COPY langgraph.json ./
 
-# Install dependencies (include sandbox and vectorstore extras)
-RUN uv sync --frozen --no-dev --extra sandbox --extra vectorstore
+# Install dependencies
+RUN uv sync --frozen --no-dev --extra sandbox
 
 # Set git SHA and build timestamp as environment variables
 ENV GIT_SHA=${GIT_SHA}
 ENV BUILD_TIMESTAMP=${BUILD_TIMESTAMP}
 
-# Run the app
-CMD ["uv", "run", "rhiza-agents"]
+# LangGraph Server serves the agent graph
+CMD ["uv", "run", "langgraph", "up", "--host", "0.0.0.0", "--port", "8123"]

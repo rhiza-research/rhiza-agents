@@ -1,6 +1,6 @@
 apiVersion: v2
 name: rhiza-agents
-description: Multi-agent chat platform with user-editable agent configs
+description: Multi-agent chat platform built on Deep Agents and LangGraph
 
 type: application
 

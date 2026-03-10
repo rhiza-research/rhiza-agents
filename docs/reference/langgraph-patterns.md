@@ -1,178 +1,57 @@
-# LangGraph Patterns Reference
+# LangGraph & Deep Agents Patterns Reference
 
-This document covers the LangGraph API patterns used in rhiza-agents. All version numbers and API signatures are pinned to the versions used in this project.
+This document covers the LangGraph and Deep Agents API patterns used in rhiza-agents.
 
 ## Package Versions
 
-| Package | Version |
+| Package | Purpose |
 |---------|---------|
-| `langgraph` | 1.0.10 |
-| `langgraph-supervisor` | 0.0.31 |
-| `langchain-anthropic` | 1.3.4 |
-| `langgraph-checkpoint-sqlite` | 3.0.3 |
+| `deepagents` | `create_deep_agent()` — agent harness with planning, subagents, context management |
+| `langgraph` | Graph framework underlying Deep Agents |
+| `langchain-anthropic` | Claude model binding |
 
 ---
 
-## Core Concepts: StateGraph
+## create_deep_agent (deepagents)
 
-LangGraph models agent workflows as directed graphs. The fundamental building blocks are:
-
-- **State**: A typed dictionary (usually `TypedDict` or `MessagesState`) that flows through the graph. Each node receives state and returns updates to it.
-- **Nodes**: Python functions (sync or async) that receive state and return partial state updates.
-- **Edges**: Connections between nodes. Can be unconditional (always follow) or conditional (route based on state).
-- **Compilation**: Calling `.compile()` on a `StateGraph` produces a `CompiledGraph` that can be invoked.
-
-### StateGraph Basics
+`create_deep_agent` creates a deep agent with built-in planning, subagent spawning, todo list capabilities, and file operations. It returns a compiled LangGraph graph.
 
 ```python
-from langgraph.graph import StateGraph, MessagesState
-
-# MessagesState is the standard state schema. It contains:
-#   messages: list[BaseMessage]
-# where BaseMessage is from langchain_core.messages.
-# Messages are automatically merged (not replaced) when a node returns
-# {"messages": [new_message]}.
-
-graph_builder = StateGraph(MessagesState)
-
-# Add nodes (functions that take state and return partial state updates)
-def my_node(state: MessagesState) -> dict:
-    # Process state["messages"]
-    return {"messages": [AIMessage(content="response")]}
-
-graph_builder.add_node("my_node", my_node)
-
-# Add edges
-graph_builder.add_edge("__start__", "my_node")
-graph_builder.add_edge("my_node", "__end__")
-
-# Compile
-graph = graph_builder.compile()
-```
-
-### MessagesState
-
-`MessagesState` is imported from `langgraph.graph`:
-
-```python
-from langgraph.graph import MessagesState
-```
-
-It is a `TypedDict` with a single key:
-
-```python
-class MessagesState(TypedDict):
-    messages: Annotated[list[BaseMessage], add_messages]
-```
-
-The `add_messages` annotation means that when a node returns `{"messages": [...]}`, the new messages are **appended** to the existing list (not replaced). This is how conversation history accumulates.
-
----
-
-## create_react_agent (Prebuilt)
-
-`create_react_agent` creates a tool-calling agent from a model and a list of tools. It returns a **compiled graph** (not a StateGraph).
-
-```python
-from langgraph.prebuilt import create_react_agent
+from deepagents import create_deep_agent
 from langchain_anthropic import ChatAnthropic
-from langchain_core.tools import tool
 
 model = ChatAnthropic(model="claude-sonnet-4-20250514")
 
-@tool
-def my_tool(query: str) -> str:
-    """Tool description shown to the LLM."""
-    return "result"
-
-agent = create_react_agent(
-    model=model,           # Required. The LLM to use.
-    tools=[my_tool],       # Required. List of LangChain BaseTool objects.
-    name="my_agent",       # Optional. Name used for identification in multi-agent setups.
-    prompt="You are a helpful assistant.",  # Optional. System prompt (state_modifier).
+graph = create_deep_agent(
+    model=model,
+    tools=[...],           # LangChain BaseTool objects
+    system_prompt="...",   # System prompt for the agent
+    subagents={...},       # Optional subagent definitions
+    middleware=[...],      # Optional middleware (retry, tool limits, summarization)
 )
 ```
 
-### Parameters
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `model` | `BaseChatModel` | Yes | The LLM (e.g., `ChatAnthropic`) |
-| `tools` | `list[BaseTool]` | Yes | LangChain tool objects the agent can call |
-| `name` | `str` | No | Agent name, used as identifier in supervisor setups |
-| `prompt` | `str` | No | System prompt prepended to messages (acts as `state_modifier`) |
-
 ### Return Value
 
-Returns a `CompiledGraph`. This is already compiled -- do **not** call `.compile()` on it again.
+Returns a compiled LangGraph graph. This is what LangGraph Server imports and serves via `langgraph.json`.
 
-### Usage
+### Key Features (built-in)
 
-```python
-result = agent.invoke({"messages": [HumanMessage(content="What's the weather?")]})
-# result["messages"] contains the full conversation including tool calls and responses
-```
+- **Planning**: The agent can break down complex requests into steps
+- **Subagents**: Delegate tasks to specialized subagents for context isolation
+- **Context management**: Built-in handling of conversation context
+- **File operations**: File read/write capabilities out of the box
 
 ---
 
-## create_supervisor (langgraph-supervisor 0.0.31)
-
-`create_supervisor` creates a supervisor agent that orchestrates multiple sub-agents. It returns a **StateGraph** (not compiled).
-
-```python
-from langgraph_supervisor import create_supervisor
-from langchain_anthropic import ChatAnthropic
-
-supervisor_model = ChatAnthropic(model="claude-sonnet-4-20250514")
-
-# Each agent must be a compiled graph (e.g., from create_react_agent)
-weather_agent = create_react_agent(model=model, tools=[weather_tool], name="weather_agent")
-data_agent = create_react_agent(model=model, tools=[data_tool], name="data_agent")
-
-supervisor_graph = create_supervisor(
-    agents=[weather_agent, data_agent],  # Required. List of compiled agent graphs.
-    model=supervisor_model,              # Required. LLM for the supervisor.
-    prompt="You route requests to the appropriate agent.",  # Optional. Supervisor system prompt.
-    output_mode="full_history",          # Optional. "full_history" preserves all messages.
-    add_handoff_back_messages=True,       # Optional. Adds "back to supervisor" messages.
-)
-```
-
-### Parameters
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `agents` | `list[CompiledGraph]` | Yes | Sub-agent compiled graphs (from `create_react_agent`) |
-| `model` | `BaseChatModel` | Yes | LLM for the supervisor's routing decisions |
-| `prompt` | `str` | No | System prompt for the supervisor |
-| `output_mode` | `str` | No | `"full_history"` to preserve all messages from sub-agents |
-| `add_handoff_back_messages` | `bool` | No | If `True`, adds messages when control returns to supervisor |
-
-### Return Value
-
-Returns a **`StateGraph`** (not compiled). You must call `.compile()` yourself:
-
-```python
-from langgraph.checkpoint.sqlite import SqliteSaver
-
-checkpointer = SqliteSaver.from_conn_string("path/to/checkpoints.db")
-compiled_supervisor = supervisor_graph.compile(checkpointer=checkpointer)
-```
-
-### Important: compile() is where you attach the checkpointer
-
-The checkpointer is passed to `.compile()`, not to `create_supervisor()`. This is a key difference from `create_react_agent` which returns an already-compiled graph.
-
----
-
-## ChatAnthropic (langchain-anthropic 1.3.4)
+## ChatAnthropic (langchain-anthropic)
 
 ```python
 from langchain_anthropic import ChatAnthropic
 
 model = ChatAnthropic(
     model="claude-sonnet-4-20250514",  # Required. Model identifier.
-    api_key="sk-...",                  # Optional if ANTHROPIC_API_KEY env var is set.
+    # api_key is read from ANTHROPIC_API_KEY env var automatically.
 )
 ```
 
@@ -187,114 +66,27 @@ model = ChatAnthropic(
 
 ---
 
-## SqliteSaver (langgraph-checkpoint-sqlite 3.0.3)
+## LangGraph Server & Checkpointing
 
-The checkpointer persists graph state (including all messages) across invocations. Use the **sync** version.
+In the new architecture, LangGraph Server (self-hosted) handles:
+- **Checkpointing**: PostgreSQL-backed persistence of graph state and message history
+- **Thread management**: Thread creation, listing, deletion via REST API
+- **Streaming**: SSE-based streaming of agent responses
+- **Task queue**: Redis-backed async run execution
 
-```python
-from langgraph.checkpoint.sqlite import SqliteSaver
+The agent code does **not** manage checkpointing directly. LangGraph Server handles this when it imports and serves the graph defined in `langgraph.json`.
 
-# Create from file path (sync version)
-checkpointer = SqliteSaver.from_conn_string("path/to/checkpoints.db")
+### langgraph.json
 
-# Pass to compile()
-compiled_graph = supervisor_graph.compile(checkpointer=checkpointer)
-```
-
-### Key Points
-
-- Use `SqliteSaver.from_conn_string("path/to/db")` -- takes a plain file path, not a `sqlite:///` URL.
-- Use the **sync** version (`SqliteSaver`), not the async version (`AsyncSqliteSaver`).
-- The checkpointer manages its own schema -- do not create tables manually.
-- For future Postgres migration: swap to `PostgresSaver` from `langgraph.checkpoint.postgres` (package: `langgraph-checkpoint-postgres`).
-
----
-
-## Graph Invocation
-
-### Basic Invocation
-
-```python
-from langchain_core.messages import HumanMessage
-
-result = compiled_graph.invoke(
-    {"messages": [HumanMessage(content="What is the forecast for Kenya?")]},
-    config={"configurable": {"thread_id": "conversation-uuid-here"}}
-)
-
-# result["messages"] is the full message list including the new response
-assistant_response = result["messages"][-1].content
-```
-
-### The config Parameter
-
-The `config` dict is required for checkpointed graphs. The key field is:
-
-```python
-config = {
-    "configurable": {
-        "thread_id": "unique-conversation-id"
-    }
+```json
+{
+  "graphs": {
+    "agent": "./src/rhiza_agents/agent.py:graph"
+  }
 }
 ```
 
-### How thread_id Works with Checkpointing
-
-- **Same thread_id = same conversation**. Messages persist across invocations.
-- When you invoke a graph with a thread_id that has prior state, the checkpointer loads all previous messages before processing the new input.
-- You do **not** need to pass previous messages manually -- the checkpointer handles this.
-- A new thread_id starts a fresh conversation with no history.
-
-Example of multi-turn conversation:
-
-```python
-thread_id = "abc-123"
-config = {"configurable": {"thread_id": thread_id}}
-
-# First message
-result1 = graph.invoke(
-    {"messages": [HumanMessage(content="What's the weather in Nairobi?")]},
-    config=config
-)
-
-# Second message -- previous messages are loaded automatically by checkpointer
-result2 = graph.invoke(
-    {"messages": [HumanMessage(content="How about Mombasa?")]},
-    config=config
-)
-# result2["messages"] contains ALL messages from both turns
-```
-
-### Extracting the Response
-
-After invocation, the full message history is in `result["messages"]`. The last message is typically the final assistant response:
-
-```python
-from langchain_core.messages import AIMessage
-
-last_message = result["messages"][-1]
-if isinstance(last_message, AIMessage):
-    response_text = last_message.content
-```
-
----
-
-## Caching Compiled Graphs
-
-Compiled graphs are cheap to create but can be cached if you want to avoid recompilation:
-
-```python
-from functools import lru_cache
-
-@lru_cache(maxsize=None)
-def get_compiled_graph(config_hash: str):
-    """Cache compiled graph per configuration."""
-    # Build and compile graph based on config
-    supervisor = create_supervisor(agents=[...], model=model, ...)
-    return supervisor.compile(checkpointer=checkpointer)
-```
-
-The config_hash should capture anything that affects graph structure (e.g., which agents are enabled, which tools are available). Thread-level config (like thread_id) is passed at invocation time, not compilation time.
+This tells LangGraph Server where to find the compiled graph object.
 
 ---
 
@@ -311,68 +103,19 @@ from langchain_core.messages import (
 
 ---
 
-## Error Handling
+## RunnableConfig for Tool Context
 
-LangGraph does not automatically retry on LLM errors. Wrap invocations if you need retry logic:
+Tools can access graph configuration (e.g., `thread_id`) via `RunnableConfig` injection:
 
 ```python
 from langchain_core.runnables import RunnableConfig
-
-try:
-    result = graph.invoke(
-        {"messages": [HumanMessage(content="...")]},
-        config={"configurable": {"thread_id": thread_id}}
-    )
-except Exception as e:
-    # Handle LLM errors, tool errors, etc.
-    pass
-```
-
----
-
-## Complete Example: Supervisor with Checkpointing
-
-```python
-from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
-from langgraph.checkpoint.sqlite import SqliteSaver
-from langgraph.prebuilt import create_react_agent
-from langgraph_supervisor import create_supervisor
 
-# 1. Create the model
-model = ChatAnthropic(model="claude-sonnet-4-20250514")
-
-# 2. Define tools
 @tool
-def get_forecast(region: str) -> str:
-    """Get weather forecast for a region."""
-    return f"Sunny in {region}"
-
-# 3. Create sub-agents (returns CompiledGraph)
-weather_agent = create_react_agent(
-    model=model,
-    tools=[get_forecast],
-    name="weather_agent",
-    prompt="You provide weather forecasts.",
-)
-
-# 4. Create supervisor (returns StateGraph, NOT compiled)
-supervisor = create_supervisor(
-    agents=[weather_agent],
-    model=model,
-    prompt="Route weather questions to the weather agent.",
-    output_mode="full_history",
-    add_handoff_back_messages=True,
-)
-
-# 5. Compile with checkpointer
-checkpointer = SqliteSaver.from_conn_string("/data/checkpoints.db")
-graph = supervisor.compile(checkpointer=checkpointer)
-
-# 6. Invoke
-result = graph.invoke(
-    {"messages": [HumanMessage(content="What's the forecast for Kenya?")]},
-    config={"configurable": {"thread_id": "conv-001"}}
-)
+async def my_tool(arg: str, *, config: RunnableConfig) -> str:
+    """Tool that needs access to the thread context."""
+    thread_id = config.get("configurable", {}).get("thread_id", "default")
+    # ... use thread_id for per-conversation state
 ```
+
+This pattern is used by the Daytona sandbox tool to maintain one sandbox per conversation.

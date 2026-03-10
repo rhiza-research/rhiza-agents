@@ -120,20 +120,18 @@ def cleanup_idle_sandboxes():
 
 ## Wrapping as a LangChain Tool
 
-The code execution sandbox should be exposed as a LangChain tool that agents can call.
-
-### Using @tool Decorator
+The sandbox tool uses `RunnableConfig` injection to access the `thread_id` for per-conversation sandbox management:
 
 ```python
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 
 @tool
-def run_python_code(code: str) -> str:
+async def execute_python_code(code: str, *, config: RunnableConfig) -> str:
     """Execute Python code in a sandboxed environment and return the output.
 
     Use this tool to run data analysis, computations, or any Python code.
-    The sandbox persists across calls within the same conversation, so you
-    can build on previous results, installed packages, and created files.
+    The sandbox persists across calls within the same conversation.
 
     Args:
         code: Python code to execute.
@@ -141,55 +139,13 @@ def run_python_code(code: str) -> str:
     Returns:
         The stdout/stderr output of the code execution, or an error message.
     """
-    # thread_id must be injected from the graph config
-    sandbox = get_or_create_sandbox(current_thread_id)
+    thread_id = config.get("configurable", {}).get("thread_id", "default")
+    sandbox = get_or_create_sandbox(thread_id)
     response = sandbox.process.code_run(code)
 
     if response.exit_code != 0:
         return f"Error (exit code {response.exit_code}):\n{response.result}"
     return response.result
-```
-
-### Using BaseTool Subclass
-
-For more control (e.g., accessing graph config to get `thread_id`):
-
-```python
-from langchain_core.tools import BaseTool
-from pydantic import BaseModel, Field
-
-
-class CodeExecutionInput(BaseModel):
-    code: str = Field(description="Python code to execute")
-
-
-class CodeExecutionTool(BaseTool):
-    name: str = "run_python_code"
-    description: str = (
-        "Execute Python code in a sandboxed environment. "
-        "The sandbox persists within the conversation."
-    )
-    args_schema: type = CodeExecutionInput
-
-    # Instance state
-    daytona_client: Daytona
-    active_sandboxes: dict  # thread_id -> Sandbox
-
-    def _run(self, code: str, config: dict | None = None) -> str:
-        thread_id = config.get("configurable", {}).get("thread_id", "default")
-
-        if thread_id not in self.active_sandboxes:
-            sandbox = self.daytona_client.create(
-                CreateSandboxBaseParams(language="python")
-            )
-            self.active_sandboxes[thread_id] = sandbox
-
-        sandbox = self.active_sandboxes[thread_id]
-        response = sandbox.process.code_run(code)
-
-        if response.exit_code != 0:
-            return f"Error (exit code {response.exit_code}):\n{response.result}"
-        return response.result
 ```
 
 ---
@@ -209,39 +165,26 @@ daytona = Daytona(DaytonaConfig(api_key=os.environ["DAYTONA_API_KEY"]))
 
 ---
 
-## Integration with LangGraph Agents
+## Integration with Deep Agents
 
-The code execution tool is passed to agents like any other tool:
+The sandbox tool is given to a `code_runner` subagent in the deep agent configuration. This keeps code execution in a separate context from the main agent:
 
 ```python
-from langgraph.prebuilt import create_react_agent
+from deepagents import create_deep_agent
 from langchain_anthropic import ChatAnthropic
 
 model = ChatAnthropic(model="claude-sonnet-4-20250514")
 
-code_tool = CodeExecutionTool(
-    daytona_client=daytona,
-    active_sandboxes={},
-)
-
-code_agent = create_react_agent(
+graph = create_deep_agent(
     model=model,
-    tools=[code_tool],
-    name="code_agent",
-    prompt="You are a data analysis agent. Use the run_python_code tool to execute Python code for analysis.",
+    tools=[execute_python_code],
+    subagents={"code_runner": {
+        "tools": [execute_python_code],
+        "system_prompt": "You execute Python code for data analysis.",
+    }},
+    system_prompt="You analyze weather forecast data.",
 )
 ```
-
----
-
-## LangChain Deep Agents Reference
-
-LangChain Deep Agents has an official Daytona integration that follows a similar pattern. The rhiza-agents integration adapts this for plain LangGraph rather than using the Deep Agents framework directly.
-
-Key differences from the Deep Agents pattern:
-- We use `create_react_agent` and `create_supervisor` instead of Deep Agents' orchestration
-- Sandbox lifecycle is managed by the application, not by a framework
-- The tool interface is a simple `BaseTool` subclass rather than a specialized executor
 
 ---
 
@@ -260,11 +203,8 @@ Currently using Daytona's hosted service. When Daytona's Kubernetes deployment m
 import os
 
 from daytona_sdk import Daytona, DaytonaConfig, CreateSandboxBaseParams
-from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import HumanMessage
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
-from langgraph.checkpoint.sqlite import SqliteSaver
-from langgraph.prebuilt import create_react_agent
 
 # Initialize Daytona
 daytona = Daytona(DaytonaConfig(api_key=os.environ["DAYTONA_API_KEY"]))
@@ -272,14 +212,13 @@ sandboxes: dict[str, object] = {}
 
 
 @tool
-def run_python_code(code: str) -> str:
+async def execute_python_code(code: str, *, config: RunnableConfig) -> str:
     """Execute Python code in a sandboxed environment.
 
     Args:
         code: Python code to execute.
     """
-    # In practice, thread_id comes from the graph's RunnableConfig
-    thread_id = "default"
+    thread_id = config.get("configurable", {}).get("thread_id", "default")
     if thread_id not in sandboxes:
         sandboxes[thread_id] = daytona.create(
             CreateSandboxBaseParams(language="python")
@@ -289,21 +228,4 @@ def run_python_code(code: str) -> str:
     if response.exit_code != 0:
         return f"Error (exit code {response.exit_code}):\n{response.result}"
     return response.result
-
-
-# Build agent
-model = ChatAnthropic(model="claude-sonnet-4-20250514")
-agent = create_react_agent(
-    model=model,
-    tools=[run_python_code],
-    name="code_agent",
-    prompt="You execute Python code to help with data analysis.",
-)
-
-# Invoke
-checkpointer = SqliteSaver.from_conn_string("/data/checkpoints.db")
-result = agent.invoke(
-    {"messages": [HumanMessage(content="Calculate the first 10 Fibonacci numbers")]},
-    config={"configurable": {"thread_id": "demo"}},
-)
 ```

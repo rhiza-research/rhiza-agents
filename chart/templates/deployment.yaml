@@ -6,8 +6,6 @@ metadata:
     {{- include "rhiza-agents.labels" . | nindent 4 }}
 spec:
   replicas: 1
-  strategy:
-    type: Recreate  # SQLite does not support concurrent writers
   selector:
     matchLabels:
       {{- include "rhiza-agents.selectorLabels" . | nindent 6 }}
@@ -29,12 +27,6 @@ spec:
               containerPort: {{ .Values.service.port }}
               protocol: TCP
           env:
-            - name: DATABASE_URL
-              value: "sqlite:////data/app.db"
-            - name: CHECKPOINT_DB_PATH
-              value: "/data/checkpoints.db"
-            - name: CHROMA_PERSIST_DIR
-              value: "/data/chroma"
             {{- range $key, $value := .Values.env }}
             {{- if $value }}
             - name: {{ $key }}

@@ -30,10 +30,12 @@ mcp_config = {
     }
 }
 
-async with MultiServerMCPClient(mcp_config) as client:
-    tools = client.get_tools()
-    # tools is a list of LangChain BaseTool objects
+client = MultiServerMCPClient(mcp_config)
+tools = await client.get_tools()
+# tools is a list of LangChain BaseTool objects
 ```
+
+**Important**: `MultiServerMCPClient` is NOT an async context manager in recent versions. Call `await client.get_tools()` directly.
 
 ### Connection Config Fields
 
@@ -48,7 +50,7 @@ async with MultiServerMCPClient(mcp_config) as client:
 - Has a `.name` matching the MCP tool name (e.g., `tool_list_forecasts`)
 - Has a `.description` from the MCP tool's description
 - Has an auto-generated Pydantic input schema from the MCP tool's `inputSchema`
-- Can be passed directly to `create_react_agent(tools=[...])`
+- Can be passed directly to `create_deep_agent(tools=[...])`
 
 ### Stateless Behavior
 
@@ -112,49 +114,23 @@ filtered_tools = [t for t in all_tools if t.name in wanted]
 
 ---
 
-## Tool Loading and Caching
+## Tool Loading
 
-Tools should be loaded **once at app startup** and cached for the lifetime of the process. Do not re-fetch tools on every request.
-
-### Recommended Pattern
+Tools are loaded at module level in `src/rhiza_agents/tools/mcp.py` and passed to `create_deep_agent()`. The MCP server URL comes from the `MCP_SERVER_URL` environment variable.
 
 ```python
-from contextlib import asynccontextmanager
+import os
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
-# Global state
-mcp_client: MultiServerMCPClient | None = None
-mcp_tools: list = []
-
-@asynccontextmanager
-async def lifespan(app):
-    global mcp_client, mcp_tools
-
-    mcp_config = {
+async def get_mcp_tools():
+    mcp_url = os.environ.get("MCP_SERVER_URL", "http://localhost:8000/sse")
+    client = MultiServerMCPClient({
         "sheerwater": {
-            "url": config.mcp_server_url,
+            "url": mcp_url,
             "transport": "sse",
         }
-    }
-
-    async with MultiServerMCPClient(mcp_config) as client:
-        mcp_client = client
-        mcp_tools = client.get_tools()
-        yield
-
-    mcp_client = None
-    mcp_tools = []
-```
-
-Then when creating agents:
-
-```python
-agent = create_react_agent(
-    model=model,
-    tools=mcp_tools,  # Use cached tools
-    name="sheerwater_agent",
-    prompt="You analyze weather forecast data.",
-)
+    })
+    return await client.get_tools()
 ```
 
 ---
@@ -211,58 +187,32 @@ When that migration happens:
 
 ---
 
-## Complete Example: MCP Tools with LangGraph Agent
+## Complete Example: MCP Tools with Deep Agent
 
 ```python
+import os
+from deepagents import create_deep_agent
 from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import HumanMessage
 from langchain_mcp_adapters.client import MultiServerMCPClient
-from langgraph.checkpoint.sqlite import SqliteSaver
-from langgraph.prebuilt import create_react_agent
-from langgraph_supervisor import create_supervisor
 
-async def build_graph(mcp_server_url: str):
-    """Build and return a compiled supervisor graph with MCP tools."""
+async def build_agent(mcp_server_url: str):
+    """Build a deep agent with MCP tools."""
 
     model = ChatAnthropic(model="claude-sonnet-4-20250514")
 
-    mcp_config = {
+    client = MultiServerMCPClient({
         "sheerwater": {
             "url": mcp_server_url,
             "transport": "sse",
         }
-    }
+    })
+    tools = await client.get_tools()
 
-    async with MultiServerMCPClient(mcp_config) as client:
-        tools = client.get_tools()
+    graph = create_deep_agent(
+        model=model,
+        tools=tools,
+        system_prompt="You analyze weather forecast benchmarking data.",
+    )
 
-        # Create agent with MCP tools
-        sheerwater_agent = create_react_agent(
-            model=model,
-            tools=tools,
-            name="sheerwater_agent",
-            prompt="You analyze weather forecast benchmarking data using the sheerwater tools.",
-        )
-
-        # Create supervisor
-        supervisor = create_supervisor(
-            agents=[sheerwater_agent],
-            model=model,
-            prompt="Route data analysis questions to the sheerwater agent.",
-            output_mode="full_history",
-            add_handoff_back_messages=True,
-        )
-
-        checkpointer = SqliteSaver.from_conn_string("/data/checkpoints.db")
-        graph = supervisor.compile(checkpointer=checkpointer)
-
-        # Use the graph while MCP client is alive
-        result = graph.invoke(
-            {"messages": [HumanMessage(content="Compare ECMWF and FuXi on MAE")]},
-            config={"configurable": {"thread_id": "demo"}}
-        )
-
-        return result
+    return graph
 ```
-
-**Important**: The `MultiServerMCPClient` context manager must remain open for the lifetime that tools are being called. If the context manager exits, tool invocations will fail. This is why tools are loaded during the app lifespan.

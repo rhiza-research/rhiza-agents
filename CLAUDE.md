@@ -1,6 +1,6 @@
 # rhiza-agents
 
-Multi-agent chat platform built on LangGraph.
+Multi-agent chat platform built on LangChain Deep Agents and LangGraph.
 
 ## Before Starting Work
 
@@ -10,25 +10,22 @@ Multi-agent chat platform built on LangGraph.
 
 ## Development
 
-### Local dev stack
+### Local dev stack (full Docker)
 ```bash
 docker compose up
 ```
-This starts Keycloak (port 8180), sheerwater-mcp (port 8000), and the app (port 8080).
+This starts Keycloak (port 8180), sheerwater-mcp (port 8000), LangGraph Server (port 8123), and deep-agents-ui (port 3000).
 
-Login: http://localhost:8080 with dev/dev
+### Rapid agent iteration
+```bash
+langgraph dev
+```
+Starts a local LangGraph Server with hot reload. Point deep-agents-ui at `http://localhost:8123`.
 
 ### Dependencies
 ```bash
 uv sync                              # core deps
 uv sync --extra sandbox              # + Daytona SDK
-uv sync --extra vectorstore          # + ChromaDB
-uv sync --extra sandbox --extra vectorstore  # all extras
-```
-
-### Running directly (without Docker)
-```bash
-uv run rhiza-agents
 ```
 
 ### Tests
@@ -41,48 +38,42 @@ uv run pytest
 - Python 3.12+
 - Package manager: `uv` (never pip)
 - Linter: `ruff`
-- Async: use `async/await` throughout (FastAPI is async)
-- Database: raw SQL via `databases` library, no ORM
-- Templates: Jinja2, server-rendered
-- JS: vanilla JS, no frameworks, ES modules
+- Agent framework: `deepagents` (`create_deep_agent`)
+- Frontend: deep-agents-ui (separate repo, Next.js fork)
+- Auth: NextAuth.js + Keycloak OIDC (in the UI fork)
 
 ## Key Architecture Decisions
 
-- **LangGraph checkpointer** stores all chat messages. The app DB only stores metadata (conversation title, user configs).
-- **Graphs are built dynamically** per-user based on their agent config (defaults + overrides).
-- **MCP tools** are loaded via `langchain-mcp-adapters` at startup and cached.
-- **Agent configs** are Pydantic models. Defaults in code, user overrides in DB as JSON.
+- **Deep Agents** provides the agent harness — planning, subagents, context management, file ops out of the box.
+- **LangGraph Server** (self-hosted) provides the API layer — threads, runs, streaming, checkpointing. No custom FastAPI app.
+- **deep-agents-ui** (forked) provides the frontend — chat, streaming, tool visualization, thread history. No custom templates/JS.
+- **MCP tools** are loaded via `langchain-mcp-adapters` and passed to the agent.
+- **Middleware** handles retry, context management, and tool call limits.
 
 ## File Structure
 
 ```
 src/rhiza_agents/
-  main.py           # FastAPI app, lifespan, all routes
-  config.py         # Environment-based configuration
-  auth.py           # Keycloak OIDC authentication
-  db/
-    base.py         # Abstract database interface
-    sqlite.py       # SQLite implementation
-    models.py       # Pydantic models (AgentConfig, etc.)
-  agents/
-    registry.py     # Default agent definitions + user override merging
-    graph.py        # Dynamic LangGraph graph construction
-    supervisor.py   # Supervisor agent setup
-    tools/
-      mcp.py        # MCP tool loading
-      sandbox.py    # Daytona sandbox tool
-      vectordb.py   # RAG retrieval tool factory
-  vectorstore/
-    manager.py      # ChromaDB collection management
-  templates/        # Jinja2 HTML templates
-  static/           # CSS, JS
+  agent.py            # Deep agent definition (create_deep_agent)
+  tools/
+    mcp.py            # MCP tool loading
+    sandbox.py        # Daytona sandbox tool
+langgraph.json        # LangGraph Server agent configuration
 ```
 
-## Reference Files (in sibling repos)
+## Phase Completion Process
 
-These files contain patterns to reuse:
-- `../sheerwater-chat/src/sheerwater_chat/auth.py` — Keycloak OIDC pattern
-- `../sheerwater-chat/src/sheerwater_chat/main.py` — FastAPI app structure
-- `../sheerwater-chat/src/sheerwater_chat/database.py` — Database abstraction
-- `../sheerwater-chat/src/sheerwater_chat/templates/chat.html` — Chat UI
-- `../sheerwater-chat/src/sheerwater_chat/static/` — Frontend assets
+After completing implementation for a phase, before considering the phase done:
+
+1. **Update the phase spec** (`docs/specs/XX-*.md`) to reflect what was actually built.
+2. **Update `docs/ARCHITECTURE.md`** with any new architectural patterns or constraints discovered.
+3. **Commit the doc updates** as a separate commit from the implementation.
+
+## Current Specs
+
+| Phase | Spec | Status |
+|-------|------|--------|
+| 1 | `docs/specs/01-mvp-deep-agent.md` | MVP: Deep Agent + MCP Tools |
+| 2 | `docs/specs/02-auth.md` | Auth: NextAuth.js + Keycloak |
+| 3 | `docs/specs/03-sandbox-middleware.md` | Sandbox + Middleware |
+| 4 | `docs/specs/04-production-deploy.md` | Production Deploy |
