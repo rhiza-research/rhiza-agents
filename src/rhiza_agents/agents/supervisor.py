@@ -1,20 +1,33 @@
 """Supervisor convenience module tying together registry + graph."""
 
+import json
+
 from ..db.models import AgentConfig
+from ..db.sqlite import Database
 from .graph import get_or_build_graph
-from .registry import get_default_configs
+from .registry import get_default_configs, merge_configs
 
 
 async def get_agent_graph(
     mcp_tools: list,
     checkpointer,
     user_configs: list[AgentConfig] | None = None,
+    user_id: str | None = None,
+    db: Database | None = None,
 ):
     """Get the compiled agent graph.
 
-    If user_configs is provided, use those. Otherwise use defaults.
-    Config merging (user overrides on top of defaults) is handled by
-    the caller -- this function just takes the final config list.
+    If user_id and db are provided, loads overrides from the database.
+    If user_configs is provided directly, uses those.
+    Otherwise uses defaults.
     """
-    configs = user_configs or get_default_configs()
+    if user_id and db:
+        defaults = get_default_configs()
+        override_rows = await db.get_user_agent_configs(user_id)
+        overrides = [json.loads(row["config_json"]) for row in override_rows]
+        configs = merge_configs(defaults, overrides)
+    elif user_configs:
+        configs = user_configs
+    else:
+        configs = get_default_configs()
     return await get_or_build_graph(configs, mcp_tools, checkpointer)

@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -17,11 +18,13 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from pydantic import BaseModel
 from starlette.middleware.sessions import SessionMiddleware
 
-from .agents.registry import get_default_configs_by_id
+from .agents.graph import invalidate_graph_cache
+from .agents.registry import get_default_configs, get_default_configs_by_id, merge_configs
 from .agents.supervisor import get_agent_graph
 from .agents.tools.mcp import create_mcp_client
 from .auth import create_oauth, get_user_from_session, get_user_id, get_user_name
 from .config import Config
+from .db.models import AgentConfig
 from .db.sqlite import Database
 
 logging.basicConfig(level=logging.INFO)
@@ -125,12 +128,25 @@ _HANDOFF_BACK_KEY = "__is_handoff_back"
 _TRANSFER_PREFIX = "transfer_to_"
 
 
-def _process_messages(raw_messages):
+def _build_name_mappings(configs: list[AgentConfig]) -> tuple[dict[str, str], dict[str, str]]:
+    """Build agent_names and tool_to_agent mappings from a config list."""
+    agent_names = {c.id: c.name for c in configs}
+    tool_to_agent = {}
+    for c in configs:
+        if "mcp:sheerwater" in c.tools:
+            for t in mcp_tools:
+                tool_to_agent[t.name] = c.id
+    return agent_names, tool_to_agent
+
+
+def _process_messages(raw_messages, agent_names=None, tool_to_agent_map=None):
     """Process raw LangGraph messages into a single ordered list.
 
     Each item has a "type" field: "human", "ai", "thinking", "tool_call", "tool_result".
     AI responses include "agent_name" when known. Handoff messages are filtered out.
     """
+    names = agent_names or _agent_names
+    t2a = tool_to_agent_map or _tool_to_agent
     messages = []
     current_agent = None  # track which worker agent is active
 
@@ -151,12 +167,12 @@ def _process_messages(raw_messages):
             for tc in tool_calls:
                 if tc["name"].startswith(_TRANSFER_PREFIX):
                     agent_id = tc["name"][len(_TRANSFER_PREFIX) :]
-                    if agent_id in _agent_names:
+                    if agent_id in names:
                         current_agent = agent_id
-                elif tc["name"] in _tool_to_agent:
-                    current_agent = _tool_to_agent[tc["name"]]
+                elif tc["name"] in t2a:
+                    current_agent = t2a[tc["name"]]
 
-            agent_name = _agent_names.get(msg.name) or _agent_names.get(current_agent)
+            agent_name = names.get(msg.name) or names.get(current_agent)
 
             if text:
                 phase, content = _classify_text(text, bool(tool_calls))
@@ -256,10 +272,12 @@ async def conversation_page(request: Request, conversation_id: str, user: dict =
     conversations = await db.list_conversations(user_id)
 
     # Load messages from LangGraph checkpointer
-    graph = await get_agent_graph(mcp_tools, checkpointer)
+    graph = await get_agent_graph(mcp_tools, checkpointer, user_id=user_id, db=db)
+    effective = await _get_effective_configs(user_id)
+    agent_names, tool_to_agent_map = _build_name_mappings(effective)
     state = await graph.aget_state({"configurable": {"thread_id": conversation_id}})
     raw_messages = state.values.get("messages", [])
-    all_messages = _process_messages(raw_messages)
+    all_messages = _process_messages(raw_messages, agent_names, tool_to_agent_map)
     chat_messages = [m for m in all_messages if m["type"] in ("human", "ai")]
     activity = [m for m in all_messages if m["type"] in ("thinking", "tool_call", "tool_result")]
 
@@ -305,8 +323,10 @@ async def send_chat_message(request: Request, body: SendMessageRequest, user: di
         conversation_id = str(uuid.uuid4())
         await db.create_conversation(conversation_id, user_id)
 
-    # Invoke the supervisor graph
-    graph = await get_agent_graph(mcp_tools, checkpointer)
+    # Invoke the supervisor graph with per-user config
+    graph = await get_agent_graph(mcp_tools, checkpointer, user_id=user_id, db=db)
+    effective = await _get_effective_configs(user_id)
+    agent_names, tool_to_agent_map = _build_name_mappings(effective)
     result = await graph.ainvoke(
         {"messages": [HumanMessage(content=body.message)]},
         config={"configurable": {"thread_id": conversation_id}},
@@ -321,7 +341,7 @@ async def send_chat_message(request: Request, body: SendMessageRequest, user: di
             break
     turn_messages = all_msgs[turn_start:]
 
-    all_messages = _process_messages(turn_messages)
+    all_messages = _process_messages(turn_messages, agent_names, tool_to_agent_map)
     ai_msgs = [m for m in all_messages if m["type"] == "ai"]
     response_text = ai_msgs[-1]["content"] if ai_msgs else ""
     agent_name = ai_msgs[-1].get("agent_name") if ai_msgs else None
@@ -372,11 +392,198 @@ async def get_conversation_messages(request: Request, conversation_id: str, user
     if not conversation:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
-    graph = await get_agent_graph(mcp_tools, checkpointer)
+    graph = await get_agent_graph(mcp_tools, checkpointer, user_id=user_id, db=db)
+    effective = await _get_effective_configs(user_id)
+    agent_names, tool_to_agent_map = _build_name_mappings(effective)
     state = await graph.aget_state({"configurable": {"thread_id": conversation_id}})
     raw_messages = state.values.get("messages", [])
 
-    return {"conversation_id": conversation_id, "messages": _process_messages(raw_messages)}
+    return {
+        "conversation_id": conversation_id,
+        "messages": _process_messages(raw_messages, agent_names, tool_to_agent_map),
+    }
+
+
+async def _get_effective_configs(user_id: str) -> list[AgentConfig]:
+    """Get effective agent configs for a user (defaults + overrides, merged)."""
+    defaults = get_default_configs()
+    override_rows = await db.get_user_agent_configs(user_id)
+    if not override_rows:
+        return defaults
+    overrides = [json.loads(row["config_json"]) for row in override_rows]
+    return merge_configs(defaults, overrides)
+
+
+def _configs_to_api_response(configs: list[AgentConfig]) -> list[dict]:
+    """Convert configs to the API response format with is_default field."""
+    default_ids = set(get_default_configs_by_id().keys())
+    result = []
+    for c in configs:
+        d = c.model_dump()
+        d["is_default"] = c.id in default_ids
+        result.append(d)
+    return result
+
+
+_AGENT_ID_PATTERN = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]*$")
+
+
+# --- Config Page Route ---
+
+
+@app.get("/config", response_class=HTMLResponse)
+async def config_page(request: Request, user: dict = Depends(require_auth)):
+    """Config editor page."""
+    return templates.TemplateResponse(
+        "config_editor.html",
+        {"request": request, "user_name": get_user_name(request)},
+    )
+
+
+# --- Agent Config API Routes ---
+
+
+@app.get("/api/agents")
+async def get_agents(request: Request, user: dict = Depends(require_auth)):
+    """Get effective agent configs for the current user."""
+    user_id = get_user_id(request)
+    effective = await _get_effective_configs(user_id)
+    # Also include disabled default agents that have overrides
+    override_rows = await db.get_user_agent_configs(user_id)
+    disabled_overrides = []
+    effective_ids = {c.id for c in effective}
+    for row in override_rows:
+        parsed = json.loads(row["config_json"])
+        if parsed.get("id") not in effective_ids:
+            c = AgentConfig(**parsed)
+            disabled_overrides.append(c)
+    all_configs = list(effective) + disabled_overrides
+    return _configs_to_api_response(all_configs)
+
+
+@app.put("/api/agents/{agent_id}")
+async def update_agent(request: Request, agent_id: str, user: dict = Depends(require_auth)):
+    """Update an agent config override."""
+    user_id = get_user_id(request)
+    body = await request.json()
+
+    # Build the full AgentConfig to validate
+    defaults_by_id = get_default_configs_by_id()
+    base = defaults_by_id.get(agent_id)
+    if base:
+        config_data = base.model_dump()
+    else:
+        # Check if it's a custom agent override
+        existing = await db.get_user_agent_config(user_id, agent_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        config_data = json.loads(existing["config_json"])
+
+    # Apply the update fields
+    for field in ("name", "system_prompt", "model", "tools", "enabled", "vectorstore_ids"):
+        if field in body:
+            config_data[field] = body[field]
+    config_data["id"] = agent_id
+
+    # Validate
+    config = AgentConfig(**config_data)
+
+    # Prevent disabling supervisor
+    if config.type == "supervisor" and not config.enabled:
+        raise HTTPException(status_code=400, detail="Cannot disable the supervisor agent")
+
+    await db.save_user_agent_config(user_id, agent_id, config.model_dump())
+    invalidate_graph_cache()
+
+    effective = await _get_effective_configs(user_id)
+    override_rows = await db.get_user_agent_configs(user_id)
+    effective_ids = {c.id for c in effective}
+    disabled = []
+    for row in override_rows:
+        parsed = json.loads(row["config_json"])
+        if parsed.get("id") not in effective_ids:
+            disabled.append(AgentConfig(**parsed))
+    return _configs_to_api_response(list(effective) + disabled)
+
+
+@app.post("/api/agents")
+async def create_agent(request: Request, user: dict = Depends(require_auth)):
+    """Create a new custom agent."""
+    user_id = get_user_id(request)
+    body = await request.json()
+
+    agent_id = body.get("id", "")
+    if not agent_id or not _AGENT_ID_PATTERN.match(agent_id):
+        raise HTTPException(
+            status_code=400, detail="Agent ID must be alphanumeric with underscores, starting with a letter"
+        )
+
+    # Check uniqueness
+    defaults_by_id = get_default_configs_by_id()
+    if agent_id in defaults_by_id:
+        raise HTTPException(status_code=400, detail="Agent ID conflicts with a default agent")
+    existing = await db.get_user_agent_config(user_id, agent_id)
+    if existing:
+        raise HTTPException(status_code=400, detail="Agent ID already exists")
+
+    config = AgentConfig(
+        id=agent_id,
+        name=body.get("name", agent_id),
+        type="worker",
+        system_prompt=body.get("system_prompt", ""),
+        model=body.get("model", "claude-sonnet-4-20250514"),
+        tools=body.get("tools", []),
+    )
+
+    await db.save_user_agent_config(user_id, agent_id, config.model_dump())
+    invalidate_graph_cache()
+
+    effective = await _get_effective_configs(user_id)
+    return _configs_to_api_response(effective)
+
+
+@app.delete("/api/agents/{agent_id}")
+async def delete_agent(request: Request, agent_id: str, user: dict = Depends(require_auth)):
+    """Disable a default agent or delete a custom agent."""
+    user_id = get_user_id(request)
+    defaults_by_id = get_default_configs_by_id()
+
+    # Cannot delete supervisor
+    default = defaults_by_id.get(agent_id)
+    if default and default.type == "supervisor":
+        raise HTTPException(status_code=400, detail="Cannot disable the supervisor agent")
+
+    if agent_id in defaults_by_id:
+        # Default agent: save override with enabled=false
+        config = defaults_by_id[agent_id].model_copy(update={"enabled": False})
+        await db.save_user_agent_config(user_id, agent_id, config.model_dump())
+    else:
+        # Custom agent: delete the row entirely
+        existing = await db.get_user_agent_config(user_id, agent_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        await db.delete_user_agent_config(user_id, agent_id)
+
+    invalidate_graph_cache()
+
+    effective = await _get_effective_configs(user_id)
+    override_rows = await db.get_user_agent_configs(user_id)
+    effective_ids = {c.id for c in effective}
+    disabled = []
+    for row in override_rows:
+        parsed = json.loads(row["config_json"])
+        if parsed.get("id") not in effective_ids:
+            disabled.append(AgentConfig(**parsed))
+    return _configs_to_api_response(list(effective) + disabled)
+
+
+@app.post("/api/agents/reset")
+async def reset_agents(request: Request, user: dict = Depends(require_auth)):
+    """Reset all agent configs to defaults."""
+    user_id = get_user_id(request)
+    await db.delete_all_user_agent_configs(user_id)
+    invalidate_graph_cache()
+    return _configs_to_api_response(get_default_configs())
 
 
 def run():

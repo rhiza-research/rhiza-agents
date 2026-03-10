@@ -127,3 +127,34 @@ def get_default_configs() -> list[AgentConfig]:
 def get_default_configs_by_id() -> dict[str, AgentConfig]:
     """Return default configs keyed by agent ID."""
     return {c.id: c for c in get_default_configs()}
+
+
+def merge_configs(
+    defaults: list[AgentConfig],
+    overrides: list[dict],
+) -> list[AgentConfig]:
+    """Merge user overrides on top of defaults.
+
+    Args:
+        defaults: Default agent configs from get_default_configs()
+        overrides: List of parsed config dicts from the database.
+
+    Returns:
+        Final list of AgentConfig objects (enabled only, supervisor always included).
+    """
+    configs_by_id = {c.id: c for c in defaults}
+
+    for override in overrides:
+        agent_id = override.get("id")
+        if not agent_id:
+            continue
+        config = AgentConfig(**override)
+        configs_by_id[agent_id] = config
+
+    # Ensure supervisor is never disabled
+    for agent_id, config in configs_by_id.items():
+        if config.type == "supervisor" and not config.enabled:
+            configs_by_id[agent_id] = config.model_copy(update={"enabled": True})
+
+    # Filter to enabled agents only
+    return [c for c in configs_by_id.values() if c.enabled]

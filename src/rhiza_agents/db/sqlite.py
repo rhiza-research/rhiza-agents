@@ -1,8 +1,9 @@
-"""App database for conversation metadata.
+"""App database for conversation metadata and user agent configs.
 
 Messages are NOT stored here -- they live in the LangGraph checkpointer.
 """
 
+import json
 from datetime import UTC, datetime
 
 from databases import Database as DatabaseConnection
@@ -35,6 +36,16 @@ class Database:
             )
         """)
         await self.database.execute("CREATE INDEX IF NOT EXISTS idx_conversations_user_id ON conversations(user_id)")
+
+        await self.database.execute("""
+            CREATE TABLE IF NOT EXISTS user_agent_configs (
+                user_id TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                config_json TEXT NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_id, agent_id)
+            )
+        """)
 
     async def create_conversation(self, conversation_id: str, user_id: str, title: str | None = None) -> dict:
         """Create a new conversation."""
@@ -79,4 +90,54 @@ class Database:
         await self.database.execute(
             "DELETE FROM conversations WHERE id = :id AND user_id = :user_id",
             {"id": conversation_id, "user_id": user_id},
+        )
+
+    # --- User Agent Configs ---
+
+    async def get_user_agent_configs(self, user_id: str) -> list[dict]:
+        """Get all agent config overrides for a user."""
+        rows = await self.database.fetch_all(
+            "SELECT agent_id, config_json FROM user_agent_configs WHERE user_id = :user_id",
+            {"user_id": user_id},
+        )
+        return [{"agent_id": row._mapping["agent_id"], "config_json": row._mapping["config_json"]} for row in rows]
+
+    async def get_user_agent_config(self, user_id: str, agent_id: str) -> dict | None:
+        """Get a single agent config override for a user."""
+        row = await self.database.fetch_one(
+            "SELECT agent_id, config_json FROM user_agent_configs WHERE user_id = :user_id AND agent_id = :agent_id",
+            {"user_id": user_id, "agent_id": agent_id},
+        )
+        if not row:
+            return None
+        return {"agent_id": row._mapping["agent_id"], "config_json": row._mapping["config_json"]}
+
+    async def save_user_agent_config(self, user_id: str, agent_id: str, config: dict):
+        """Save (insert or update) an agent config override."""
+        config_json = json.dumps(config)
+        await self.database.execute(
+            """INSERT INTO user_agent_configs (user_id, agent_id, config_json, updated_at)
+               VALUES (:user_id, :agent_id, :config_json, :updated_at)
+               ON CONFLICT (user_id, agent_id) DO UPDATE SET
+                   config_json = :config_json, updated_at = :updated_at""",
+            {
+                "user_id": user_id,
+                "agent_id": agent_id,
+                "config_json": config_json,
+                "updated_at": datetime.now(UTC),
+            },
+        )
+
+    async def delete_user_agent_config(self, user_id: str, agent_id: str):
+        """Delete a single agent config override."""
+        await self.database.execute(
+            "DELETE FROM user_agent_configs WHERE user_id = :user_id AND agent_id = :agent_id",
+            {"user_id": user_id, "agent_id": agent_id},
+        )
+
+    async def delete_all_user_agent_configs(self, user_id: str):
+        """Delete all agent config overrides for a user (reset to defaults)."""
+        await self.database.execute(
+            "DELETE FROM user_agent_configs WHERE user_id = :user_id",
+            {"user_id": user_id},
         )
