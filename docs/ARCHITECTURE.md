@@ -18,8 +18,7 @@ rhiza-agents is a multi-agent chat platform built on LangChain Deep Agents and L
 │              LangGraph Server (self-hosted)            │
 │                                                        │
 │   API: /threads, /runs, /assistants                    │
-│   Checkpointer: PostgreSQL                             │
-│   Task queue: Redis                                    │
+│   Runtime: inmem (no persistence, no license needed)   │
 │   Agent: defined in langgraph.json                     │
 └───────────┬───────────────────────────────────────────┘
             │
@@ -101,11 +100,20 @@ The sheerwater MCP server exposes 10+ tools for weather forecast benchmarking (m
 4. Agent decides to handle directly or delegate to a subagent
 5. Subagent executes with its tools (MCP calls, sandbox execution)
 6. Response streams back through LangGraph Server to the UI
-7. All state persisted by LangGraph checkpointer (PostgreSQL)
+7. State is ephemeral (inmem runtime) — threads lost on restart
 
 ### Thread Management
 
-LangGraph Server manages threads natively. deep-agents-ui displays thread history in a sidebar. No custom conversation management code needed.
+LangGraph Server manages threads in memory. Threads are lost on container restart. The inmem runtime is used because the PostgreSQL-backed runtime requires a `LANGGRAPH_CLOUD_LICENSE_KEY`.
+
+### Known Limitation: No Persistence
+
+The inmem runtime means:
+- Thread history does not survive restarts
+- Old threads cannot be resumed after a container restart
+- This is a fundamental limitation of the LangGraph Platform licensing model
+
+To resolve this, the `langgraph_api` server layer would need to be replaced with a custom API server that manages its own PostgreSQL-backed state.
 
 ## Authentication
 
@@ -124,7 +132,7 @@ NextAuth.js with Keycloak OIDC provider, added to a fork of deep-agents-ui. The 
 `docker compose up` starts:
 - Keycloak (dev mode, port 8180)
 - Sheerwater MCP server (port 8000)
-- LangGraph Server (port 8123) with PostgreSQL + Redis
+- LangGraph Server (port 8123, inmem runtime)
 - deep-agents-ui (port 3000)
 
 For rapid iteration on agent code, `langgraph dev` can be used instead of the Docker-based LangGraph Server.
@@ -134,5 +142,5 @@ For rapid iteration on agent code, `langgraph dev` can be used instead of the Do
 GitOps: push to `main` → GitHub Actions builds images → pushes to GHCR → ArgoCD syncs to GKE.
 
 Two deployments in GKE:
-1. LangGraph Server (with agent code) + PostgreSQL + Redis
+1. LangGraph Server (with agent code) — inmem runtime (no persistence)
 2. deep-agents-ui (Next.js)

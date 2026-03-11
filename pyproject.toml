@@ -21,6 +21,11 @@ dependencies = [
 sandbox = [
     "daytona-sdk>=0.149.0",
 ]
+server = [
+    "langgraph-api",
+    "langgraph-runtime-inmem",
+    "uvicorn",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -47,4 +52,5 @@ dev = [
     "pytest-mock",
     "ruff",
     "pre-commit",
+    "langgraph-cli[inmem]>=0.4.15",
 ]

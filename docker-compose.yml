@@ -13,9 +13,10 @@ services:
 
   sheerwater-mcp:
     image: ghcr.io/rhiza-research/sheerwater/mcp:latest
-    build:
-      context: ../sheerwater
-      dockerfile: mcp/Dockerfile
+    # To build from source instead of pulling the image, uncomment:
+    # build:
+    #   context: ../sheerwater
+    #   dockerfile: mcp/Dockerfile
     restart: unless-stopped
     ports:
       - "8000:8000"
@@ -27,32 +28,7 @@ services:
       CHART_BUCKET_NAME: sheerwater-mcp-charts
       SIGNING_SERVICE_ACCOUNT: ${SIGNING_SERVICE_ACCOUNT}
 
-  postgres:
-    image: postgres:16
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: langgraph
-      POSTGRES_PASSWORD: langgraph
-      POSTGRES_DB: langgraph
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U langgraph"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-  redis:
-    image: redis:7
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
   langgraph-server:
-    image: ghcr.io/rhiza-research/rhiza-agents:latest
     build: .
     restart: unless-stopped
     ports:
@@ -66,25 +42,37 @@ services:
       LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2:-false}
       LANGCHAIN_API_KEY: ${LANGCHAIN_API_KEY:-}
       LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-rhiza-agents}
-      LANGGRAPH_POSTGRES_URI: postgres://langgraph:langgraph@postgres:5432/langgraph
-      REDIS_URL: redis://redis:6379
     depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
       sheerwater-mcp:
         condition: service_started
 
+  # Deep Agents UI (Next.js frontend)
+  # Deployment URL and Assistant ID are baked in at build time via NEXT_PUBLIC_ args
   deep-agents-ui:
-    image: ghcr.io/langchain-ai/deep-agents-ui:latest
+    build:
+      context: ../deep-agents-ui
+      args:
+        NEXT_PUBLIC_DEPLOYMENT_URL: http://localhost:8123
+        NEXT_PUBLIC_ASSISTANT_ID: agent
     restart: unless-stopped
     ports:
       - "3000:3000"
+    volumes:
+      - ../deep-agents-ui/src:/app/src
+      - ../deep-agents-ui/docker-watch.sh:/app/docker-watch.sh:ro
     environment:
-      LANGGRAPH_API_URL: http://langgraph-server:8123
+      NEXT_PUBLIC_DEPLOYMENT_URL: http://localhost:8123
+      NEXT_PUBLIC_ASSISTANT_ID: agent
+      # NextAuth.js + Keycloak OIDC
+      AUTH_SECRET: ${AUTH_SECRET:-dev-secret-change-in-production}
+      AUTH_TRUST_HOST: "true"
+      KEYCLOAK_CLIENT_ID: rhiza-agents
+      KEYCLOAK_CLIENT_SECRET: dev-secret
+      KEYCLOAK_REALM: sheerwater
+      KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_PUBLIC_URL: http://localhost:8180
+    # Run file watcher alongside dev server to trigger hot reload in podman
+    command: ["sh", "-c", "/app/docker-watch.sh /app/src 2 & exec yarn dev"]
     depends_on:
       - langgraph-server
-
-volumes:
-  pgdata:
+      - keycloak

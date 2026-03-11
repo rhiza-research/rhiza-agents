@@ -4,11 +4,15 @@
 
 A working deep agent with sheerwater MCP tools, served by LangGraph Server, with deep-agents-ui as the frontend. The full stack runs locally via Docker Compose. Users can ask questions about weather forecast models and get answers with tool calls visible in the UI. No auth in this phase.
 
-## What You're Building
+## Status: Complete
+
+## What Was Built
 
 1. A Python package that defines a deep agent via `create_deep_agent()` with sheerwater MCP tools
 2. A `langgraph.json` that points LangGraph Server at the agent
 3. A Docker Compose stack that runs everything together
+4. UI customizations: plotly chart iframe rendering in ToolCallBox for `tool_render_plotly` and `tool_generate_comparison_chart`
+5. Hot reload workaround for podman on macOS (docker-watch.sh polling script)
 
 ## What You're NOT Building
 
@@ -55,10 +59,10 @@ Four services:
 
 1. **keycloak**: `quay.io/keycloak/keycloak:25.0`, start-dev with realm import, port 8180 (needed for Phase 2, but start it now so the realm is ready)
 2. **sheerwater-mcp**: `ghcr.io/rhiza-research/sheerwater/mcp:latest`, port 8000
-3. **langgraph-server**: Built from the agent code, runs LangGraph Server with PostgreSQL + Redis
-4. **deep-agents-ui**: `langchain-ai/deep-agents-ui` (upstream, no fork yet), port 3000, configured to point at the LangGraph Server
+3. **langgraph-server**: Built from the agent code, runs LangGraph Server with **in-memory runtime** (no PostgreSQL/Redis, no license key needed). Threads are ephemeral — lost on restart.
+4. **deep-agents-ui**: Local fork of `langchain-ai/deep-agents-ui`, port 3000, configured to point at the LangGraph Server
 
-The LangGraph Server needs PostgreSQL and Redis. These can be separate services in Docker Compose or bundled (check LangGraph's self-hosted Docker Compose examples for the canonical setup).
+**Important**: The inmem runtime is used because the LangGraph Platform Postgres runtime requires a `LANGGRAPH_CLOUD_LICENSE_KEY`. This means no thread persistence across restarts.
 
 ### Alternative: `langgraph dev` for Rapid Iteration
 
@@ -87,7 +91,7 @@ For MCP tools:
 2. Open deep-agents-ui in browser, see the chat interface
 3. Type "list available forecast models" → agent calls MCP tools, response appears with tool calls visible
 4. Type "compare ECMWF and GFS on precipitation MAE" → agent calls compare_models tool, shows results
-5. Thread history appears in the UI sidebar
+5. ~~Thread history appears in the UI sidebar~~ (Not possible with inmem runtime — threads lost on restart)
 6. Agent has planning capability (can break down complex requests)
 7. Streaming works (tokens appear as they're generated)
 
