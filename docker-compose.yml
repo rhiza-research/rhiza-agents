@@ -35,13 +35,31 @@ services:
       - "8123:8123"
     volumes:
       - ./src:/app/src:ro
+      - config-data:/data
     environment:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       MCP_SERVER_URL: http://sheerwater-mcp:8000/sse
+      CONFIG_DB_PATH: /data/config.db
       DAYTONA_API_KEY: ${DAYTONA_API_KEY:-}
       LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2:-false}
       LANGCHAIN_API_KEY: ${LANGCHAIN_API_KEY:-}
       LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-rhiza-agents}
+    depends_on:
+      sheerwater-mcp:
+        condition: service_started
+
+  config-api:
+    build: .
+    restart: unless-stopped
+    command: ["uv", "run", "uvicorn", "rhiza_agents.api:app", "--host", "0.0.0.0", "--port", "8081"]
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./src:/app/src:ro
+      - config-data:/data
+    environment:
+      CONFIG_DB_PATH: /data/config.db
+      MCP_SERVER_URL: http://sheerwater-mcp:8000/sse
     depends_on:
       sheerwater-mcp:
         condition: service_started
@@ -71,8 +89,13 @@ services:
       KEYCLOAK_REALM: sheerwater
       KEYCLOAK_URL: http://keycloak:8080
       KEYCLOAK_PUBLIC_URL: http://localhost:8180
+      NEXT_PUBLIC_CONFIG_API_URL: http://localhost:8081
     # Run file watcher alongside dev server to trigger hot reload in podman
     command: ["sh", "-c", "/app/docker-watch.sh /app/src 2 & exec yarn dev"]
     depends_on:
       - langgraph-server
+      - config-api
       - keycloak
+
+volumes:
+  config-data:

@@ -15,6 +15,8 @@ dependencies = [
     "langchain-mcp-adapters>=0.2.1",
     "langgraph",
     "langsmith",
+    "databases[aiosqlite]",
+    "pydantic>=2.0",
 ]
 
 [project.optional-dependencies]
@@ -25,6 +27,10 @@ server = [
     "langgraph-api",
     "langgraph-runtime-inmem",
     "uvicorn",
+]
+api = [
+    "fastapi",
+    "uvicorn[standard]",
 ]
 
 [build-system]
