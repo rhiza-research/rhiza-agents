@@ -11,7 +11,7 @@ COPY src ./src
 COPY langgraph.json ./
 
 # Install dependencies (server extra includes langgraph-api + uvicorn)
-RUN uv sync --frozen --no-dev --extra server --extra api
+RUN uv sync --frozen --no-dev --extra server --extra api --extra sandbox
 
 # Configure the in-memory LangGraph runtime (no postgres/redis/license needed)
 ENV LANGSERVE_GRAPHS='{"agent": "./src/rhiza_agents/agent.py:graph"}' \

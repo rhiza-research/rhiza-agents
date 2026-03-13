@@ -1,5 +1,6 @@
 """Daytona sandbox tool for code execution."""
 
+import asyncio
 import logging
 import os
 from datetime import UTC, datetime
@@ -23,7 +24,12 @@ def _get_daytona():
     if _daytona is None:
         from daytona_sdk import Daytona, DaytonaConfig
 
-        _daytona = Daytona(DaytonaConfig(api_key=os.environ["DAYTONA_API_KEY"]))
+        _daytona = Daytona(
+            DaytonaConfig(
+                api_key=os.environ["DAYTONA_API_KEY"],
+                api_url=os.environ.get("DAYTONA_API_URL"),
+            )
+        )
     return _daytona
 
 
@@ -43,6 +49,18 @@ def _cleanup_idle_sandboxes():
             _last_used.pop(tid, None)
 
 
+def _patch_proxy_url(sandbox):
+    """Override the toolbox proxy URL if DAYTONA_PROXY_URL is set.
+
+    The Daytona API returns a toolboxProxyUrl that may not be reachable from
+    this container (e.g. proxy.localhost). This allows overriding it.
+    """
+    proxy_url = os.environ.get("DAYTONA_PROXY_URL")
+    if proxy_url and hasattr(sandbox, "_toolbox_api"):
+        sandbox._toolbox_api._toolbox_base_url = proxy_url
+        logger.info("Patched sandbox proxy URL to %s", proxy_url)
+
+
 def _get_or_create_sandbox(thread_id: str):
     """Get an existing sandbox for a thread or create a new one."""
     from daytona_sdk import CreateSandboxBaseParams
@@ -51,6 +69,7 @@ def _get_or_create_sandbox(thread_id: str):
 
     if thread_id not in _sandboxes:
         sandbox = _get_daytona().create(CreateSandboxBaseParams(language="python"))
+        _patch_proxy_url(sandbox)
         _sandboxes[thread_id] = sandbox
         logger.info("Created sandbox for thread %s", thread_id)
 
@@ -78,9 +97,12 @@ async def execute_python_code(code: str, *, config: RunnableConfig) -> str:
         The stdout/stderr output of the code execution, or an error message.
     """
     thread_id = config.get("configurable", {}).get("thread_id", "default")
-    sandbox = _get_or_create_sandbox(thread_id)
-    response = sandbox.process.code_run(code)
 
-    if response.exit_code != 0:
-        return f"Error (exit code {response.exit_code}):\n{response.result}"
-    return response.result
+    def _run():
+        sandbox = _get_or_create_sandbox(thread_id)
+        response = sandbox.process.code_run(code)
+        if response.exit_code != 0:
+            return f"Error (exit code {response.exit_code}):\n{response.result}"
+        return response.result
+
+    return await asyncio.to_thread(_run)

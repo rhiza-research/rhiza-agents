@@ -41,6 +41,9 @@ services:
       MCP_SERVER_URL: http://sheerwater-mcp:8000/sse
       CONFIG_DB_PATH: /data/config.db
       DAYTONA_API_KEY: ${DAYTONA_API_KEY:-}
+      DAYTONA_API_URL: ${DAYTONA_API_URL}
+      DAYTONA_PROXY_URL: ${DAYTONA_PROXY_URL}
+      BG_JOB_ISOLATED_LOOPS: "true"
       LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2:-false}
       LANGCHAIN_API_KEY: ${LANGCHAIN_API_KEY:-}
       LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-rhiza-agents}
@@ -74,7 +77,7 @@ services:
         NEXT_PUBLIC_ASSISTANT_ID: agent
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      - "3100:3000"
     volumes:
       - ../deep-agents-ui/src:/app/src
       - ../deep-agents-ui/docker-watch.sh:/app/docker-watch.sh:ro
