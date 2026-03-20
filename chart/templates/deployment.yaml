@@ -30,7 +30,7 @@ spec:
               protocol: TCP
           env:
             - name: DATABASE_URL
-              value: "sqlite:////data/app.db"
+              value: "sqlite:////data/rhiza_agents.db"
             - name: CHECKPOINT_DB_PATH
               value: "/data/checkpoints.db"
             - name: CHROMA_PERSIST_DIR
@@ -51,6 +51,18 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /login
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /login
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
       volumes:
         - name: data
           persistentVolumeClaim:

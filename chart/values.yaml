@@ -15,13 +15,16 @@ service:
   port: 8080
 
 # Resource configuration
+# ChromaDB runs in-process with the all-MiniLM-L6-v2 embedding model in memory.
+# Document ingestion (chunking + embedding) is CPU-bound and memory-intensive.
+# TODO: Validate these values against actual pod metrics after deployment.
 resources:
   limits:
     cpu: 1000m
     memory: 2Gi
   requests:
-    cpu: 250m
-    memory: 512Mi
+    cpu: 500m
+    memory: 1Gi
 
 # Ingress configuration
 ingress:
@@ -38,7 +41,7 @@ persistence:
 
 # Name of the Kubernetes secret containing sensitive env vars.
 # This secret is created by Terraform, NOT by this chart.
-# Keys: KEYCLOAK_CLIENT_SECRET, ANTHROPIC_API_KEY, DAYTONA_API_KEY, SECRET_KEY, LANGSMITH_API_KEY
+# Keys: KEYCLOAK_CLIENT_SECRET, ANTHROPIC_API_KEY, DAYTONA_API_KEY, SECRET_KEY
 secretName: rhiza-agents-secrets
 
 # Non-secret environment variables
