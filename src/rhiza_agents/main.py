@@ -113,37 +113,30 @@ templates = Jinja2Templates(directory=BASE_DIR / "templates")
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 
 
-_THINKING_TAG = "[THINKING]"
-_RESPONSE_TAG = "[RESPONSE]"
+def _extract_content_blocks(content) -> tuple[str, str]:
+    """Extract text and reasoning from AIMessage content.
 
-
-def _extract_text(content) -> str:
-    """Extract text from AIMessage content (string or list of content blocks)."""
-    if isinstance(content, list):
-        return "\n".join(
-            block.get("text", "") for block in content if isinstance(block, dict) and block.get("type") == "text"
-        )
-    return (content or "").strip()
-
-
-def _classify_text(text: str, has_tool_calls: bool) -> tuple[str, str]:
-    """Classify text as thinking or response.
-
-    Priority:
-    1. Explicit [THINKING] / [RESPONSE] tags (highest priority)
-    2. If the AIMessage also has tool_calls, the text is thinking (intermediate step)
-    3. Otherwise, the text is a response
-
-    Returns (phase, content) where phase is "thinking" or "response".
+    Returns (text, reasoning) where each is a concatenation of the
+    respective content blocks. If content is a plain string, it's
+    returned as text with empty reasoning.
     """
-    stripped = text.strip()
-    if stripped.startswith(_THINKING_TAG):
-        return "thinking", stripped[len(_THINKING_TAG) :].strip()
-    if stripped.startswith(_RESPONSE_TAG):
-        return "response", stripped[len(_RESPONSE_TAG) :].strip()
-    if has_tool_calls:
-        return "thinking", text
-    return "response", text
+    if isinstance(content, list):
+        text_parts = []
+        reasoning_parts = []
+        for block in content:
+            if isinstance(block, dict):
+                if block.get("type") == "text":
+                    text_parts.append(block.get("text", ""))
+                elif block.get("type") == "reasoning":
+                    reasoning_parts.append(block.get("reasoning", ""))
+            elif hasattr(block, "type"):
+                if block.type == "text":
+                    text_parts.append(getattr(block, "text", ""))
+                elif block.type == "reasoning":
+                    text_val = getattr(block, "reasoning", "")
+                    reasoning_parts.append(text_val)
+        return "\n".join(text_parts), "\n".join(reasoning_parts)
+    return (content or "").strip(), ""
 
 
 _HANDOFF_BACK_KEY = "__is_handoff_back"
@@ -186,7 +179,7 @@ def _process_messages(raw_messages, agent_names=None, tool_to_agent_map=None):
             if msg.response_metadata.get(_HANDOFF_BACK_KEY, False):
                 continue
 
-            text = _extract_text(msg.content)
+            text, reasoning = _extract_content_blocks(msg.content)
             tool_calls = msg.tool_calls or []
 
             # Track current agent from tool calls
@@ -200,9 +193,11 @@ def _process_messages(raw_messages, agent_names=None, tool_to_agent_map=None):
 
             agent_name = names.get(msg.name) or names.get(current_agent)
 
+            if reasoning:
+                messages.append({"type": "thinking", "content": reasoning})
+
             if text:
-                phase, content = _classify_text(text, bool(tool_calls))
-                entry = {"type": "ai" if phase == "response" else "thinking", "content": content}
+                entry = {"type": "ai", "content": text}
                 if agent_name:
                     entry["agent_name"] = agent_name
                 messages.append(entry)
@@ -376,8 +371,6 @@ async def stream_chat_message(
         yield f"event: conversation_id\ndata: {json.dumps({'conversation_id': conversation_id})}\n\n"
 
         current_agent = None
-        node_buffer = ""
-        node_mode = None  # None (undecided), "thinking", or "response"
         stream_input = {"messages": [HumanMessage(content=body.message)]}
 
         try:
@@ -394,43 +387,21 @@ async def stream_chat_message(
 
                     if chunk_type == "messages":
                         token, metadata = chunk["data"]
-                        text = _extract_text(token.content) if hasattr(token, "content") else ""
-                        if not text:
+                        if not hasattr(token, "content"):
                             continue
+
+                        text, reasoning = _extract_content_blocks(token.content)
 
                         node = metadata.get("lc_agent_name") or metadata.get("langgraph_node", "")
                         display = agent_names.get(node, node)
                         if node != current_agent:
-                            # Flush any buffered thinking text to activity panel
-                            if node_mode == "thinking" and node_buffer:
-                                content = node_buffer.lstrip().removeprefix(_THINKING_TAG).strip()
-                                if content:
-                                    yield f"event: thinking\ndata: {json.dumps({'content': content})}\n\n"
                             current_agent = node
-                            node_buffer = ""
-                            node_mode = None
                             yield f"event: agent_start\ndata: {json.dumps({'agent': display})}\n\n"
 
-                        if node_mode is None:
-                            node_buffer += text
-                            stripped = node_buffer.lstrip()
-                            if len(stripped) >= len(_THINKING_TAG):
-                                if stripped.startswith(_THINKING_TAG):
-                                    node_mode = "thinking"
-                                elif stripped.startswith(_RESPONSE_TAG):
-                                    node_mode = "response"
-                                    # Flush buffer minus tag as tokens
-                                    remainder = stripped[len(_RESPONSE_TAG) :]
-                                    if remainder:
-                                        yield f"event: token\ndata: {json.dumps({'content': remainder})}\n\n"
-                                else:
-                                    node_mode = "response"
-                                    yield f"event: token\ndata: {json.dumps({'content': node_buffer})}\n\n"
-                        elif node_mode == "response":
+                        if reasoning:
+                            yield f"event: thinking\ndata: {json.dumps({'content': reasoning})}\n\n"
+                        if text:
                             yield f"event: token\ndata: {json.dumps({'content': text})}\n\n"
-                        else:
-                            # thinking mode: accumulate for activity panel
-                            node_buffer += text
 
                     elif chunk_type == "updates":
                         update_data = chunk["data"]
@@ -488,12 +459,6 @@ async def stream_chat_message(
             logger.exception("Streaming error")
             yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
 
-        # Flush any remaining thinking buffer
-        if node_mode == "thinking" and node_buffer:
-            content = node_buffer.lstrip().removeprefix(_THINKING_TAG).strip()
-            if content:
-                yield f"event: thinking\ndata: {json.dumps({'content': content})}\n\n"
-
         # Update conversation metadata
         await db.touch_conversation(conversation_id)
         conv = await db.get_conversation(conversation_id, user_id)
@@ -544,8 +509,6 @@ async def resume_chat(
 
     async def event_generator():
         current_agent = None
-        node_buffer = ""
-        node_mode = None
 
         try:
             async for chunk in graph.astream(
@@ -559,42 +522,21 @@ async def resume_chat(
 
                 if chunk_type == "messages":
                     token, metadata = chunk["data"]
-                    text = _extract_text(token.content) if hasattr(token, "content") else ""
-                    if not text:
+                    if not hasattr(token, "content"):
                         continue
 
-                    node = metadata.get("langgraph_node", "")
+                    text, reasoning = _extract_content_blocks(token.content)
+
+                    node = metadata.get("lc_agent_name") or metadata.get("langgraph_node", "")
                     display = agent_names.get(node, node)
                     if node != current_agent:
-                        if node_mode == "thinking" and node_buffer:
-                            content = node_buffer.lstrip().removeprefix(_THINKING_TAG).strip()
-                            if content:
-                                yield f"event: thinking\ndata: {json.dumps({'content': content})}\n\n"
                         current_agent = node
-                        node_buffer = ""
-                        node_mode = None
                         yield f"event: agent_start\ndata: {json.dumps({'agent': display})}\n\n"
 
-                    if node_mode is None:
-                        node_buffer += text
-                        stripped = node_buffer.lstrip()
-                        if len(stripped) >= len(_THINKING_TAG):
-                            if stripped.startswith(_THINKING_TAG):
-                                node_mode = "thinking"
-                            elif stripped.startswith(_RESPONSE_TAG):
-                                node_mode = "response"
-                                # Flush buffer minus tag as tokens
-                                remainder = stripped[len(_RESPONSE_TAG) :]
-                                if remainder:
-                                    yield f"event: token\ndata: {json.dumps({'content': remainder})}\n\n"
-                            else:
-                                node_mode = "response"
-                                yield f"event: token\ndata: {json.dumps({'content': node_buffer})}\n\n"
-                    elif node_mode == "response":
+                    if reasoning:
+                        yield f"event: thinking\ndata: {json.dumps({'content': reasoning})}\n\n"
+                    if text:
                         yield f"event: token\ndata: {json.dumps({'content': text})}\n\n"
-                    else:
-                        # thinking mode: accumulate for activity panel
-                        node_buffer += text
 
                 elif chunk_type == "updates":
                     update_data = chunk["data"]
@@ -638,12 +580,6 @@ async def resume_chat(
         except Exception as e:
             logger.exception("Resume streaming error")
             yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
-
-        # Flush remaining thinking buffer
-        if node_mode == "thinking" and node_buffer:
-            content = node_buffer.lstrip().removeprefix(_THINKING_TAG).strip()
-            if content:
-                yield f"event: thinking\ndata: {json.dumps({'content': content})}\n\n"
 
         yield f"event: files_changed\ndata: {json.dumps({})}\n\n"
         yield f"event: done\ndata: {json.dumps({})}\n\n"

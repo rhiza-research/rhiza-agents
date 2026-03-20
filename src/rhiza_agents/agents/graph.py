@@ -171,7 +171,11 @@ async def build_graph(
     for wc in worker_configs:
         tools = await _resolve_tools(wc, mcp_tools, vectorstore_manager, db)
         middleware = _build_worker_middleware(tools)
-        model = ChatAnthropic(model=wc.model)
+        model = ChatAnthropic(
+            model=wc.model,
+            max_tokens=16000,
+            thinking={"type": "enabled", "budget_tokens": 10000},
+        )
         worker = create_agent(
             model,
             tools,
@@ -184,7 +188,11 @@ async def build_graph(
         logger.info("Created worker agent: %s (%d tools, %d middleware)", wc.id, len(tools), len(middleware))
 
     supervisor = create_supervisor(
-        model=ChatAnthropic(model=supervisor_config.model),
+        model=ChatAnthropic(
+            model=supervisor_config.model,
+            max_tokens=16000,
+            thinking={"type": "enabled", "budget_tokens": 10000},
+        ),
         agents=worker_agents,
         prompt=supervisor_config.system_prompt,
         state_schema=SupervisorGraphState,
