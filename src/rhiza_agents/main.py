@@ -398,7 +398,7 @@ async def stream_chat_message(
                         if not text:
                             continue
 
-                        node = metadata.get("langgraph_node", "")
+                        node = metadata.get("lc_agent_name") or metadata.get("langgraph_node", "")
                         display = agent_names.get(node, node)
                         if node != current_agent:
                             # Flush any buffered thinking text to activity panel
