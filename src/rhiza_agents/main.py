@@ -378,101 +378,113 @@ async def stream_chat_message(
         current_agent = None
         node_buffer = ""
         node_mode = None  # None (undecided), "thinking", or "response"
+        stream_input = {"messages": [HumanMessage(content=body.message)]}
 
         try:
-            async for chunk in graph.astream(
-                {"messages": [HumanMessage(content=body.message)]},
-                config={"configurable": {"thread_id": conversation_id}},
-                stream_mode=["messages", "updates", "custom"],
-                version="v2",
-                subgraphs=True,
-            ):
-                chunk_type = chunk["type"]
+            while True:
+                auto_resume = False
+                async for chunk in graph.astream(
+                    stream_input,
+                    config={"configurable": {"thread_id": conversation_id}},
+                    stream_mode=["messages", "updates", "custom"],
+                    version="v2",
+                    subgraphs=True,
+                ):
+                    chunk_type = chunk["type"]
 
-                if chunk_type == "messages":
-                    token, metadata = chunk["data"]
-                    text = _extract_text(token.content) if hasattr(token, "content") else ""
-                    if not text:
-                        continue
-
-                    node = metadata.get("langgraph_node", "")
-                    display = agent_names.get(node, node)
-                    if node != current_agent:
-                        # Flush any buffered thinking text to activity panel
-                        if node_mode == "thinking" and node_buffer:
-                            content = node_buffer.lstrip().removeprefix(_THINKING_TAG).strip()
-                            if content:
-                                yield f"event: thinking\ndata: {json.dumps({'content': content})}\n\n"
-                        current_agent = node
-                        node_buffer = ""
-                        node_mode = None
-                        yield f"event: agent_start\ndata: {json.dumps({'agent': display})}\n\n"
-
-                    if node_mode is None:
-                        node_buffer += text
-                        stripped = node_buffer.lstrip()
-                        if len(stripped) >= len(_THINKING_TAG):
-                            if stripped.startswith(_THINKING_TAG):
-                                node_mode = "thinking"
-                            elif stripped.startswith(_RESPONSE_TAG):
-                                node_mode = "response"
-                                # Flush buffer minus tag as tokens
-                                remainder = stripped[len(_RESPONSE_TAG) :]
-                                if remainder:
-                                    yield f"event: token\ndata: {json.dumps({'content': remainder})}\n\n"
-                            else:
-                                node_mode = "response"
-                                yield f"event: token\ndata: {json.dumps({'content': node_buffer})}\n\n"
-                    elif node_mode == "response":
-                        yield f"event: token\ndata: {json.dumps({'content': text})}\n\n"
-                    else:
-                        # thinking mode: accumulate for activity panel
-                        node_buffer += text
-
-                elif chunk_type == "updates":
-                    update_data = chunk["data"]
-
-                    # HITL interrupts appear as __interrupt__ in updates
-                    if "__interrupt__" in update_data:
-                        for interrupt in update_data["__interrupt__"]:
-                            yield (f"event: interrupt\ndata: {json.dumps(interrupt, default=str)}\n\n")
-                        continue
-
-                    # Extract tool call/result info from node updates
-                    for _node_name, node_data in update_data.items():
-                        if not isinstance(node_data, dict):
+                    if chunk_type == "messages":
+                        token, metadata = chunk["data"]
+                        text = _extract_text(token.content) if hasattr(token, "content") else ""
+                        if not text:
                             continue
-                        for msg in node_data.get("messages", []):
-                            # Tool calls from AI messages
-                            if hasattr(msg, "tool_calls") and msg.tool_calls:
-                                for tc in msg.tool_calls:
-                                    if tc["name"].startswith(("transfer_to_", "transfer_back_to_")):
-                                        continue
-                                    data = json.dumps(
-                                        {"name": tc["name"], "args": tc["args"]},
-                                        default=str,
-                                    )
-                                    yield f"event: tool_start\ndata: {data}\n\n"
-                            # Tool results from ToolMessages
-                            if isinstance(msg, ToolMessage):
-                                if msg.name and msg.name.startswith(("transfer_to_", "transfer_back_to_")):
-                                    continue
-                                tool_content = msg.content
-                                try:
-                                    tool_content = json.loads(tool_content)
-                                except (json.JSONDecodeError, TypeError):
-                                    pass
-                                yield (
-                                    f"event: tool_end\ndata: "
-                                    f"{json.dumps({'name': msg.name, 'output': str(tool_content)[:1000]})}\n\n"
-                                )
-                                if msg.name in ("write_file", "run_file"):
-                                    yield f"event: files_changed\ndata: {json.dumps({})}\n\n"
 
-                elif chunk_type == "custom":
-                    custom_data = chunk["data"]
-                    if isinstance(custom_data, dict) and custom_data.get("type") == "files_changed":
-                        yield f"event: files_changed\ndata: {json.dumps({})}\n\n"
+                        node = metadata.get("langgraph_node", "")
+                        display = agent_names.get(node, node)
+                        if node != current_agent:
+                            # Flush any buffered thinking text to activity panel
+                            if node_mode == "thinking" and node_buffer:
+                                content = node_buffer.lstrip().removeprefix(_THINKING_TAG).strip()
+                                if content:
+                                    yield f"event: thinking\ndata: {json.dumps({'content': content})}\n\n"
+                            current_agent = node
+                            node_buffer = ""
+                            node_mode = None
+                            yield f"event: agent_start\ndata: {json.dumps({'agent': display})}\n\n"
+
+                        if node_mode is None:
+                            node_buffer += text
+                            stripped = node_buffer.lstrip()
+                            if len(stripped) >= len(_THINKING_TAG):
+                                if stripped.startswith(_THINKING_TAG):
+                                    node_mode = "thinking"
+                                elif stripped.startswith(_RESPONSE_TAG):
+                                    node_mode = "response"
+                                    # Flush buffer minus tag as tokens
+                                    remainder = stripped[len(_RESPONSE_TAG) :]
+                                    if remainder:
+                                        yield f"event: token\ndata: {json.dumps({'content': remainder})}\n\n"
+                                else:
+                                    node_mode = "response"
+                                    yield f"event: token\ndata: {json.dumps({'content': node_buffer})}\n\n"
+                        elif node_mode == "response":
+                            yield f"event: token\ndata: {json.dumps({'content': text})}\n\n"
+                        else:
+                            # thinking mode: accumulate for activity panel
+                            node_buffer += text
+
+                    elif chunk_type == "updates":
+                        update_data = chunk["data"]
+
+                        # HITL interrupts appear as __interrupt__ in updates
+                        if "__interrupt__" in update_data:
+                            if body.execution_mode == "auto":
+                                # Auto-approve: resume immediately without user interaction
+                                stream_input = Command(resume={"decisions": [{"type": "approve"}]})
+                                auto_resume = True
+                                break
+                            else:
+                                for intr in update_data["__interrupt__"]:
+                                    yield (f"event: interrupt\ndata: {json.dumps(intr, default=str)}\n\n")
+                                continue
+
+                        # Extract tool call/result info from node updates
+                        for _node_name, node_data in update_data.items():
+                            if not isinstance(node_data, dict):
+                                continue
+                            for msg in node_data.get("messages", []):
+                                # Tool calls from AI messages
+                                if hasattr(msg, "tool_calls") and msg.tool_calls:
+                                    for tc in msg.tool_calls:
+                                        if tc["name"].startswith(("transfer_to_", "transfer_back_to_")):
+                                            continue
+                                        data = json.dumps(
+                                            {"name": tc["name"], "args": tc["args"]},
+                                            default=str,
+                                        )
+                                        yield f"event: tool_start\ndata: {data}\n\n"
+                                # Tool results from ToolMessages
+                                if isinstance(msg, ToolMessage):
+                                    if msg.name and msg.name.startswith(("transfer_to_", "transfer_back_to_")):
+                                        continue
+                                    tool_content = msg.content
+                                    try:
+                                        tool_content = json.loads(tool_content)
+                                    except (json.JSONDecodeError, TypeError):
+                                        pass
+                                    yield (
+                                        f"event: tool_end\ndata: "
+                                        f"{json.dumps({'name': msg.name, 'output': str(tool_content)[:1000]})}\n\n"
+                                    )
+                                    if msg.name in ("write_file", "run_file"):
+                                        yield f"event: files_changed\ndata: {json.dumps({})}\n\n"
+
+                    elif chunk_type == "custom":
+                        custom_data = chunk["data"]
+                        if isinstance(custom_data, dict) and custom_data.get("type") == "files_changed":
+                            yield f"event: files_changed\ndata: {json.dumps({})}\n\n"
+
+                if not auto_resume:
+                    break
 
         except Exception as e:
             logger.exception("Streaming error")
