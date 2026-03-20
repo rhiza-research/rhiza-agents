@@ -400,19 +400,19 @@ Read these files to understand the patterns being adapted:
 
 | File | What to learn |
 |------|---------------|
-| `/Users/tristan/Devel/rhiza/sheerwater-chat/src/sheerwater_chat/main.py` | FastAPI app structure, lifespan, routes, auth flow |
-| `/Users/tristan/Devel/rhiza/sheerwater-chat/src/sheerwater_chat/auth.py` | Keycloak OIDC with dual URL strategy |
-| `/Users/tristan/Devel/rhiza/sheerwater-chat/src/sheerwater_chat/config.py` | Env-based config dataclass |
-| `/Users/tristan/Devel/rhiza/sheerwater-chat/src/sheerwater_chat/database.py` | Async database with `databases` package |
-| `/Users/tristan/Devel/rhiza/sheerwater-chat/src/sheerwater_chat/chat.py` | Chat service (for understanding what we're replacing with LangGraph) |
-| `/Users/tristan/Devel/rhiza/sheerwater-chat/src/sheerwater_chat/mcp_client.py` | MCP connection (we replace this with langchain-mcp-adapters) |
-| `/Users/tristan/Devel/rhiza/sheerwater-chat/src/sheerwater_chat/templates/chat.html` | Chat UI template |
-| `/Users/tristan/Devel/rhiza/sheerwater-chat/src/sheerwater_chat/templates/login.html` | Login page template |
-| `/Users/tristan/Devel/rhiza/sheerwater-chat/src/sheerwater_chat/static/chat.js` | Chat JavaScript |
-| `/Users/tristan/Devel/rhiza/sheerwater-chat/src/sheerwater_chat/static/style.css` | Dark theme CSS |
-| `/Users/tristan/Devel/rhiza/sheerwater-chat/Dockerfile` | Docker build pattern |
-| `/Users/tristan/Devel/rhiza/sheerwater-chat/docker-compose.yml` | Docker Compose services |
-| `/Users/tristan/Devel/rhiza/rhiza-agents/docs/ARCHITECTURE.md` | Overall architecture reference |
+| `../sheerwater-chat/src/sheerwater_chat/main.py` | FastAPI app structure, lifespan, routes, auth flow |
+| `../sheerwater-chat/src/sheerwater_chat/auth.py` | Keycloak OIDC with dual URL strategy |
+| `../sheerwater-chat/src/sheerwater_chat/config.py` | Env-based config dataclass |
+| `../sheerwater-chat/src/sheerwater_chat/database.py` | Async database with `databases` package |
+| `../sheerwater-chat/src/sheerwater_chat/chat.py` | Chat service (for understanding what we're replacing with LangGraph) |
+| `../sheerwater-chat/src/sheerwater_chat/mcp_client.py` | MCP connection (we replace this with langchain-mcp-adapters) |
+| `../sheerwater-chat/src/sheerwater_chat/templates/chat.html` | Chat UI template |
+| `../sheerwater-chat/src/sheerwater_chat/templates/login.html` | Login page template |
+| `../sheerwater-chat/src/sheerwater_chat/static/chat.js` | Chat JavaScript |
+| `../sheerwater-chat/src/sheerwater_chat/static/style.css` | Dark theme CSS |
+| `../sheerwater-chat/Dockerfile` | Docker build pattern |
+| `../sheerwater-chat/docker-compose.yml` | Docker Compose services |
+| `docs/ARCHITECTURE.md` | Overall architecture reference |
 
 ## Acceptance Criteria
 

@@ -199,13 +199,39 @@ class CodeExecutionTool(BaseTool):
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `DAYTONA_API_KEY` | Yes | API key for Daytona service |
+| `DAYTONA_API_URL` | No | Daytona API base URL (only needed for non-default endpoints) |
+| `DAYTONA_PROXY_URL` | No | Override for sandbox proxy URL — required in Docker (see below) |
 
 ```python
 import os
 from daytona_sdk import Daytona, DaytonaConfig
 
-daytona = Daytona(DaytonaConfig(api_key=os.environ["DAYTONA_API_KEY"]))
+daytona = Daytona(DaytonaConfig(
+    api_key=os.environ["DAYTONA_API_KEY"],
+    api_url=os.environ.get("DAYTONA_API_URL"),
+))
 ```
+
+---
+
+## Proxy URL Fix (Critical for Docker)
+
+The Daytona API returns a `toolboxProxyUrl` in sandbox creation responses (e.g., `http://proxy.localhost:4000/toolbox`). This URL is unreachable from Docker containers because `proxy.localhost` doesn't resolve to anything useful.
+
+**Root cause:** The proxy URL is baked into the Daytona database during initial setup. The `PROXY_DOMAIN` env var on the Daytona API does NOT update it for existing deployments. Restarting the API, recreating containers, updating the DB region table, and restarting Redis all fail to change it.
+
+**Fix:** Override the URL in the SDK after sandbox creation:
+
+```python
+def _patch_proxy_url(sandbox):
+    proxy_url = os.environ.get("DAYTONA_PROXY_URL")
+    if proxy_url and hasattr(sandbox, "_toolbox_api"):
+        sandbox._toolbox_api._toolbox_base_url = proxy_url
+```
+
+Call this immediately after `daytona.create()`. Set `DAYTONA_PROXY_URL` to the reachable address (e.g., `http://<host-ip>:4000/toolbox`).
+
+**Symptoms if not patched:** `ConnectionError` or timeouts when the agent tries to execute code. Logs will show the SDK trying to connect to `proxy.localhost:4000`.
 
 ---
 

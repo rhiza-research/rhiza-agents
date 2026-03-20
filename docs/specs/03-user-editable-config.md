@@ -315,12 +315,12 @@ Add styles for the config editor:
 
 | File | What to learn |
 |------|---------------|
-| `/Users/tristan/Devel/rhiza/rhiza-agents/docs/ARCHITECTURE.md` | Config change flow, data model |
-| `/Users/tristan/Devel/rhiza/rhiza-agents/src/rhiza_agents/db/sqlite.py` | Existing database patterns to extend |
-| `/Users/tristan/Devel/rhiza/rhiza-agents/src/rhiza_agents/agents/registry.py` | Default configs to read |
-| `/Users/tristan/Devel/rhiza/rhiza-agents/src/rhiza_agents/agents/graph.py` | Graph caching to integrate with |
-| `/Users/tristan/Devel/rhiza/rhiza-agents/src/rhiza_agents/main.py` | Routes to add |
-| `/Users/tristan/Devel/rhiza/rhiza-agents/src/rhiza_agents/static/style.css` | Existing CSS theme to extend |
+| `docs/ARCHITECTURE.md` | Config change flow, data model |
+| `src/rhiza_agents/db/sqlite.py` | Existing database patterns to extend |
+| `src/rhiza_agents/agents/registry.py` | Default configs to read |
+| `src/rhiza_agents/agents/graph.py` | Graph caching to integrate with |
+| `src/rhiza_agents/main.py` | Routes to add |
+| `src/rhiza_agents/static/style.css` | Existing CSS theme to extend |
 
 ## Acceptance Criteria
 

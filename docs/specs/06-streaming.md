@@ -415,11 +415,11 @@ Key v2 event fields:
 
 | File | What to learn |
 |------|---------------|
-| `/Users/tristan/Devel/rhiza/rhiza-agents/docs/ARCHITECTURE.md` | Overall architecture context |
-| `/Users/tristan/Devel/rhiza/rhiza-agents/src/rhiza_agents/main.py` | Existing chat endpoint to complement |
-| `/Users/tristan/Devel/rhiza/rhiza-agents/src/rhiza_agents/static/chat.js` | Existing JS to modify |
-| `/Users/tristan/Devel/rhiza/rhiza-agents/src/rhiza_agents/static/style.css` | Existing styles to extend |
-| `/Users/tristan/Devel/rhiza/rhiza-agents/src/rhiza_agents/templates/chat.html` | Existing template |
+| `docs/ARCHITECTURE.md` | Overall architecture context |
+| `src/rhiza_agents/main.py` | Existing chat endpoint to complement |
+| `src/rhiza_agents/static/chat.js` | Existing JS to modify |
+| `src/rhiza_agents/static/style.css` | Existing styles to extend |
+| `src/rhiza_agents/templates/chat.html` | Existing template |
 
 ## Acceptance Criteria
 

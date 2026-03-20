@@ -282,9 +282,9 @@ Add styles for the agent badge:
 
 | File | What to learn |
 |------|---------------|
-| `/Users/tristan/Devel/rhiza/rhiza-agents/docs/ARCHITECTURE.md` | Agent topology, config model, data flow |
-| `/Users/tristan/Devel/rhiza/rhiza-agents/src/rhiza_agents/main.py` | Current Phase 1 main.py to modify |
-| `/Users/tristan/Devel/rhiza/rhiza-agents/src/rhiza_agents/agents/tools/mcp.py` | Current MCP tool loading |
+| `docs/ARCHITECTURE.md` | Agent topology, config model, data flow |
+| `src/rhiza_agents/main.py` | Current Phase 1 main.py to modify |
+| `src/rhiza_agents/agents/tools/mcp.py` | Current MCP tool loading |
 
 For `langgraph-supervisor` API reference, use:
 - `from langgraph_supervisor import create_supervisor` -- the `create_supervisor` function takes `model`, `agents` (list of compiled graphs), `prompt`, and options like `output_mode` and `add_handoff_back_messages`

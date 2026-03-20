@@ -506,13 +506,13 @@ Ensure the repository visibility allows GHCR image pulls from the cluster. If th
 
 | File | What to learn |
 |------|---------------|
-| `/Users/tristan/Devel/rhiza/rhiza-agents/docs/ARCHITECTURE.md` | Deployment section, technology stack |
-| `/Users/tristan/Devel/rhiza/sheerwater-chat/.github/workflows/build.yml` | GitHub Actions workflow pattern |
-| `/Users/tristan/Devel/rhiza/sheerwater-chat/chart/values.yaml` | Helm chart values pattern |
-| `/Users/tristan/Devel/rhiza/sheerwater-chat/chart/Chart.yaml` | Chart metadata pattern |
-| `/Users/tristan/Devel/rhiza/sheerwater-chat/chart/templates/deployment.yaml` | Deployment template pattern |
-| `/Users/tristan/Devel/rhiza/sheerwater-chat/Dockerfile` | Dockerfile pattern |
-| `/Users/tristan/Devel/rhiza/rhiza-agents/src/rhiza_agents/config.py` | Config to add LangSmith vars |
+| `docs/ARCHITECTURE.md` | Deployment section, technology stack |
+| `../sheerwater-chat/.github/workflows/build.yml` | GitHub Actions workflow pattern |
+| `../sheerwater-chat/chart/values.yaml` | Helm chart values pattern |
+| `../sheerwater-chat/chart/Chart.yaml` | Chart metadata pattern |
+| `../sheerwater-chat/chart/templates/deployment.yaml` | Deployment template pattern |
+| `../sheerwater-chat/Dockerfile` | Dockerfile pattern |
+| `src/rhiza_agents/config.py` | Config to add LangSmith vars |
 
 ## Acceptance Criteria
 

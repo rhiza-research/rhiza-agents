@@ -189,9 +189,9 @@ The post-invocation summarization (Part 2) runs the same way for both endpoints 
 
 | File | What to learn |
 |------|---------------|
-| `/Users/tristan/Devel/rhiza/rhiza-agents/src/rhiza_agents/agents/graph.py` | Agent and supervisor creation to modify |
-| `/Users/tristan/Devel/rhiza/rhiza-agents/src/rhiza_agents/main.py` | Chat endpoints to add summarization |
-| `/Users/tristan/Devel/rhiza/rhiza-agents/docs/ARCHITECTURE.md` | Message processing flow |
+| `src/rhiza_agents/agents/graph.py` | Agent and supervisor creation to modify |
+| `src/rhiza_agents/main.py` | Chat endpoints to add summarization |
+| `docs/ARCHITECTURE.md` | Message processing flow |
 
 For LangGraph summarization patterns:
 - `trim_messages(messages, strategy="last", token_counter=..., max_tokens=...)` -- trims message list to fit token budget

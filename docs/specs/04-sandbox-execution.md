@@ -33,151 +33,100 @@ docker-compose.yml
 
 ```python
 # Daytona SDK
-from daytona_sdk import Daytona, DaytonaConfig, CreateSandboxParams
+from daytona_sdk import Daytona, DaytonaConfig, CreateSandboxBaseParams
 
-# LangChain tool decorator
+# LangChain tool decorator and config injection
 from langchain_core.tools import tool
+from langchain_core.runnables import RunnableConfig
 ```
 
-The `daytona-sdk` package should already be in `pyproject.toml` dependencies (version 0.149.0 per ARCHITECTURE.md).
+The `daytona-sdk` package should already be in `pyproject.toml` as an optional dependency (`sandbox` extra).
+
+**Important SDK note:** The class is `CreateSandboxBaseParams`, NOT `CreateSandboxParams`. The response from `sandbox.process.code_run(code)` returns an object with `.result` (combined output string) and `.exit_code` (int). There are no separate `.output` / `.output_error` fields.
+
+## Working Reference Implementation
+
+A tested, working implementation exists in the deepagents repo:
+- **File:** `../rhiza-agents-deepagents/src/rhiza_agents/tools/sandbox.py`
+
+This implementation is verified working end-to-end. Port it directly rather than writing from scratch. Key patterns to preserve from that implementation are documented below.
 
 ## Implementation Details
 
 ### Modifications to `config.py`
 
-Add one new environment variable:
+Add new environment variables:
 
 | Env Var | Required | Default | Purpose |
 |---------|----------|---------|---------|
 | `DAYTONA_API_KEY` | no | `""` | Daytona API key for sandbox creation. If empty, sandbox tool is unavailable. |
+| `DAYTONA_API_URL` | no | SDK default | Daytona API base URL (only needed for non-default endpoints). |
+| `DAYTONA_PROXY_URL` | no | `""` | Override for the sandbox proxy URL. Required when running in Docker — see "Proxy URL Fix" below. |
 
 ### `agents/tools/sandbox.py` -- Daytona Sandbox Tool
 
 This module provides a LangChain tool that executes Python code in Daytona sandboxes.
 
-**Sandbox lifecycle management:**
+**Port the working implementation from** the `rhiza-agents-deepagents` sibling repo (`src/rhiza_agents/tools/sandbox.py`). The key design patterns (verified working):
 
-Maintain a module-level dictionary mapping thread_id (conversation UUID) to active sandbox instances:
+**1. Lazy Daytona client initialization** — A single `Daytona` client is initialized on first use and reused. Reads `DAYTONA_API_KEY` and optional `DAYTONA_API_URL` from env vars directly (not passed as args).
+
+**2. Module-level sandbox state** — Simple dicts for sandbox objects and last-used timestamps, keyed by thread_id:
 
 ```python
-import asyncio
-import time
-
-_active_sandboxes: dict[str, dict] = {}
-# Each entry: {"sandbox": sandbox_obj, "daytona": daytona_client, "last_used": float}
-
-SANDBOX_IDLE_TIMEOUT = 900  # 15 minutes in seconds
+_sandboxes: dict[str, object] = {}
+_last_used: dict[str, datetime] = {}
+_daytona = None
+IDLE_TIMEOUT_MINUTES = 15
 ```
 
-**The tool function:**
+**3. RunnableConfig injection for thread_id** — The `@tool` function uses `*, config: RunnableConfig` to get the thread_id. This is automatically injected by LangGraph and NOT exposed to the LLM:
 
 ```python
-from langchain_core.tools import tool
-
-def create_sandbox_tool(api_key: str):
-    """Create a LangChain tool for code execution in Daytona sandboxes.
-
-    Args:
-        api_key: Daytona API key
-
-    Returns:
-        A LangChain tool function
-    """
-
-    @tool
-    async def execute_python_code(code: str, thread_id: str = "") -> str:
-        """Execute Python code in a sandboxed environment.
-
-        Args:
-            code: Python code to execute.
-
-        Returns:
-            Execution result with stdout, stderr, and exit code.
-        """
-        # Get or create sandbox for this thread
-        sandbox_info = _active_sandboxes.get(thread_id)
-
-        if sandbox_info is None:
-            # Create new sandbox
-            daytona = Daytona(DaytonaConfig(api_key=api_key))
-            sandbox = daytona.create(CreateSandboxParams(language="python"))
-            sandbox_info = {
-                "sandbox": sandbox,
-                "daytona": daytona,
-                "last_used": time.time(),
-            }
-            _active_sandboxes[thread_id] = sandbox_info
-
-        sandbox = sandbox_info["sandbox"]
-        sandbox_info["last_used"] = time.time()
-
-        # Execute code
-        result = sandbox.process.code_run(code)
-
-        # Format output
-        output_parts = []
-        if result.result:
-            output_parts.append(f"Output:\n{result.result}")
-        if result.output:
-            output_parts.append(f"Stdout:\n{result.output}")
-        if result.output_error:
-            output_parts.append(f"Stderr:\n{result.output_error}")
-        output_parts.append(f"Exit code: {result.exit_code}")
-
-        return "\n\n".join(output_parts)
-
-    return execute_python_code
-```
-
-**Important note about thread_id:** The tool needs the conversation's thread_id to maintain one sandbox per conversation. LangGraph passes the `config` to tools via `RunnableConfig`. The tool should access it through LangChain's injected config mechanism:
-
-```python
-from langchain_core.runnables import RunnableConfig
-from langchain_core.tools import tool
-
 @tool
 async def execute_python_code(code: str, *, config: RunnableConfig) -> str:
-    """Execute Python code in a sandboxed environment."""
+    """Execute Python code in a sandboxed environment and return the output."""
     thread_id = config.get("configurable", {}).get("thread_id", "default")
-    # ... rest of implementation
 ```
 
-The `config` parameter with `RunnableConfig` type annotation is automatically injected by LangGraph and not exposed to the LLM as a tool parameter.
-
-**Sandbox cleanup:**
-
-Provide a background task function that cleans up idle sandboxes:
+**4. asyncio.to_thread for sync SDK calls** — The Daytona SDK is synchronous. Wrap the blocking calls:
 
 ```python
-async def cleanup_idle_sandboxes():
-    """Remove sandboxes that have been idle for more than SANDBOX_IDLE_TIMEOUT seconds."""
-    now = time.time()
-    to_remove = []
-    for thread_id, info in _active_sandboxes.items():
-        if now - info["last_used"] > SANDBOX_IDLE_TIMEOUT:
-            to_remove.append(thread_id)
-
-    for thread_id in to_remove:
-        info = _active_sandboxes.pop(thread_id, None)
-        if info:
-            try:
-                info["daytona"].delete(info["sandbox"])
-            except Exception:
-                pass  # Best effort cleanup
+return await asyncio.to_thread(_run)
 ```
 
-Also provide a function to clean up a specific conversation's sandbox (called when a conversation is deleted):
+**5. Response format** — `sandbox.process.code_run(code)` returns an object with:
+- `response.result` — combined output string (stdout/stderr)
+- `response.exit_code` — integer exit code
+
+There are NO separate `.output` / `.output_error` fields. Keep the output format simple:
 
 ```python
-async def cleanup_sandbox(thread_id: str):
-    """Clean up sandbox for a specific conversation."""
-    info = _active_sandboxes.pop(thread_id, None)
-    if info:
-        try:
-            info["daytona"].delete(info["sandbox"])
-        except Exception:
-            pass
+if response.exit_code != 0:
+    return f"Error (exit code {response.exit_code}):\n{response.result}"
+return response.result
 ```
+
+**6. Availability check** — Provide `is_sandbox_available() -> bool` that checks if `DAYTONA_API_KEY` is set. Used by graph.py to conditionally add the tool.
+
+**7. Idle cleanup** — Called before each sandbox creation. Removes sandboxes idle for more than 15 minutes via `daytona.delete(sandbox)`.
+
+### Proxy URL Fix (Critical for Docker Deployments)
+
+The Daytona API returns a `toolboxProxyUrl` in sandbox creation responses (e.g., `http://proxy.localhost:4000/toolbox`). This URL is often unreachable from Docker containers because `proxy.localhost` doesn't resolve.
+
+The working implementation patches this after sandbox creation:
+
+```python
+def _patch_proxy_url(sandbox):
+    proxy_url = os.environ.get("DAYTONA_PROXY_URL")
+    if proxy_url and hasattr(sandbox, "_toolbox_api"):
+        sandbox._toolbox_api._toolbox_base_url = proxy_url
+```
+
+Set `DAYTONA_PROXY_URL` in docker-compose.yml to the reachable proxy address (e.g., `http://<host-ip>:4000/toolbox`).
+
+The Daytona API's `PROXY_DOMAIN` env var does NOT control this URL for existing deployments — it's baked into the database at initial setup. The SDK-side override is the only reliable fix.
 
 ### Modifications to `agents/registry.py`
 
@@ -203,34 +152,23 @@ AgentConfig(
 
 ### Modifications to `agents/graph.py`
 
-Update the existing `_resolve_tools` function in `graph.py` to handle `sandbox:daytona`. The function already exists as a standalone function (not a method):
+Update the existing `_resolve_tools` function in `graph.py` to handle `sandbox:daytona`. The sandbox tool reads env vars directly (no API key passed through), so use `is_sandbox_available()` to check:
 
 ```python
-def _resolve_tools(config: AgentConfig, mcp_tools: list, daytona_api_key: str = "") -> list:
+def _resolve_tools(config: AgentConfig, mcp_tools: list) -> list:
     """Resolve tool identifiers to actual tool objects."""
     tools = []
     for tool_id in config.tools:
         if tool_id == "mcp:sheerwater":
             tools.extend(mcp_tools)
         elif tool_id == "sandbox:daytona":
-            if daytona_api_key:
-                from .tools.sandbox import create_sandbox_tool
-                tools.append(create_sandbox_tool(daytona_api_key))
+            from .tools.sandbox import execute_python_code, is_sandbox_available
+            if is_sandbox_available():
+                tools.append(execute_python_code)
             # If no API key, silently skip -- agent works without tools
         else:
             logger.info("Tool type %s not yet implemented, skipping", tool_id)
     return tools
-```
-
-Update `build_graph` and `get_or_build_graph` signatures to accept `daytona_api_key`:
-
-```python
-async def build_graph(
-    configs: list[AgentConfig],
-    mcp_tools: list,
-    checkpointer,
-    daytona_api_key: str = "",
-) -> CompiledGraph:
 ```
 
 **LLM retry:** When creating `ChatAnthropic` model instances in `build_graph`, wrap them with `.with_retry()` to handle transient API failures (rate limits, 5xx errors):
@@ -245,8 +183,7 @@ This applies to both the supervisor model and all worker agent models.
 
 ### Modifications to `main.py`
 
-1. Add `DAYTONA_API_KEY` to the config loaded at startup
-2. Pass `daytona_api_key=config.daytona_api_key` through to `get_agent_graph` and then to `build_graph`. Note: after Phase 3, `get_agent_graph` signature is `get_agent_graph(mcp_tools, checkpointer, user_configs=None, user_id=None, db=None)` and it may need a `daytona_api_key` parameter added, which it passes through to `get_or_build_graph` and `build_graph`.
+1. No changes needed for API key — the sandbox tool reads `DAYTONA_API_KEY` from env directly.
 3. **Add `recursion_limit`** to the `graph.ainvoke()` call in `POST /api/chat` to prevent runaway agent loops:
    ```python
    result = await graph.ainvoke(
@@ -275,12 +212,14 @@ cleanup_task.cancel()
 
 ### Modifications to `docker-compose.yml`
 
-Add `DAYTONA_API_KEY` to the rhiza-agents service environment:
+Add Daytona env vars to the rhiza-agents service environment:
 ```yaml
 DAYTONA_API_KEY: ${DAYTONA_API_KEY:-}
+DAYTONA_API_URL: ${DAYTONA_API_URL:-}
+DAYTONA_PROXY_URL: ${DAYTONA_PROXY_URL:-}
 ```
 
-This reads from the host environment. If not set, sandbox tool is unavailable and code_runner responds conversationally.
+These read from the host environment. If `DAYTONA_API_KEY` is not set, sandbox tool is unavailable and code_runner responds conversationally. `DAYTONA_PROXY_URL` is needed when running in Docker — see "Proxy URL Fix" above.
 
 ### Modifications to `templates/chat.html`
 
@@ -369,22 +308,18 @@ The `available` field is `true` when the necessary API key / connection is confi
 
 | File | What to learn |
 |------|---------------|
-| `/Users/tristan/Devel/rhiza/rhiza-agents/docs/ARCHITECTURE.md` | Sandbox integration section, Daytona SDK usage |
-| `/Users/tristan/Devel/rhiza/rhiza-agents/src/rhiza_agents/agents/graph.py` | Where to add tool resolution |
-| `/Users/tristan/Devel/rhiza/rhiza-agents/src/rhiza_agents/agents/registry.py` | Where to update code_runner config |
-| `/Users/tristan/Devel/rhiza/rhiza-agents/src/rhiza_agents/main.py` | Where to add background cleanup task |
+| `docs/ARCHITECTURE.md` | Sandbox integration section, Daytona SDK usage |
+| `docs/reference/daytona-integration.md` | Daytona SDK API reference, proxy URL fix, LangChain tool wrapping |
+| `src/rhiza_agents/agents/graph.py` | Where to add tool resolution |
+| `src/rhiza_agents/agents/registry.py` | Where to update code_runner config |
+| `src/rhiza_agents/main.py` | Where to add background cleanup task |
+| `../rhiza-agents-deepagents/src/rhiza_agents/tools/sandbox.py` | **Working implementation to port** |
 
 For the Daytona SDK API, the key classes are:
-- `Daytona(DaytonaConfig(api_key=...))` -- client constructor
-- `daytona.create(CreateSandboxParams(language="python"))` -- create a sandbox
-- `sandbox.process.code_run(code)` -- execute code, returns result with `.result`, `.output`, `.output_error`, `.exit_code`
+- `Daytona(DaytonaConfig(api_key=..., api_url=...))` -- client constructor
+- `daytona.create(CreateSandboxBaseParams(language="python"))` -- create a sandbox (NOT `CreateSandboxParams`)
+- `sandbox.process.code_run(code)` -- execute code, returns object with `.result` (str) and `.exit_code` (int)
 - `daytona.delete(sandbox)` -- destroy sandbox
-
-Check the installed `daytona-sdk` package for exact API signatures -- the SDK may have changed from version 0.149.0. Inspect the installed package if needed:
-```python
-import daytona_sdk
-help(daytona_sdk.Daytona)
-```
 
 ## Acceptance Criteria
 

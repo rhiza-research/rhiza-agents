@@ -506,13 +506,13 @@ The `/data` directory should already be a volume mount from Phase 1 (for SQLite)
 
 | File | What to learn |
 |------|---------------|
-| `/Users/tristan/Devel/rhiza/rhiza-agents/docs/ARCHITECTURE.md` | Vector store integration section |
-| `/Users/tristan/Devel/rhiza/rhiza-agents/src/rhiza_agents/agents/graph.py` | Tool resolution to extend |
-| `/Users/tristan/Devel/rhiza/rhiza-agents/src/rhiza_agents/agents/registry.py` | Agent configs to update |
-| `/Users/tristan/Devel/rhiza/rhiza-agents/src/rhiza_agents/db/sqlite.py` | Database patterns to follow |
-| `/Users/tristan/Devel/rhiza/rhiza-agents/src/rhiza_agents/main.py` | Routes to add |
-| `/Users/tristan/Devel/rhiza/rhiza-agents/src/rhiza_agents/templates/config_editor.html` | Config editor to extend |
-| `/Users/tristan/Devel/rhiza/rhiza-agents/src/rhiza_agents/static/config.js` | Config JS to extend |
+| `docs/ARCHITECTURE.md` | Vector store integration section |
+| `src/rhiza_agents/agents/graph.py` | Tool resolution to extend |
+| `src/rhiza_agents/agents/registry.py` | Agent configs to update |
+| `src/rhiza_agents/db/sqlite.py` | Database patterns to follow |
+| `src/rhiza_agents/main.py` | Routes to add |
+| `src/rhiza_agents/templates/config_editor.html` | Config editor to extend |
+| `src/rhiza_agents/static/config.js` | Config JS to extend |
 
 ## Acceptance Criteria
 
