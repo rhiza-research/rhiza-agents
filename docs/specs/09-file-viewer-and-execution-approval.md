@@ -227,9 +227,9 @@ Switched from `astream_events(version="v2")` to `graph.astream(stream_mode=["upd
 
 The streaming handler in `main.py` now checks `body.execution_mode`. In "auto" mode, when HITL middleware produces an `__interrupt__`, the handler automatically resumes with `Command(resume={"decisions": [{"type": "approve"}]})` via a while loop around `graph.astream()`. In "review" mode, interrupts are sent to the frontend as before. This avoids custom middleware or multiple graph variants — the built-in `HumanInTheLoopMiddleware` is used as-is.
 
-#### 5. Stream writer for file events (NOT DONE)
+#### 5. Stream writer for file events (DONE)
 
-Currently `files_changed` SSE events are emitted from the streaming handler in `main.py` when it sees a `write_file` ToolMessage in the updates stream. The cleaner approach: use `runtime.stream_writer({"type": "files_changed"})` in the `write_file` tool (`agents/tools/files.py`), which emits via the `"custom"` stream mode. Remove the manual emission from `main.py`.
+`write_file` tool now calls `runtime.stream_writer({"type": "files_changed"})` to emit file change events via the `"custom"` stream mode. Removed the manual `files_changed` emission from both streaming handlers in `main.py` that checked for `write_file`/`run_file` ToolMessages in updates. The existing `custom` chunk handler in the streaming loop forwards these events to the client.
 
 #### 6. Agent name mapping in streaming (NOT DONE)
 
