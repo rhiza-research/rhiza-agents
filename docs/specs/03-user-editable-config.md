@@ -277,7 +277,7 @@ Features:
 - Right panel: form fields for the selected agent's config.
 - System prompt: multi-line textarea
 - Model: dropdown with Claude model options (claude-sonnet-4-20250514, claude-opus-4-20250514, claude-haiku-3-20240307)
-- Tools: checkboxes for available tool types (in this phase, only "mcp:sheerwater" is a real option; "sandbox:daytona" shown but greyed out with "Coming soon")
+- Tools: checkboxes for available tool types. Availability is fetched from `GET /api/tool-types` — checkboxes are enabled when `available=true`, disabled with "Not configured" badge when `available=false`. As of Phase 4, both "mcp:sheerwater" and "sandbox:daytona" are functional when configured.
 - Enable/Disable toggle button (not shown for supervisor)
 - Save button
 - Add Agent button: opens a small form to create a new agent (id, name, system prompt)
@@ -309,7 +309,7 @@ Add styles for the config editor:
 - Form field styles (reuse existing form-group styles from the modal)
 - Agent list item styles (active state, disabled state with dimmed text)
 - Responsive behavior for smaller screens
-- "Coming soon" badge style for unavailable tools
+- "Not configured" badge style for unavailable tools
 
 ## Reference Files
 
@@ -341,7 +341,7 @@ Add styles for the config editor:
 
 - **No vector store management in config editor** -- the `vectorstore_ids` field exists on the model but there's no UI to manage vector stores yet. That comes in Phase 5.
 - **No document upload** -- Phase 5.
-- **No sandbox tool** -- the "sandbox:daytona" checkbox appears in the UI but is greyed out. Phase 4 implements the actual tool.
+- **No sandbox tool** -- ~~the "sandbox:daytona" checkbox appears in the UI but is greyed out.~~ Phase 4 is now implemented: sandbox checkbox is functional when `DAYTONA_API_KEY` is configured, disabled with "Not configured" badge otherwise.
 - **No streaming** -- Phase 6.
 - **No multi-user config isolation testing** -- configs are per-user via `user_id`, but don't add complex access control. Each user sees only their own overrides.
 - **Do not modify the graph caching to be per-user keyed** -- the cache is keyed by config hash, which naturally handles per-user uniqueness (different config = different hash). If two users have the same effective config, they share the cached graph, which is fine.

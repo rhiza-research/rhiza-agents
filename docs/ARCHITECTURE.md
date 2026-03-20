@@ -109,7 +109,7 @@ enabled: bool        # whether this agent is active
 1. User sends message via `POST /api/chat`
 2. Server loads user's effective agent config (defaults + overrides)
 3. `agents/graph.py` builds or retrieves cached LangGraph graph
-4. Graph is invoked with `{"messages": [user_message]}` and `thread_id` = conversation UUID
+4. Graph is invoked with `{"messages": [user_message]}`, `thread_id` = conversation UUID, and `recursion_limit: 50`
 5. Supervisor decides which agent to route to
 6. Sub-agent executes with its tools (MCP calls, sandbox execution, RAG retrieval)
 7. Response flows back through supervisor to user
@@ -128,7 +128,7 @@ Agent prompts instruct workers to tag output with `[THINKING]` or `[RESPONSE]`. 
 
 `AIMessage.name` is always `None` after SQLite checkpoint serialization round-trip. Agent names are tracked via:
 - `_agent_names`: dict mapping agent_id → display name, built from registry at startup (global defaults)
-- `_tool_to_agent`: dict mapping MCP tool names → agent_id, built at startup (global defaults)
+- `_tool_to_agent`: dict mapping tool names → agent_id (MCP tool names + `execute_python_code` for sandbox), built at startup (global defaults)
 - `_build_name_mappings(configs)`: helper that builds both mappings from an effective config list (used per-user when user overrides exist)
 - `current_agent`: tracked during `_process_messages()` by observing `transfer_to_X` tool calls and MCP tool usage
 
@@ -168,9 +168,23 @@ See `docs/reference/mcp-integration.md` for details.
 
 ## Sandbox Integration
 
-Daytona SDK provides hosted code execution sandboxes. One sandbox per conversation with idle timeout. The tool accepts Python code and returns stdout, stderr, and exit code.
+Daytona SDK provides hosted code execution sandboxes. One sandbox per conversation with idle timeout. The `execute_python_code` LangChain tool accepts Python code and returns the combined output string and exit code.
 
-See `docs/reference/daytona-integration.md` for details.
+Key patterns:
+- **Lazy client init**: `Daytona` client initialized on first use, reads `DAYTONA_API_KEY` from env
+- **Per-conversation sandboxes**: Module-level `_sandboxes` dict keyed by thread_id
+- **Proxy URL patching**: `DAYTONA_PROXY_URL` env var overrides unreachable `toolboxProxyUrl` from Daytona API (critical for Docker)
+- **Idle cleanup**: Background task checks every 60s, deletes sandboxes idle >15 minutes
+- **Conversation delete cleanup**: Sandbox is deleted when its conversation is deleted
+- **Graceful degradation**: If `DAYTONA_API_KEY` is not set, sandbox tool is not added to the agent; code_runner responds conversationally
+
+See `docs/reference/daytona-integration.md` for SDK details.
+
+## Resilience
+
+- **LLM retry**: All `ChatAnthropic` model instances are wrapped with `.with_retry(stop_after_attempt=3)` to handle transient API failures (rate limits, 5xx errors)
+- **Recursion limit**: Graph invocation uses `recursion_limit: 50` to prevent runaway agent loops
+- **Tool availability**: `GET /api/tool-types` endpoint reports which tools are configured and available
 
 ## Vector Store Integration
 

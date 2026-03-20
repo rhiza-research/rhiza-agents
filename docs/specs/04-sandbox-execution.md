@@ -1,5 +1,7 @@
 # Phase 4: Sandboxed Code Execution
 
+**Status: Implemented**
+
 ## Goal
 
 The Code Runner agent can execute Python code in Daytona sandboxes. Users ask for code execution, the supervisor routes to code_runner, and code_runner writes Python code, executes it in a hosted sandbox, and returns the results (stdout, stderr, exit code).
@@ -345,3 +347,34 @@ For the Daytona SDK API, the key classes are:
 - **No pre-installed packages in sandbox** -- use whatever the default Daytona Python sandbox provides. If users need specific packages, they can `pip install` in their code.
 - **No image/plot rendering** -- plots generated in the sandbox are not captured as images. Users see stdout/stderr only. Image support can be added later.
 - **No streaming of code execution** -- the tool call blocks until execution completes, then returns the full result. Streaming is Phase 6.
+
+## Implementation Notes (Post-Implementation)
+
+Implementation closely followed the spec. Key details:
+
+### What was built
+
+1. **`agents/tools/sandbox.py`** — Ported from deepagents reference implementation. Exports: `execute_python_code` (LangChain tool), `is_sandbox_available()`, `cleanup_sandbox(thread_id)`, `cleanup_idle_sandboxes()`.
+
+2. **`config.py`** — Added `daytona_api_key`, `daytona_api_url`, `daytona_proxy_url` fields (all default to `""`). Note: the sandbox tool reads env vars directly; these config fields are for documentation/consistency.
+
+3. **`graph.py`** — `_resolve_tools()` now handles `sandbox:daytona`. All `ChatAnthropic` instances (supervisor + workers) wrapped with `.with_retry(stop_after_attempt=3)`.
+
+4. **`main.py`** changes:
+   - Sandbox cleanup background task in lifespan (checks every 60s)
+   - `recursion_limit: 50` on `graph.ainvoke()` in POST /api/chat
+   - `cleanup_sandbox()` called on conversation delete
+   - `_build_name_mappings()` and global `_tool_to_agent` now map `execute_python_code` → code_runner agent
+   - New `GET /api/tool-types` endpoint returning tool availability
+
+5. **`config.js`** — Fetches `/api/tool-types` on load. Tool checkboxes are now dynamic: enabled when `available=true`, disabled with "Not configured" badge when `available=false`. Save includes all checked tools (not just non-disabled).
+
+6. **`chat.js`** — `renderCodeExecutionBlocks()` function pairs `execute_python_code` tool calls with their results from activity data. Renders syntax-highlighted code block + output block inline in the chat before the AI response message.
+
+7. **`style.css`** — `.code-execution`, `.code-execution-header`, `.code-execution-code`, `.code-execution-output` classes.
+
+### Deviations from spec
+
+- **chat.html was NOT modified** — code execution blocks are rendered entirely by JavaScript (`renderCodeExecutionBlocks()` in chat.js), not by Jinja2 templates. Server-rendered pages show tool calls in the activity panel only; the inline code blocks appear on dynamic responses.
+- **`main.py` does not modify `_process_messages()` return format** — tool calls and tool results were already included in the activity list. The JS pairs them up client-side for inline rendering.
+- **`registry.py` kept the existing `_CODE_RUNNER_PROMPT`** (with `[THINKING]`/`[RESPONSE]` tags) rather than the simplified prompt in the spec.
