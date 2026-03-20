@@ -223,15 +223,9 @@ Switched from `astream_events(version="v2")` to `graph.astream(stream_mode=["upd
 
 `chat.js` handles `interrupt` SSE events by rendering an approval card with tool name, args, Approve/Reject buttons. Approve/Reject calls `/api/chat/resume` and pipes the response through the same `handleStreamEvent` logic. Frontend sends `execution_mode` (from the review checkbox) with each `/api/chat/stream` request.
 
-#### 4. Execution mode enforcement (NOT DONE)
+#### 4. Execution mode enforcement (DONE)
 
-The `execution_mode` field is sent from the frontend but the backend ignores it. The `HumanInTheLoopMiddleware` in `graph.py` always interrupts on `execute_python_code` and `run_file` regardless of mode.
-
-**What needs to happen:**
-- Pass `execution_mode` through to the graph via `context` parameter on `graph.astream()`
-- Define a `context_schema` dataclass (`AgentContext`) with `user_id` and `execution_mode`
-- Either conditionally add HITL middleware based on mode (requires two graph variants), or use a custom wrapper middleware that checks context and auto-approves in "auto" mode
-- See `docs/reference/langchain-docs-summary.md` "Custom Middleware" section for `wrap_tool_call` patterns
+The streaming handler in `main.py` now checks `body.execution_mode`. In "auto" mode, when HITL middleware produces an `__interrupt__`, the handler automatically resumes with `Command(resume={"decisions": [{"type": "approve"}]})` via a while loop around `graph.astream()`. In "review" mode, interrupts are sent to the frontend as before. This avoids custom middleware or multiple graph variants — the built-in `HumanInTheLoopMiddleware` is used as-is.
 
 #### 5. Stream writer for file events (NOT DONE)
 
