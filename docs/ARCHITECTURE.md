@@ -116,7 +116,7 @@ enabled: bool        # whether this agent is active
 8. All state persisted by LangGraph checkpointer
 9. Frontend parses SSE events, renders tokens incrementally with markdown, and streams tool activity to the activity panel
 
-The non-streaming `POST /api/chat` endpoint is retained for backward compatibility. It uses `_process_messages()` to convert raw LangGraph messages into a flat ordered list with type fields (`human`, `ai`, `thinking`, `tool_call`, `tool_result`).
+Page reloads (`GET /c/{conversation_id}`) use `graph.aget_state()` + `_process_messages()` to render the conversation server-side. `_process_messages()` converts raw LangGraph messages into a flat ordered list with type fields (`human`, `ai`, `thinking`, `tool_call`, `tool_result`).
 
 ### Message Classification
 
