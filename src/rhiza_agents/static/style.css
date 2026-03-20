@@ -163,6 +163,30 @@ body {
     color: #ccc;
 }
 
+.sample-prompts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    justify-content: center;
+    margin-top: 1.5rem;
+}
+
+.sample-prompt {
+    background: #1e1e2e;
+    border: 1px solid #333;
+    color: #ccc;
+    padding: 0.6rem 1rem;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    transition: border-color 0.15s, background 0.15s;
+}
+
+.sample-prompt:hover {
+    border-color: #4a90d9;
+    background: #252535;
+}
+
 .message {
     max-width: 1200px;
     margin: 0 0 1rem;

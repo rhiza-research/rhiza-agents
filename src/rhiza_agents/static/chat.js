@@ -564,6 +564,14 @@ function addMessage(role, content, loading = false, agentName = null) {
     return div;
 }
 
+// Sample prompt buttons
+document.querySelectorAll('.sample-prompt').forEach(btn => {
+    btn.addEventListener('click', () => {
+        input.value = btn.dataset.prompt;
+        form.dispatchEvent(new Event('submit'));
+    });
+});
+
 // New chat button
 newChatBtn.addEventListener('click', () => {
     window.location.href = '/';

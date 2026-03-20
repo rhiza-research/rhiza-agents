@@ -91,6 +91,26 @@ After completing implementation for a phase, before considering the phase done:
 
 The goal is that specs always reflect the current state of the code, not the original plan. Future phases build on what was actually implemented, not what was originally specified.
 
+## Implementation Phases
+
+| Phase | Spec | Status |
+|-------|------|--------|
+| 1 | `docs/specs/01-mvp-single-agent.md` | Complete |
+| 2 | `docs/specs/02-multi-agent-supervisor.md` | Complete |
+| 3 | `docs/specs/03-user-editable-config.md` | Complete |
+| 4 | `docs/specs/04-sandbox-execution.md` | Complete |
+| 5 | `docs/specs/05-vector-store.md` | Complete |
+| 6 | `docs/specs/06-streaming.md` | Complete |
+| 7 | `docs/specs/07-production-deploy.md` | Complete |
+| 8 | `docs/specs/08-context-management.md` | Complete (now uses SummarizationMiddleware) |
+| 9 | `docs/specs/09-file-viewer-and-execution-approval.md` | Partial — files/viewer done, HITL/streaming/execution mode remaining |
+| 10 | `docs/specs/10-extended-thinking.md` | Not started — depends on Phase 9 streaming work |
+
+## Key Principles
+
+- **Never write custom code when a built-in exists.** Always check `langchain` middleware, `langgraph` primitives, and community plugins first. See `docs/reference/langchain-docs-summary.md` for the full inventory.
+- **Security must be structural, not prompt-based.** Use HITL middleware for execution approval, not prompt instructions. LLMs cannot be trusted to enforce security.
+
 ## Reference Files (in sibling repos)
 
 These files contain patterns to reuse:

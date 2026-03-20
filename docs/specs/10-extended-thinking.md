@@ -18,7 +18,7 @@ Enable extended thinking on `ChatAnthropic` model instances. The Anthropic API p
 
 ## Prerequisites
 
-Phase 9 complete. `langchain-anthropic` supports the `thinking` parameter (verified: `ChatAnthropic(model=..., thinking={'type': 'enabled', 'budget_tokens': N})`).
+Phase 9 complete, including the streaming modernization (switch from `astream_events` to `graph.astream` with `stream_mode=["updates", "messages", "custom"]`). The `"messages"` stream mode provides `content_blocks` with `type: "reasoning"` vs `type: "text"`, which is required for this phase. `langchain-anthropic` supports the `thinking` parameter (verified: `ChatAnthropic(model=..., thinking={'type': 'enabled', 'budget_tokens': N})`).
 
 ## What to Change
 
@@ -34,7 +34,7 @@ The `budget_tokens` controls how many tokens the model can use for thinking. Nee
 
 ### Streaming Handler
 
-Replace the tag-based buffering logic in `main.py` with content block type detection. During streaming, `ChatAnthropic` with extended thinking produces chunks with content that includes block type information. Route `thinking` blocks to the activity panel and `text` blocks to the main chat.
+In the `"messages"` stream (from Phase 9's streaming modernization), filter `chunk.content_blocks` for `type: "reasoning"` (→ activity panel `thinking` SSE event) vs `type: "text"` (→ `token` SSE event). LangChain normalizes Anthropic thinking blocks into the standard `"reasoning"` content block type.
 
 The current tag buffering code (`node_buffer`, `node_mode`, `_THINKING_TAG`, `_RESPONSE_TAG` detection) should be removed entirely.
 

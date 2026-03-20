@@ -206,3 +206,23 @@ files: dict[str, dict]  # path -> file data
 - `ToolRuntime` from `langgraph.prebuilt` provides `state`, `tool_call_id`, and `config` to tools without exposing them to the LLM's tool-calling interface
 - `Command` from `langgraph.types` lets tools return state updates alongside a `ToolMessage` response
 - The `files` reducer in the state schema handles merging -- each `Command` update only contains the new/changed files, and the reducer merges them into the existing dict
+
+### Remaining work
+
+#### HITL Interrupt Flow (not yet implemented)
+
+The `HumanInTheLoopMiddleware` is configured in `graph.py` but the UI doesn't handle interrupts properly. The current "Approve & Run" button sends a chat message — it should use LangGraph's interrupt/resume protocol instead.
+
+**What needs to change:**
+
+1. **Streaming handler (`main.py`):** Switch from `astream_events(version="v2")` to `graph.astream(stream_mode=["updates", "messages", "custom"], version="v2")`. The `"updates"` stream emits `__interrupt__` when HITL pauses execution. Detect this and emit an `interrupt` SSE event with tool name, arguments, and interrupt ID.
+
+2. **Resume endpoint (`main.py`):** Add `POST /api/chat/resume` that accepts an interrupt decision (approve/reject) and calls `graph.astream(Command(resume={"decisions": [...]}), config=...)`. Returns an SSE stream (same format as `/api/chat/stream`) because the resumed graph continues executing.
+
+3. **Frontend (`chat.js`):** Handle the `interrupt` SSE event — render an approval card in the messages area showing the tool name + args, with Approve/Reject buttons. On approve, call `/api/chat/resume`. Wire the resume SSE stream to the same `handleStreamEvent` logic.
+
+4. **Execution mode via context:** Define an `AgentContext` dataclass with `user_id` and `execution_mode`. Pass it at invocation time. The HITL middleware should auto-approve in "auto" mode and interrupt in "review" mode. Include `execution_mode` in the `POST /api/chat/stream` request body from the frontend.
+
+5. **Stream writer for file events (`files.py`):** Use `runtime.stream_writer({"type": "files_changed"})` in `write_file` to emit file change events directly from the tool. Handle `"custom"` stream chunks in the streaming handler. Remove the manual `files_changed` yields from `main.py`.
+
+Reference: See `docs/reference/langchain-docs-summary.md` for the langchain streaming, HITL, and tools documentation.

@@ -13,8 +13,7 @@ from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from pydantic import BaseModel
 from starlette.middleware.sessions import SessionMiddleware
@@ -163,90 +162,6 @@ def _build_name_mappings(configs: list[AgentConfig]) -> tuple[dict[str, str], di
             tool_to_agent["write_file"] = c.id
             tool_to_agent["run_file"] = c.id
     return agent_names, tool_to_agent
-
-
-_SUMMARY_PREFIX = "Summary of earlier conversation:"
-_MESSAGE_COUNT_THRESHOLD = 50
-_MESSAGES_TO_KEEP = 10
-
-
-async def _maybe_summarize(graph, conversation_id: str):
-    """Summarize and prune checkpoint if message history is too long.
-
-    Runs as a background task after streaming completes. Replaces old
-    messages with a concise summary to keep the checkpoint bounded.
-    """
-    try:
-        state = await graph.aget_state({"configurable": {"thread_id": conversation_id}})
-        messages = state.values.get("messages", [])
-
-        if len(messages) <= _MESSAGE_COUNT_THRESHOLD:
-            return
-
-        to_summarize = messages[:-_MESSAGES_TO_KEEP]
-        existing_summary = ""
-
-        # Check if there's already a summary message at the start
-        if (
-            to_summarize
-            and isinstance(to_summarize[0], AIMessage)
-            and _extract_text(to_summarize[0].content).startswith(_SUMMARY_PREFIX)
-        ):
-            existing_summary = to_summarize[0].content
-            to_summarize = to_summarize[1:]
-
-        if existing_summary:
-            prompt = (
-                f"{existing_summary}\n\n"
-                "Update this summary to include the following new messages. "
-                "Be concise but preserve key facts, decisions, and results:\n\n"
-            )
-        else:
-            prompt = (
-                "Summarize the following conversation. Be concise but preserve "
-                "key facts, decisions, data results, and any code that was executed. "
-                "This summary will replace the original messages:\n\n"
-            )
-
-        for msg in to_summarize:
-            role = msg.__class__.__name__.replace("Message", "")
-            content = _extract_text(msg.content) if hasattr(msg, "content") else ""
-            if content:
-                prompt += f"{role}: {content[:500]}\n"
-
-        model = ChatAnthropic(model="claude-haiku-3-20240307").with_retry(stop_after_attempt=3)
-        summary_response = await model.ainvoke([HumanMessage(content=prompt)])
-        summary_text = f"{_SUMMARY_PREFIX}\n{_extract_text(summary_response.content)}"
-
-        # Remove old messages (including existing summary if present)
-        updates = [RemoveMessage(id=msg.id) for msg in to_summarize]
-        if (
-            messages
-            and isinstance(messages[0], AIMessage)
-            and _extract_text(messages[0].content).startswith(_SUMMARY_PREFIX)
-        ):
-            updates.append(RemoveMessage(id=messages[0].id))
-
-        await graph.aupdate_state(
-            {"configurable": {"thread_id": conversation_id}},
-            {"messages": updates},
-        )
-
-        # Prepend summary as an AIMessage so it's visible to the LLM
-        # (SystemMessage would be stripped by trim_messages include_system=False)
-        await graph.aupdate_state(
-            {"configurable": {"thread_id": conversation_id}},
-            {"messages": [AIMessage(content=summary_text)]},
-        )
-
-        logger.info(
-            "Summarized conversation %s: %d messages -> %d kept + summary",
-            conversation_id,
-            len(messages),
-            _MESSAGES_TO_KEEP,
-        )
-    except Exception:
-        logger.exception("Failed to summarize conversation %s", conversation_id)
 
 
 def _process_messages(raw_messages, agent_names=None, tool_to_agent_map=None):
@@ -459,7 +374,7 @@ async def stream_chat_message(
         try:
             async for event in graph.astream_events(
                 {"messages": [HumanMessage(content=body.message)]},
-                config={"configurable": {"thread_id": conversation_id}, "recursion_limit": 50},
+                config={"configurable": {"thread_id": conversation_id}},
                 version="v2",
             ):
                 kind = event["event"]
@@ -551,8 +466,17 @@ async def stream_chat_message(
             title = body.message[:50] + ("..." if len(body.message) > 50 else "")
             await db.update_conversation_title(conversation_id, user_id, title)
 
-        # Summarize old messages in the background if the conversation is long
-        asyncio.create_task(_maybe_summarize(graph, conversation_id))
+        # Check for HITL interrupts (from HumanInTheLoopMiddleware)
+        try:
+            state = await graph.aget_state({"configurable": {"thread_id": conversation_id}})
+            for task in state.tasks:
+                for interrupt in getattr(task, "interrupts", []):
+                    yield (
+                        f"event: interrupt\ndata: "
+                        f"{json.dumps({'id': str(interrupt.id), 'value': interrupt.value}, default=str)}\n\n"
+                    )
+        except Exception:
+            logger.exception("Failed to check for interrupts")
 
         # Always notify files_changed at end of stream as a fallback,
         # in case Command-based tool updates weren't caught during streaming

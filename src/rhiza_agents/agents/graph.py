@@ -6,12 +6,17 @@ import logging
 from collections.abc import Sequence
 from typing import Annotated, NotRequired, TypedDict
 
+from langchain.agents import create_agent
+from langchain.agents.middleware import (
+    HumanInTheLoopMiddleware,
+    ModelCallLimitMiddleware,
+    ModelRetryMiddleware,
+    SummarizationMiddleware,
+)
 from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import AnyMessage, SystemMessage
-from langchain_core.messages.utils import count_tokens_approximately, trim_messages
+from langchain_core.messages import AnyMessage
 from langgraph.graph.message import add_messages
 from langgraph.managed.is_last_step import RemainingStepsManager
-from langgraph.prebuilt import create_react_agent
 from langgraph_supervisor import create_supervisor
 
 from ..db.models import AgentConfig
@@ -19,6 +24,9 @@ from ..db.models import AgentConfig
 logger = logging.getLogger(__name__)
 
 _graph_cache: dict = {}
+
+# Tools that require human approval before execution
+_HITL_TOOLS = {"execute_python_code", "run_file"}
 
 
 def _merge_files(current: dict, update: dict) -> dict:
@@ -34,40 +42,64 @@ def _merge_files(current: dict, update: dict) -> dict:
 
 
 class AgentGraphState(TypedDict):
-    """Custom state schema for the supervisor graph, extending the default with files."""
+    """State schema for worker agents (used by create_agent)."""
+
+    messages: Annotated[Sequence[AnyMessage], add_messages]
+    files: Annotated[dict, _merge_files]
+
+
+class SupervisorGraphState(TypedDict):
+    """State schema for the supervisor graph (used by create_supervisor).
+
+    create_supervisor internally uses create_react_agent which requires
+    remaining_steps. create_agent rejects it. So we need separate schemas.
+    """
 
     messages: Annotated[Sequence[AnyMessage], add_messages]
     remaining_steps: NotRequired[Annotated[int, RemainingStepsManager]]
     files: Annotated[dict, _merge_files]
 
 
-# Max tokens for message history sent to the LLM. 100k leaves headroom
-# within Claude's 200k context window for the system prompt, tool
-# definitions, and the model's response.
-_TRIM_MAX_TOKENS = 100_000
+def _build_worker_middleware(tools: list) -> list:
+    """Build the middleware stack for a worker agent.
 
-
-def _make_prompt_with_trimming(system_prompt: str, max_tokens: int = _TRIM_MAX_TOKENS):
-    """Create a prompt callable that prepends the system prompt and trims messages.
-
-    The callable receives the full graph state (dict with "messages" key)
-    and returns a list of messages suitable for the LLM.
+    Includes summarization, model retry, model call limit, and HITL
+    (when the worker has sandbox tools that need approval).
     """
+    middleware = [
+        SummarizationMiddleware(
+            model="anthropic:claude-haiku-3-20240307",
+            trigger=("tokens", 100_000),
+            keep=("messages", 10),
+        ),
+        ModelRetryMiddleware(max_retries=3),
+        ModelCallLimitMiddleware(run_limit=50),
+    ]
 
-    def prompt(state: dict) -> list:
-        messages = state.get("messages", [])
-        trimmed = trim_messages(
-            messages,
-            strategy="last",
-            token_counter=count_tokens_approximately,
-            max_tokens=max_tokens,
-            start_on="human",
-            end_on=("human", "tool"),
-            include_system=False,
+    # Add HITL middleware if any tools require approval
+    tool_names = {getattr(t, "name", None) for t in tools}
+    hitl_tools = tool_names & _HITL_TOOLS
+    if hitl_tools:
+        middleware.append(
+            HumanInTheLoopMiddleware(
+                interrupt_on={name: True for name in hitl_tools},
+            )
         )
-        return [SystemMessage(content=system_prompt)] + trimmed
 
-    return prompt
+    return middleware
+
+
+def _build_supervisor_middleware() -> list:
+    """Build the middleware stack for the supervisor agent."""
+    return [
+        SummarizationMiddleware(
+            model="anthropic:claude-haiku-3-20240307",
+            trigger=("tokens", 100_000),
+            keep=("messages", 10),
+        ),
+        ModelRetryMiddleware(max_retries=3),
+        ModelCallLimitMiddleware(run_limit=50),
+    ]
 
 
 def _config_hash(configs: list[AgentConfig]) -> str:
@@ -138,25 +170,24 @@ async def build_graph(
     worker_agents = []
     for wc in worker_configs:
         tools = await _resolve_tools(wc, mcp_tools, vectorstore_manager, db)
-        # Don't use .with_retry() here — create_react_agent needs the raw
-        # ChatModel to call .bind_tools(). Retry wrapping produces a
-        # RunnableRetry which lacks that method.
-        model = ChatAnthropic(model=wc.model, max_retries=3)
-        worker = create_react_agent(
+        middleware = _build_worker_middleware(tools)
+        model = ChatAnthropic(model=wc.model)
+        worker = create_agent(
             model,
             tools,
-            prompt=_make_prompt_with_trimming(wc.system_prompt),
+            system_prompt=wc.system_prompt,
+            middleware=middleware,
             name=wc.id,
             state_schema=AgentGraphState,
         )
         worker_agents.append(worker)
-        logger.info("Created worker agent: %s (%d tools)", wc.id, len(tools))
+        logger.info("Created worker agent: %s (%d tools, %d middleware)", wc.id, len(tools), len(middleware))
 
     supervisor = create_supervisor(
-        model=ChatAnthropic(model=supervisor_config.model, max_retries=3),
+        model=ChatAnthropic(model=supervisor_config.model),
         agents=worker_agents,
-        prompt=_make_prompt_with_trimming(supervisor_config.system_prompt),
-        state_schema=AgentGraphState,
+        prompt=supervisor_config.system_prompt,
+        state_schema=SupervisorGraphState,
         output_mode="full_history",
         add_handoff_back_messages=True,
     )
