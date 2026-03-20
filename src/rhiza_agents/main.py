@@ -446,6 +446,8 @@ async def stream_chat_message(
         yield f"event: conversation_id\ndata: {json.dumps({'conversation_id': conversation_id})}\n\n"
 
         current_agent = None
+        node_buffer = ""
+        node_mode = None  # None (undecided), "thinking", or "response"
 
         try:
             async for event in graph.astream_events(
@@ -457,20 +459,60 @@ async def stream_chat_message(
 
                 if kind == "on_chat_model_stream":
                     chunk = event["data"]["chunk"]
-                    if hasattr(chunk, "content") and isinstance(chunk.content, str) and chunk.content:
-                        node = event.get("metadata", {}).get("langgraph_node", "")
-                        display = agent_names.get(node, node)
-                        if node != current_agent:
-                            current_agent = node
-                            yield f"event: agent_start\ndata: {json.dumps({'agent': display})}\n\n"
-                        yield f"event: token\ndata: {json.dumps({'content': chunk.content})}\n\n"
+                    text = _extract_text(chunk.content) if hasattr(chunk, "content") else ""
+                    if not text:
+                        continue
+
+                    node = event.get("metadata", {}).get("langgraph_node", "")
+                    display = agent_names.get(node, node)
+                    if node != current_agent:
+                        # Flush any buffered thinking text to activity panel
+                        if node_mode == "thinking" and node_buffer:
+                            content = node_buffer.lstrip().removeprefix(_THINKING_TAG).strip()
+                            if content:
+                                yield f"event: thinking\ndata: {json.dumps({'content': content})}\n\n"
+                        current_agent = node
+                        node_buffer = ""
+                        node_mode = None
+                        yield f"event: agent_start\ndata: {json.dumps({'agent': display})}\n\n"
+
+                    if node_mode is None:
+                        node_buffer += text
+                        stripped = node_buffer.lstrip()
+                        if len(stripped) >= len(_THINKING_TAG):
+                            if stripped.startswith(_THINKING_TAG):
+                                node_mode = "thinking"
+                            elif stripped.startswith(_RESPONSE_TAG):
+                                node_mode = "response"
+                                # Flush buffer minus tag as tokens
+                                remainder = stripped[len(_RESPONSE_TAG) :]
+                                if remainder:
+                                    yield f"event: token\ndata: {json.dumps({'content': remainder})}\n\n"
+                            else:
+                                node_mode = "response"
+                                yield f"event: token\ndata: {json.dumps({'content': node_buffer})}\n\n"
+                    elif node_mode == "response":
+                        yield f"event: token\ndata: {json.dumps({'content': text})}\n\n"
+                    else:
+                        # thinking mode: accumulate for activity panel
+                        node_buffer += text
+
+                elif kind == "on_chat_model_end":
+                    # Flush accumulated thinking text to activity panel
+                    if node_mode == "thinking" and node_buffer:
+                        content = node_buffer.lstrip().removeprefix(_THINKING_TAG).strip()
+                        if content:
+                            yield f"event: thinking\ndata: {json.dumps({'content': content})}\n\n"
+                        node_buffer = ""
+                        node_mode = None
 
                 elif kind == "on_tool_start":
                     tool_name = event.get("name", "")
                     if tool_name.startswith(("transfer_to_", "transfer_back_to_")):
                         continue
                     tool_input = event.get("data", {}).get("input", {})
-                    yield (f"event: tool_start\ndata: {json.dumps({'name': tool_name, 'input': tool_input})}\n\n")
+                    data = json.dumps({"name": tool_name, "input": tool_input}, default=str)
+                    yield f"event: tool_start\ndata: {data}\n\n"
 
                 elif kind == "on_tool_end":
                     tool_name = event.get("name", "")

@@ -109,13 +109,16 @@ async def build_graph(
     worker_agents = []
     for wc in worker_configs:
         tools = await _resolve_tools(wc, mcp_tools, vectorstore_manager, db)
-        model = ChatAnthropic(model=wc.model).with_retry(stop_after_attempt=3)
+        # Don't use .with_retry() here — create_react_agent needs the raw
+        # ChatModel to call .bind_tools(). Retry wrapping produces a
+        # RunnableRetry which lacks that method.
+        model = ChatAnthropic(model=wc.model, max_retries=3)
         worker = create_react_agent(model, tools, prompt=_make_prompt_with_trimming(wc.system_prompt), name=wc.id)
         worker_agents.append(worker)
         logger.info("Created worker agent: %s (%d tools)", wc.id, len(tools))
 
     supervisor = create_supervisor(
-        model=ChatAnthropic(model=supervisor_config.model).with_retry(stop_after_attempt=3),
+        model=ChatAnthropic(model=supervisor_config.model, max_retries=3),
         agents=worker_agents,
         prompt=_make_prompt_with_trimming(supervisor_config.system_prompt),
         output_mode="full_history",

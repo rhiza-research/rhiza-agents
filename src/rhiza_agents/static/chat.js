@@ -238,6 +238,10 @@ function handleStreamEvent(event, msgDiv) {
             appendToken(msgDiv, event.data.content);
             break;
 
+        case 'thinking':
+            renderActivityItem({type: 'thinking', content: event.data.content});
+            break;
+
         case 'tool_start':
             renderActivityItem({type: 'tool_call', name: event.data.name, args: event.data.input});
             break;
