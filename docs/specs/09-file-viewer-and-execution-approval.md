@@ -209,7 +209,7 @@ files: dict[str, dict]  # path -> file data
 
 ### Remaining work
 
-Items 1-3 below are done. Items 4-6 are remaining.
+All items below are done.
 
 #### 1. Streaming handler (DONE)
 
@@ -231,10 +231,6 @@ The streaming handler in `main.py` now checks `body.execution_mode`. In "auto" m
 
 `write_file` tool now calls `runtime.stream_writer({"type": "files_changed"})` to emit file change events via the `"custom"` stream mode. Removed the manual `files_changed` emission from both streaming handlers in `main.py` that checked for `write_file`/`run_file` ToolMessages in updates. The existing `custom` chunk handler in the streaming loop forwards these events to the client.
 
-#### 6. Agent name mapping in streaming (NOT DONE)
+#### 6. Agent name mapping in streaming (DONE)
 
-The `graph.astream` messages stream returns `langgraph_node` metadata with internal node names ("model", "tools", "agent") instead of our display names ("Supervisor", "Data Analyst"). The `agent_names` dict maps agent IDs to display names, but the streaming metadata uses different keys. Need to either:
-- Map internal node names to agent IDs, or
-- Use the `lc_agent_name` metadata key if available (see langchain streaming docs)
-
-Reference: See `docs/reference/langchain-docs-summary.md` for the langchain streaming, HITL, context, and tools documentation.
+The streaming handler now reads `lc_agent_name` from message metadata (with fallback to `langgraph_node`). `lc_agent_name` contains the agent's `name` parameter from `create_agent` (e.g., `"data_analyst"`), which maps directly to display names via the `agent_names` dict. Previously it used `langgraph_node` which contains internal node names like `"model"` or `"tools"`.
