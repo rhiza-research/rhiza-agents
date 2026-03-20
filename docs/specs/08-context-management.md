@@ -216,3 +216,21 @@ For LangGraph summarization patterns:
 - **No external memory store** -- summaries live in the checkpoint state, not in a separate database.
 - **No semantic memory or entity extraction** -- just straightforward message summarization. Don't build a knowledge graph or entity store.
 - **No changes to the database schema** -- everything works through the existing LangGraph checkpoint mechanism.
+
+## Implementation Notes
+
+### Part 1: Per-LLM-Call Message Trimming
+
+- Both `create_react_agent` and `create_supervisor` accept a callable for the `prompt` parameter. The callable receives the **full graph state dict** (not just messages) and returns `LanguageModelInput`.
+- `_make_prompt_with_trimming(system_prompt, max_tokens)` in `graph.py` returns a closure that extracts `state["messages"]`, runs `trim_messages(strategy="last", ...)`, and prepends a `SystemMessage` with the agent's system prompt.
+- Default `max_tokens=100_000` — leaves headroom for system prompt, tool definitions, and response within Claude's 200k context window.
+- `trim_messages` with `include_system=False` strips any system messages from the history before trimming, so system prompts don't count against the token budget.
+
+### Part 2: Checkpoint Summarization
+
+- **Summary stored as `AIMessage`**, not `SystemMessage`. The trimming callable uses `include_system=False`, which would strip `SystemMessage` summaries. `AIMessage` survives the trimming pass and is visible to the LLM.
+- Summary prefix: `"Summary of earlier conversation:"` — used to detect existing summaries during subsequent summarization rounds.
+- **Two-step checkpoint update**: First `aupdate_state` with `RemoveMessage` entries to delete old messages, then a second `aupdate_state` to append the new summary `AIMessage`. The summary is appended (not prepended) since LangGraph's message reducer only supports append.
+- **Summarization model**: `claude-haiku-3-20240307` — cheaper/faster than the main conversation models. Uses `.with_retry(stop_after_attempt=3)` for resilience.
+- **Background task**: `asyncio.create_task(_maybe_summarize(...))` fires after the SSE stream completes in `POST /api/chat/stream`. Errors are caught and logged, never propagated to the user.
+- **`_process_messages()` interaction**: System messages and AI messages with the summary prefix will appear as `"ai"` type entries in the processed output. This is acceptable — the summary is visible to users on conversation reload as a regular AI message.

@@ -181,6 +181,31 @@ Key patterns:
 
 See `docs/reference/daytona-integration.md` for SDK details.
 
+## Context Management
+
+Long conversations are managed at two levels to prevent context window overflows and unbounded checkpoint growth.
+
+### Per-LLM-Call Message Trimming
+
+Each agent (supervisor and workers) uses a callable `prompt` parameter that trims messages before they reach the LLM. This doesn't change what's stored in the checkpoint — it only controls what the model sees.
+
+- `_make_prompt_with_trimming(system_prompt)` in `graph.py` returns a closure that:
+  1. Extracts messages from the graph state
+  2. Runs `trim_messages(strategy="last", max_tokens=100_000)` to keep only recent messages within budget
+  3. Prepends the agent's system prompt as a `SystemMessage`
+- The 100k token limit leaves headroom for system prompt, tool definitions, and response within Claude's 200k context window
+- `count_tokens_approximately` from langchain-core estimates tokens without calling an external tokenizer
+
+### Post-Invocation Checkpoint Summarization
+
+After each streaming response completes, a background task checks if the conversation's checkpoint has grown too large (>50 messages). If so, it summarizes old messages with a Haiku LLM call and prunes the checkpoint.
+
+- **Threshold**: 50 messages trigger summarization; 10 most recent messages are kept
+- **Summary format**: Stored as an `AIMessage` with prefix `"Summary of earlier conversation:"` — visible to both LLM (survives trimming) and users (rendered on reload)
+- **Incremental**: Existing summaries are detected and updated rather than re-summarizing from scratch
+- **Checkpoint update**: Uses `RemoveMessage` + `graph.aupdate_state()` to prune old messages, then appends the summary
+- **Non-blocking**: Runs via `asyncio.create_task()` after the SSE stream completes; errors are logged, never propagated
+
 ## Resilience
 
 - **LLM retry**: All `ChatAnthropic` model instances are wrapped with `.with_retry(stop_after_attempt=3)` to handle transient API failures (rate limits, 5xx errors)
