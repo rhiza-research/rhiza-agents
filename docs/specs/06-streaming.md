@@ -445,3 +445,15 @@ Key v2 event fields:
 - **No streaming of tool execution** -- tool start/end events are sent, but the tool's internal execution doesn't stream. The tool runs to completion and then the result event is sent.
 - **No client-side conversation state management** -- the server (LangGraph checkpointer) is the source of truth. The client is just a renderer.
 - **No typing indicators for other users** -- this is a single-user application.
+
+## Implementation Notes (Post-Implementation)
+
+### Key changes beyond spec
+
+- **Agent name resolution in streaming**: The streaming endpoint resolves `langgraph_node` metadata to display names using `agent_names` dict from `_build_name_mappings()`, so agent badges show "Data Analyst" instead of "data_analyst".
+- **Handoff filtering**: `transfer_to_*` and `transfer_back_to_*` tool events are filtered out of the stream (same as in `_process_messages()`).
+- **Tool output truncation**: Tool results are truncated to 1000 chars in the SSE stream to avoid oversized events.
+- **AbortController**: Frontend uses `AbortController` to cancel active streams when sending a new message.
+- **`done` event simplified**: Just sends `{}` instead of a tool call summary — the activity panel already has the tool calls from `tool_start`/`tool_end` events.
+- **Code execution blocks removed from chat.js**: The `renderCodeExecutionBlocks()` function was removed since tool activity now streams to the activity panel. Code execution is visible there.
+- **Cursor character**: Uses Unicode lozenge (`\u25ca`) instead of block cursor for the streaming indicator.

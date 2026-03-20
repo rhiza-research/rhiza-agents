@@ -104,18 +104,19 @@ enabled: bool        # whether this agent is active
 
 ## Data Flow
 
-### Chat Message Flow
+### Chat Message Flow (Streaming)
 
-1. User sends message via `POST /api/chat`
+1. User sends message via `POST /api/chat/stream`
 2. Server loads user's effective agent config (defaults + overrides)
 3. `agents/graph.py` builds or retrieves cached LangGraph graph
-4. Graph is invoked with `{"messages": [user_message]}`, `thread_id` = conversation UUID, and `recursion_limit: 50`
+4. Graph is streamed via `graph.astream_events()` with `version="v2"`, `thread_id` = conversation UUID, and `recursion_limit: 50`
 5. Supervisor decides which agent to route to
 6. Sub-agent executes with its tools (MCP calls, sandbox execution, RAG retrieval)
-7. Response flows back through supervisor to user
+7. Tokens stream back as SSE events (`token`, `agent_start`, `tool_start`, `tool_end`, `done`)
 8. All state persisted by LangGraph checkpointer
-9. `_process_messages()` converts raw LangGraph messages into a single flat ordered list with type fields (`human`, `ai`, `thinking`, `tool_call`, `tool_result`)
-10. Callers filter by type: `("human", "ai")` for main chat, `("thinking", "tool_call", "tool_result")` for the activity panel
+9. Frontend parses SSE events, renders tokens incrementally with markdown, and streams tool activity to the activity panel
+
+The non-streaming `POST /api/chat` endpoint is retained for backward compatibility. It uses `_process_messages()` to convert raw LangGraph messages into a flat ordered list with type fields (`human`, `ai`, `thinking`, `tool_call`, `tool_result`).
 
 ### Message Classification
 
