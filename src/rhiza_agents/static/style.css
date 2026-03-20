@@ -187,6 +187,84 @@ body {
     background: #252535;
 }
 
+.interrupt-card {
+    max-width: 600px;
+    margin: 1rem 0;
+    border: 1px solid #d4a017;
+    border-radius: 8px;
+    overflow: hidden;
+    background: #1e1e2e;
+}
+
+.interrupt-header {
+    background: #2a2a1a;
+    padding: 0.5rem 0.75rem;
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #d4a017;
+}
+
+.interrupt-tool {
+    padding: 0.5rem 0.75rem;
+    font-family: 'SF Mono', Monaco, monospace;
+    font-size: 0.85rem;
+    color: #ccc;
+}
+
+.interrupt-args {
+    padding: 0 0.75rem 0.5rem;
+}
+
+.interrupt-args summary {
+    cursor: pointer;
+    color: #888;
+    font-size: 0.8rem;
+}
+
+.interrupt-args pre {
+    background: #0d1117;
+    padding: 0.5rem;
+    border-radius: 4px;
+    font-size: 0.8rem;
+    color: #c9d1d9;
+    overflow-x: auto;
+    margin-top: 0.25rem;
+}
+
+.interrupt-actions {
+    display: flex;
+    gap: 0.5rem;
+    padding: 0.5rem 0.75rem 0.75rem;
+}
+
+.interrupt-approve {
+    background: #2ea043;
+    color: #fff;
+    border: none;
+    padding: 0.4rem 1rem;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.85rem;
+}
+
+.interrupt-approve:hover {
+    background: #3fb950;
+}
+
+.interrupt-reject {
+    background: transparent;
+    color: #f85149;
+    border: 1px solid #f85149;
+    padding: 0.4rem 1rem;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.85rem;
+}
+
+.interrupt-reject:hover {
+    background: #2a1a1a;
+}
+
 .message {
     max-width: 1200px;
     margin: 0 0 1rem;

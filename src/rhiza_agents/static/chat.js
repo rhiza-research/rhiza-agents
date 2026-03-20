@@ -450,6 +450,10 @@ function handleStreamEvent(event, msgDiv) {
             filesToggle.classList.add('has-files');
             break;
 
+        case 'interrupt':
+            renderInterruptCard(event.data, msgDiv);
+            break;
+
         case 'error':
             setMessageError(msgDiv, event.data.error);
             break;
@@ -457,6 +461,92 @@ function handleStreamEvent(event, msgDiv) {
         case 'done':
             finalizeMessage(msgDiv);
             break;
+    }
+}
+
+function renderInterruptCard(interruptData, msgDiv) {
+    // Show an approval card for HITL interrupts
+    const card = document.createElement('div');
+    card.className = 'interrupt-card';
+
+    const actionRequests = interruptData.action_requests || [];
+    const toolName = actionRequests.length > 0 ? actionRequests[0].action?.name : 'Unknown tool';
+    const toolArgs = actionRequests.length > 0 ? actionRequests[0].action?.args : {};
+
+    card.innerHTML = `
+        <div class="interrupt-header">Approval Required</div>
+        <div class="interrupt-tool">${toolName}</div>
+        <details class="interrupt-args">
+            <summary>arguments</summary>
+            <pre>${JSON.stringify(toolArgs, null, 2)}</pre>
+        </details>
+        <div class="interrupt-actions">
+            <button class="interrupt-approve">Approve</button>
+            <button class="interrupt-reject">Reject</button>
+        </div>
+    `;
+
+    card.querySelector('.interrupt-approve').addEventListener('click', () => {
+        card.remove();
+        resumeExecution('approve', null, msgDiv);
+    });
+
+    card.querySelector('.interrupt-reject').addEventListener('click', () => {
+        card.remove();
+        resumeExecution('reject', 'Rejected by user', msgDiv);
+    });
+
+    messagesDiv.appendChild(card);
+    messagesDiv.scrollTop = messagesDiv.scrollHeight;
+}
+
+async function resumeExecution(decision, message, msgDiv) {
+    const convId = conversationIdInput.value;
+    if (!convId) return;
+
+    // Reuse or create a streaming message div
+    if (!msgDiv || !msgDiv.classList.contains('streaming')) {
+        msgDiv = addStreamingMessage();
+    }
+
+    try {
+        const response = await fetch('/api/chat/resume', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                conversation_id: convId,
+                decision: decision,
+                message: message,
+            }),
+        });
+
+        if (!response.ok) {
+            setMessageError(msgDiv, `Resume failed: ${response.status}`);
+            return;
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const events = parseSSEEvents(buffer);
+            buffer = events.remaining;
+
+            for (const event of events.parsed) {
+                handleStreamEvent(event, msgDiv);
+            }
+        }
+
+        if (msgDiv.classList.contains('streaming')) {
+            finalizeMessage(msgDiv);
+        }
+    } catch (error) {
+        setMessageError(msgDiv, error.message);
     }
 }
 
@@ -492,7 +582,8 @@ if (form) form.addEventListener('submit', async (e) => {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 message: message,
-                conversation_id: conversationIdInput.value || null
+                conversation_id: conversationIdInput.value || null,
+                execution_mode: execModeToggle.checked ? 'review' : 'auto',
             }),
             signal: activeAbortController.signal,
         });

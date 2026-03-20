@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langgraph.types import Command
 from pydantic import BaseModel
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -334,6 +335,13 @@ async def conversation_page(request: Request, conversation_id: str, user: dict =
 class SendMessageRequest(BaseModel):
     message: str
     conversation_id: str | None = None
+    execution_mode: str = "auto"  # "auto" or "review"
+
+
+class ResumeRequest(BaseModel):
+    conversation_id: str
+    decision: str = "approve"  # "approve" or "reject"
+    message: str | None = None  # rejection reason
 
 
 @app.post("/api/chat/stream")
@@ -482,6 +490,152 @@ async def stream_chat_message(
         if conv and not conv.get("title"):
             title = body.message[:50] + ("..." if len(body.message) > 50 else "")
             await db.update_conversation_title(conversation_id, user_id, title)
+
+        yield f"event: files_changed\ndata: {json.dumps({})}\n\n"
+        yield f"event: done\ndata: {json.dumps({})}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.post("/api/chat/resume")
+async def resume_chat(
+    request: Request,
+    body: ResumeRequest,
+    user: dict = Depends(require_auth),
+):
+    """Resume an interrupted graph execution (HITL approve/reject)."""
+    user_id = get_user_id(request)
+    conversation = await db.get_conversation(body.conversation_id, user_id)
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    graph = await get_agent_graph(
+        mcp_tools,
+        checkpointer,
+        user_id=user_id,
+        db=db,
+        vectorstore_manager=vectorstore_manager,
+    )
+    effective = await _get_effective_configs(user_id)
+    agent_names, _ = _build_name_mappings(effective)
+
+    if body.decision == "approve":
+        decision = {"type": "approve"}
+    else:
+        decision = {"type": "reject", "message": body.message or "Rejected by user"}
+
+    async def event_generator():
+        current_agent = None
+        node_buffer = ""
+        node_mode = None
+
+        try:
+            async for chunk in graph.astream(
+                Command(resume={"decisions": [decision]}),
+                config={"configurable": {"thread_id": body.conversation_id}},
+                stream_mode=["messages", "updates", "custom"],
+                version="v2",
+                subgraphs=True,
+            ):
+                chunk_type = chunk["type"]
+
+                if chunk_type == "messages":
+                    token, metadata = chunk["data"]
+                    text = _extract_text(token.content) if hasattr(token, "content") else ""
+                    if not text:
+                        continue
+
+                    node = metadata.get("langgraph_node", "")
+                    display = agent_names.get(node, node)
+                    if node != current_agent:
+                        if node_mode == "thinking" and node_buffer:
+                            content = node_buffer.lstrip().removeprefix(_THINKING_TAG).strip()
+                            if content:
+                                yield f"event: thinking\ndata: {json.dumps({'content': content})}\n\n"
+                        current_agent = node
+                        node_buffer = ""
+                        node_mode = None
+                        yield f"event: agent_start\ndata: {json.dumps({'agent': display})}\n\n"
+
+                    if node_mode is None:
+                        node_buffer += text
+                        stripped = node_buffer.lstrip()
+                        if len(stripped) >= len(_THINKING_TAG):
+                            if stripped.startswith(_THINKING_TAG):
+                                node_mode = "thinking"
+                            elif stripped.startswith(_RESPONSE_TAG):
+                                node_mode = "response"
+                                # Flush buffer minus tag as tokens
+                                remainder = stripped[len(_RESPONSE_TAG) :]
+                                if remainder:
+                                    yield f"event: token\ndata: {json.dumps({'content': remainder})}\n\n"
+                            else:
+                                node_mode = "response"
+                                yield f"event: token\ndata: {json.dumps({'content': node_buffer})}\n\n"
+                    elif node_mode == "response":
+                        yield f"event: token\ndata: {json.dumps({'content': text})}\n\n"
+                    else:
+                        # thinking mode: accumulate for activity panel
+                        node_buffer += text
+
+                elif chunk_type == "updates":
+                    update_data = chunk["data"]
+
+                    if "__interrupt__" in update_data:
+                        for interrupt in update_data["__interrupt__"]:
+                            yield f"event: interrupt\ndata: {json.dumps(interrupt, default=str)}\n\n"
+                        continue
+
+                    for _node_name, node_data in update_data.items():
+                        if not isinstance(node_data, dict):
+                            continue
+                        for msg in node_data.get("messages", []):
+                            if hasattr(msg, "tool_calls") and msg.tool_calls:
+                                for tc in msg.tool_calls:
+                                    if tc["name"].startswith(("transfer_to_", "transfer_back_to_")):
+                                        continue
+                                    data = json.dumps(
+                                        {"name": tc["name"], "args": tc["args"]},
+                                        default=str,
+                                    )
+                                    yield f"event: tool_start\ndata: {data}\n\n"
+                            if isinstance(msg, ToolMessage):
+                                if msg.name and msg.name.startswith(("transfer_to_", "transfer_back_to_")):
+                                    continue
+                                tool_content = msg.content
+                                try:
+                                    tool_content = json.loads(tool_content)
+                                except (json.JSONDecodeError, TypeError):
+                                    pass
+                                yield (
+                                    f"event: tool_end\ndata: "
+                                    f"{json.dumps({'name': msg.name, 'output': str(tool_content)[:1000]})}\n\n"
+                                )
+                                if msg.name in ("write_file", "run_file"):
+                                    yield f"event: files_changed\ndata: {json.dumps({})}\n\n"
+
+                elif chunk_type == "custom":
+                    custom_data = chunk["data"]
+                    if isinstance(custom_data, dict) and custom_data.get("type") == "files_changed":
+                        yield f"event: files_changed\ndata: {json.dumps({})}\n\n"
+
+        except Exception as e:
+            logger.exception("Resume streaming error")
+            yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
+
+        # Flush remaining thinking buffer
+        if node_mode == "thinking" and node_buffer:
+            content = node_buffer.lstrip().removeprefix(_THINKING_TAG).strip()
+            if content:
+                yield f"event: thinking\ndata: {json.dumps({'content': content})}\n\n"
 
         yield f"event: files_changed\ndata: {json.dumps({})}\n\n"
         yield f"event: done\ndata: {json.dumps({})}\n\n"
