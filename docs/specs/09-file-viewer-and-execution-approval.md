@@ -209,20 +209,38 @@ files: dict[str, dict]  # path -> file data
 
 ### Remaining work
 
-#### HITL Interrupt Flow (not yet implemented)
+Items 1-3 below are done. Items 4-6 are remaining.
 
-The `HumanInTheLoopMiddleware` is configured in `graph.py` but the UI doesn't handle interrupts properly. The current "Approve & Run" button sends a chat message — it should use LangGraph's interrupt/resume protocol instead.
+#### 1. Streaming handler (DONE)
 
-**What needs to change:**
+Switched from `astream_events(version="v2")` to `graph.astream(stream_mode=["updates", "messages", "custom"], version="v2", subgraphs=True)`. The `"updates"` stream emits `__interrupt__` when HITL pauses execution. `"messages"` stream provides token-by-token output with `langgraph_node` metadata. `"custom"` stream handles `stream_writer` output from tools.
 
-1. **Streaming handler (`main.py`):** Switch from `astream_events(version="v2")` to `graph.astream(stream_mode=["updates", "messages", "custom"], version="v2")`. The `"updates"` stream emits `__interrupt__` when HITL pauses execution. Detect this and emit an `interrupt` SSE event with tool name, arguments, and interrupt ID.
+#### 2. Resume endpoint (DONE)
 
-2. **Resume endpoint (`main.py`):** Add `POST /api/chat/resume` that accepts an interrupt decision (approve/reject) and calls `graph.astream(Command(resume={"decisions": [...]}), config=...)`. Returns an SSE stream (same format as `/api/chat/stream`) because the resumed graph continues executing.
+`POST /api/chat/resume` accepts `{conversation_id, decision, message}`. Builds `Command(resume={"decisions": [...]})` and streams the resumed graph execution back as SSE events (same format as `/api/chat/stream`).
 
-3. **Frontend (`chat.js`):** Handle the `interrupt` SSE event — render an approval card in the messages area showing the tool name + args, with Approve/Reject buttons. On approve, call `/api/chat/resume`. Wire the resume SSE stream to the same `handleStreamEvent` logic.
+#### 3. Frontend interrupt UI (DONE)
 
-4. **Execution mode via context:** Define an `AgentContext` dataclass with `user_id` and `execution_mode`. Pass it at invocation time. The HITL middleware should auto-approve in "auto" mode and interrupt in "review" mode. Include `execution_mode` in the `POST /api/chat/stream` request body from the frontend.
+`chat.js` handles `interrupt` SSE events by rendering an approval card with tool name, args, Approve/Reject buttons. Approve/Reject calls `/api/chat/resume` and pipes the response through the same `handleStreamEvent` logic. Frontend sends `execution_mode` (from the review checkbox) with each `/api/chat/stream` request.
 
-5. **Stream writer for file events (`files.py`):** Use `runtime.stream_writer({"type": "files_changed"})` in `write_file` to emit file change events directly from the tool. Handle `"custom"` stream chunks in the streaming handler. Remove the manual `files_changed` yields from `main.py`.
+#### 4. Execution mode enforcement (NOT DONE)
 
-Reference: See `docs/reference/langchain-docs-summary.md` for the langchain streaming, HITL, and tools documentation.
+The `execution_mode` field is sent from the frontend but the backend ignores it. The `HumanInTheLoopMiddleware` in `graph.py` always interrupts on `execute_python_code` and `run_file` regardless of mode.
+
+**What needs to happen:**
+- Pass `execution_mode` through to the graph via `context` parameter on `graph.astream()`
+- Define a `context_schema` dataclass (`AgentContext`) with `user_id` and `execution_mode`
+- Either conditionally add HITL middleware based on mode (requires two graph variants), or use a custom wrapper middleware that checks context and auto-approves in "auto" mode
+- See `docs/reference/langchain-docs-summary.md` "Custom Middleware" section for `wrap_tool_call` patterns
+
+#### 5. Stream writer for file events (NOT DONE)
+
+Currently `files_changed` SSE events are emitted from the streaming handler in `main.py` when it sees a `write_file` ToolMessage in the updates stream. The cleaner approach: use `runtime.stream_writer({"type": "files_changed"})` in the `write_file` tool (`agents/tools/files.py`), which emits via the `"custom"` stream mode. Remove the manual emission from `main.py`.
+
+#### 6. Agent name mapping in streaming (NOT DONE)
+
+The `graph.astream` messages stream returns `langgraph_node` metadata with internal node names ("model", "tools", "agent") instead of our display names ("Supervisor", "Data Analyst"). The `agent_names` dict maps agent IDs to display names, but the streaming metadata uses different keys. Need to either:
+- Map internal node names to agent IDs, or
+- Use the `lc_agent_name` metadata key if available (see langchain streaming docs)
+
+Reference: See `docs/reference/langchain-docs-summary.md` for the langchain streaming, HITL, context, and tools documentation.
