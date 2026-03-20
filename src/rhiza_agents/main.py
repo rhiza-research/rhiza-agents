@@ -372,20 +372,22 @@ async def stream_chat_message(
         node_mode = None  # None (undecided), "thinking", or "response"
 
         try:
-            async for event in graph.astream_events(
+            async for chunk in graph.astream(
                 {"messages": [HumanMessage(content=body.message)]},
                 config={"configurable": {"thread_id": conversation_id}},
+                stream_mode=["messages", "updates", "custom"],
                 version="v2",
+                subgraphs=True,
             ):
-                kind = event["event"]
+                chunk_type = chunk["type"]
 
-                if kind == "on_chat_model_stream":
-                    chunk = event["data"]["chunk"]
-                    text = _extract_text(chunk.content) if hasattr(chunk, "content") else ""
+                if chunk_type == "messages":
+                    token, metadata = chunk["data"]
+                    text = _extract_text(token.content) if hasattr(token, "content") else ""
                     if not text:
                         continue
 
-                    node = event.get("metadata", {}).get("langgraph_node", "")
+                    node = metadata.get("langgraph_node", "")
                     display = agent_names.get(node, node)
                     if node != current_agent:
                         # Flush any buffered thinking text to activity panel
@@ -419,45 +421,60 @@ async def stream_chat_message(
                         # thinking mode: accumulate for activity panel
                         node_buffer += text
 
-                elif kind == "on_chat_model_end":
-                    # Flush accumulated thinking text to activity panel
-                    if node_mode == "thinking" and node_buffer:
-                        content = node_buffer.lstrip().removeprefix(_THINKING_TAG).strip()
-                        if content:
-                            yield f"event: thinking\ndata: {json.dumps({'content': content})}\n\n"
-                        node_buffer = ""
-                        node_mode = None
+                elif chunk_type == "updates":
+                    update_data = chunk["data"]
 
-                elif kind == "on_tool_start":
-                    tool_name = event.get("name", "")
-                    if tool_name.startswith(("transfer_to_", "transfer_back_to_")):
+                    # HITL interrupts appear as __interrupt__ in updates
+                    if "__interrupt__" in update_data:
+                        for interrupt in update_data["__interrupt__"]:
+                            yield (f"event: interrupt\ndata: {json.dumps(interrupt, default=str)}\n\n")
                         continue
-                    tool_input = event.get("data", {}).get("input", {})
-                    data = json.dumps({"name": tool_name, "input": tool_input}, default=str)
-                    yield f"event: tool_start\ndata: {data}\n\n"
 
-                elif kind == "on_tool_end":
-                    tool_name = event.get("name", "")
-                    if tool_name.startswith(("transfer_to_", "transfer_back_to_")):
-                        continue
-                    tool_output = event.get("data", {}).get("output", "")
-                    if hasattr(tool_output, "content"):
-                        tool_output = tool_output.content
-                    yield (
-                        f"event: tool_end\ndata: "
-                        f"{json.dumps({'name': tool_name, 'output': str(tool_output)[:1000]})}\n\n"
-                    )
-                    # Notify the UI when a file tool completes so it can refresh the file panel
-                    if tool_name in ("write_file", "run_file"):
+                    # Extract tool call/result info from node updates
+                    for _node_name, node_data in update_data.items():
+                        if not isinstance(node_data, dict):
+                            continue
+                        for msg in node_data.get("messages", []):
+                            # Tool calls from AI messages
+                            if hasattr(msg, "tool_calls") and msg.tool_calls:
+                                for tc in msg.tool_calls:
+                                    if tc["name"].startswith(("transfer_to_", "transfer_back_to_")):
+                                        continue
+                                    data = json.dumps(
+                                        {"name": tc["name"], "args": tc["args"]},
+                                        default=str,
+                                    )
+                                    yield f"event: tool_start\ndata: {data}\n\n"
+                            # Tool results from ToolMessages
+                            if isinstance(msg, ToolMessage):
+                                if msg.name and msg.name.startswith(("transfer_to_", "transfer_back_to_")):
+                                    continue
+                                tool_content = msg.content
+                                try:
+                                    tool_content = json.loads(tool_content)
+                                except (json.JSONDecodeError, TypeError):
+                                    pass
+                                yield (
+                                    f"event: tool_end\ndata: "
+                                    f"{json.dumps({'name': msg.name, 'output': str(tool_content)[:1000]})}\n\n"
+                                )
+                                if msg.name in ("write_file", "run_file"):
+                                    yield f"event: files_changed\ndata: {json.dumps({})}\n\n"
+
+                elif chunk_type == "custom":
+                    custom_data = chunk["data"]
+                    if isinstance(custom_data, dict) and custom_data.get("type") == "files_changed":
                         yield f"event: files_changed\ndata: {json.dumps({})}\n\n"
-
-                elif kind == "on_custom_event" and event.get("name") == "write_file":
-                    # Command-based tools may emit custom events instead of on_tool_end
-                    yield f"event: files_changed\ndata: {json.dumps({})}\n\n"
 
         except Exception as e:
             logger.exception("Streaming error")
             yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
+
+        # Flush any remaining thinking buffer
+        if node_mode == "thinking" and node_buffer:
+            content = node_buffer.lstrip().removeprefix(_THINKING_TAG).strip()
+            if content:
+                yield f"event: thinking\ndata: {json.dumps({'content': content})}\n\n"
 
         # Update conversation metadata
         await db.touch_conversation(conversation_id)
@@ -466,22 +483,7 @@ async def stream_chat_message(
             title = body.message[:50] + ("..." if len(body.message) > 50 else "")
             await db.update_conversation_title(conversation_id, user_id, title)
 
-        # Check for HITL interrupts (from HumanInTheLoopMiddleware)
-        try:
-            state = await graph.aget_state({"configurable": {"thread_id": conversation_id}})
-            for task in state.tasks:
-                for interrupt in getattr(task, "interrupts", []):
-                    yield (
-                        f"event: interrupt\ndata: "
-                        f"{json.dumps({'id': str(interrupt.id), 'value': interrupt.value}, default=str)}\n\n"
-                    )
-        except Exception:
-            logger.exception("Failed to check for interrupts")
-
-        # Always notify files_changed at end of stream as a fallback,
-        # in case Command-based tool updates weren't caught during streaming
         yield f"event: files_changed\ndata: {json.dumps({})}\n\n"
-
         yield f"event: done\ndata: {json.dumps({})}\n\n"
 
     return StreamingResponse(
