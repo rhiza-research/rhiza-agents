@@ -78,3 +78,35 @@ If the model's text output still contains reasoning that should be hidden, exten
 4. Page reloads correctly classify stored messages
 5. No `[THINKING]` or `[RESPONSE]` tags in any agent prompts
 6. Works with all three agents (supervisor, data_analyst, code_runner)
+
+---
+
+## Implementation Notes
+
+### What was built
+
+**Model configuration** (`agents/graph.py`):
+- All `ChatAnthropic` instances (worker and supervisor) now use `thinking={"type": "enabled", "budget_tokens": 10000}` with `max_tokens=16000`
+- `budget_tokens` must be less than `max_tokens` per Anthropic API requirements
+
+**Streaming handler** (`main.py`):
+- New `_extract_content_blocks(content)` function returns `(text, reasoning)` by inspecting content block types
+- Handles both dict-style blocks (`{"type": "reasoning", "reasoning": "..."}`) and object-style blocks (`block.type == "reasoning"`)
+- Streaming handler directly routes: reasoning blocks → `thinking` SSE event, text blocks → `token` SSE event
+- Removed all tag buffering code: `node_buffer`, `node_mode`, `_THINKING_TAG`, `_RESPONSE_TAG`, `_classify_text()`
+
+**Agent prompts** (`agents/registry.py`):
+- Removed `_OUTPUT_FORMAT` constant with `[THINKING]`/`[RESPONSE]` tag instructions
+- Simplified all worker prompts to plain instructions without output format tags
+- Supervisor prompt unchanged (it doesn't produce thinking text)
+
+**Message processing** (`main.py` `_process_messages`):
+- Uses `_extract_content_blocks()` to separate reasoning and text from stored AIMessages
+- Reasoning content emitted as `{"type": "thinking"}` entries, text as `{"type": "ai"}` entries
+- No fallback to tag parsing — clean break from the old system
+
+### Constraints
+
+- Extended thinking requires `tool_choice: "auto"` (default) — cannot force specific tools
+- `budget_tokens` (10000) is uniform across all agents as specified
+- The model may not use the full thinking budget on simple queries
