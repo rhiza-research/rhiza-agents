@@ -59,6 +59,9 @@ async def write_file(
 
     result_msg = f"File written: {path} ({len(lines)} lines, {content_size} bytes)"
 
+    # Emit files_changed event via custom stream so the UI refreshes immediately
+    runtime.stream_writer({"type": "files_changed"})
+
     return Command(
         update={
             "messages": [ToolMessage(content=result_msg, tool_call_id=runtime.tool_call_id)],

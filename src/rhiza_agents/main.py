@@ -475,8 +475,6 @@ async def stream_chat_message(
                                         f"event: tool_end\ndata: "
                                         f"{json.dumps({'name': msg.name, 'output': str(tool_content)[:1000]})}\n\n"
                                     )
-                                    if msg.name in ("write_file", "run_file"):
-                                        yield f"event: files_changed\ndata: {json.dumps({})}\n\n"
 
                     elif chunk_type == "custom":
                         custom_data = chunk["data"]
@@ -631,8 +629,6 @@ async def resume_chat(
                                     f"event: tool_end\ndata: "
                                     f"{json.dumps({'name': msg.name, 'output': str(tool_content)[:1000]})}\n\n"
                                 )
-                                if msg.name in ("write_file", "run_file"):
-                                    yield f"event: files_changed\ndata: {json.dumps({})}\n\n"
 
                 elif chunk_type == "custom":
                     custom_data = chunk["data"]
