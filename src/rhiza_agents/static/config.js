@@ -1,4 +1,5 @@
 let agents = [];
+let vectorstores = [];
 let selectedAgentId = null;
 let toolTypes = {}; // id -> {name, available}
 
@@ -7,6 +8,9 @@ const configDetail = document.getElementById('config-detail');
 const addAgentBtn = document.getElementById('add-agent-btn');
 const resetAllBtn = document.getElementById('reset-all-btn');
 const modal = document.getElementById('new-agent-modal');
+const vsModal = document.getElementById('new-vs-modal');
+const vectorstoreList = document.getElementById('vectorstore-list');
+const addVsBtn = document.getElementById('add-vs-btn');
 
 async function loadToolTypes() {
     const res = await fetch('/api/tool-types');
@@ -18,8 +22,15 @@ async function loadToolTypes() {
     }
 }
 
+async function loadVectorStores() {
+    const res = await fetch('/api/vectorstores');
+    if (!res.ok) return;
+    vectorstores = await res.json();
+    renderVectorStoreList();
+}
+
 async function loadAgents() {
-    await loadToolTypes();
+    await Promise.all([loadToolTypes(), loadVectorStores()]);
     const res = await fetch('/api/agents');
     if (!res.ok) return;
     agents = await res.json();
@@ -55,6 +66,48 @@ function renderAgentList() {
 
         item.addEventListener('click', () => selectAgent(agent.id));
         agentList.appendChild(item);
+    }
+}
+
+function renderVectorStoreList() {
+    vectorstoreList.innerHTML = '';
+    for (const vs of vectorstores) {
+        const item = document.createElement('div');
+        item.className = 'vs-list-item';
+
+        const info = document.createElement('div');
+        info.className = 'vs-list-info';
+
+        const name = document.createElement('span');
+        name.className = 'vs-list-name';
+        name.textContent = vs.display_name;
+        info.appendChild(name);
+
+        const count = document.createElement('span');
+        count.className = 'vs-list-count';
+        count.textContent = `${vs.document_count} chunks`;
+        info.appendChild(count);
+
+        item.appendChild(info);
+
+        const actions = document.createElement('div');
+        actions.className = 'vs-list-actions';
+
+        const uploadBtn = document.createElement('button');
+        uploadBtn.className = 'vs-upload-btn';
+        uploadBtn.textContent = 'Upload';
+        uploadBtn.addEventListener('click', () => triggerUpload(vs.id));
+        actions.appendChild(uploadBtn);
+
+        const delBtn = document.createElement('button');
+        delBtn.className = 'vs-delete-btn';
+        delBtn.textContent = '\u00d7';
+        delBtn.title = 'Delete';
+        delBtn.addEventListener('click', () => deleteVectorStore(vs));
+        actions.appendChild(delBtn);
+
+        item.appendChild(actions);
+        vectorstoreList.appendChild(item);
     }
 }
 
@@ -116,6 +169,21 @@ function selectAgent(agentId) {
                 </div>
             </div>
 
+            ${vectorstores.length > 0 ? `
+            <div class="form-group">
+                <label>Knowledge Bases</label>
+                <div class="tools-checkboxes">
+                    ${vectorstores.map(vs => {
+                        const checked = (agent.vectorstore_ids || []).includes(vs.id) ? 'checked' : '';
+                        return `<label class="tool-checkbox">
+                            <input type="checkbox" class="vs-checkbox" value="${escapeAttr(vs.id)}" ${checked}>
+                            ${escapeHtml(vs.display_name)} <span class="coming-soon">${vs.document_count} chunks</span>
+                        </label>`;
+                    }).join('')}
+                </div>
+            </div>
+            ` : ''}
+
             <div class="config-form-actions">
                 ${!isSupervisor ? `
                     <button id="delete-agent-btn" class="btn-danger">${agent.enabled ? 'Disable' : 'Enable'}</button>
@@ -142,8 +210,12 @@ async function saveAgent(agent) {
     const model = document.getElementById('edit-model').value;
     const system_prompt = document.getElementById('edit-prompt').value;
     const tools = [];
-    document.querySelectorAll('.tools-checkboxes input:checked').forEach(cb => {
+    document.querySelectorAll('.tools-checkboxes input:checked:not(.vs-checkbox)').forEach(cb => {
         tools.push(cb.value);
+    });
+    const vectorstore_ids = [];
+    document.querySelectorAll('.vs-checkbox:checked').forEach(cb => {
+        vectorstore_ids.push(cb.value);
     });
 
     if (!name) return alert('Name is required');
@@ -152,7 +224,7 @@ async function saveAgent(agent) {
     const res = await fetch(`/api/agents/${agent.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, model, system_prompt, tools, enabled: agent.enabled }),
+        body: JSON.stringify({ name, model, system_prompt, tools, vectorstore_ids, enabled: agent.enabled }),
     });
 
     if (!res.ok) {
@@ -243,6 +315,88 @@ async function resetAll() {
     renderPlaceholder();
 }
 
+// --- Vector Store Functions ---
+
+async function createVectorStore() {
+    const name = document.getElementById('new-vs-name').value.trim();
+    const description = document.getElementById('new-vs-desc').value.trim();
+
+    if (!name) return alert('Name is required');
+
+    const res = await fetch('/api/vectorstores', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, description }),
+    });
+
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        return alert(err.detail || 'Failed to create knowledge base');
+    }
+
+    vsModal.classList.add('hidden');
+    document.getElementById('new-vs-name').value = '';
+    document.getElementById('new-vs-desc').value = '';
+    await loadVectorStores();
+    // Re-render agent detail to show new KB checkbox
+    if (selectedAgentId) selectAgent(selectedAgentId);
+}
+
+async function deleteVectorStore(vs) {
+    if (!confirm(`Delete "${vs.display_name}" and all its documents? This cannot be undone.`)) return;
+
+    const res = await fetch(`/api/vectorstores/${vs.id}`, { method: 'DELETE' });
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        return alert(err.detail || 'Failed to delete');
+    }
+
+    await loadVectorStores();
+    // Reload agents to reflect removed vectorstore_ids
+    const agentsRes = await fetch('/api/agents');
+    if (agentsRes.ok) agents = await agentsRes.json();
+    renderAgentList();
+    if (selectedAgentId) selectAgent(selectedAgentId);
+}
+
+function triggerUpload(vsId) {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.multiple = true;
+    input.accept = '.txt,.md,.pdf';
+    input.addEventListener('change', () => uploadFiles(vsId, input.files));
+    input.click();
+}
+
+async function uploadFiles(vsId, files) {
+    if (!files || files.length === 0) return;
+
+    const formData = new FormData();
+    for (const file of files) {
+        formData.append('files', file);
+    }
+
+    // Find the upload button and show uploading state
+    const btn = vectorstoreList.querySelector('.vs-upload-btn');
+    if (btn) {
+        btn.textContent = 'Uploading...';
+        btn.disabled = true;
+    }
+
+    const res = await fetch(`/api/vectorstores/${vsId}/upload`, {
+        method: 'POST',
+        body: formData,
+    });
+
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        alert(err.detail || 'Upload failed');
+    }
+
+    await loadVectorStores();
+    if (selectedAgentId) selectAgent(selectedAgentId);
+}
+
 function clearNewAgentForm() {
     document.getElementById('new-agent-id').value = '';
     document.getElementById('new-agent-name').value = '';
@@ -277,6 +431,23 @@ modal.querySelector('.modal-backdrop').addEventListener('click', () => {
 });
 
 resetAllBtn.addEventListener('click', resetAll);
+
+// Vector store modal listeners
+addVsBtn.addEventListener('click', () => {
+    document.getElementById('new-vs-name').value = '';
+    document.getElementById('new-vs-desc').value = '';
+    vsModal.classList.remove('hidden');
+});
+
+document.getElementById('cancel-new-vs').addEventListener('click', () => {
+    vsModal.classList.add('hidden');
+});
+
+document.getElementById('confirm-new-vs').addEventListener('click', createVectorStore);
+
+vsModal.querySelector('.modal-backdrop').addEventListener('click', () => {
+    vsModal.classList.add('hidden');
+});
 
 // Initial load
 loadAgents();

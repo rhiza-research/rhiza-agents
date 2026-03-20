@@ -188,7 +188,15 @@ See `docs/reference/daytona-integration.md` for SDK details.
 
 ## Vector Store Integration
 
-ChromaDB runs in-process with persistent storage on the PVC. Each user can create vector store collections and attach them to agents. The retrieval tool queries the collection and returns relevant document chunks.
+ChromaDB runs in-process with persistent storage on the PVC (`CHROMA_PERSIST_DIR`, default `/data/chroma`). The `VectorStoreManager` class wraps the ChromaDB `PersistentClient`.
+
+Key patterns:
+- **Per-user namespacing**: Collection names are formatted as `{user_id}_{sanitized_display_name}` to prevent collisions
+- **Document ingestion**: Files (.txt, .md, .pdf) are uploaded via `POST /api/vectorstores/{id}/upload`. Text is extracted (PyMuPDF for PDFs), chunked with `RecursiveCharacterTextSplitter` (1000 chars, 200 overlap), and embedded using ChromaDB's default embedding function (all-MiniLM-L6-v2, runs locally)
+- **Retrieval tools**: `create_retrieval_tool()` factory creates a LangChain `@tool` per attached collection. Tool name is `search_{sanitized_display_name}`. Results include source attribution.
+- **Agent attachment**: Agents have a `vectorstore_ids` field. At graph build time, `_resolve_tools()` looks up each ID in the DB and creates a retrieval tool for each attached collection.
+- **Cleanup**: Deleting a vector store removes the ChromaDB collection, the DB record, and any references in agent config overrides.
+- **Config editor UI**: Knowledge base sidebar section shows collections with document counts, upload buttons, and delete buttons. Agent detail panel has knowledge base checkboxes for attachment.
 
 ## Authentication
 

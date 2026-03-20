@@ -924,6 +924,87 @@ body {
     margin-top: 1rem;
 }
 
+/* Vector Store List */
+
+.vectorstore-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+.vs-list-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.5rem 0.75rem;
+    background: rgba(255, 255, 255, 0.03);
+    border-radius: 4px;
+    font-size: 0.85rem;
+}
+
+.vs-list-info {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+    min-width: 0;
+}
+
+.vs-list-name {
+    color: #ccc;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.vs-list-count {
+    font-size: 0.7rem;
+    color: #666;
+}
+
+.vs-list-actions {
+    display: flex;
+    gap: 0.4rem;
+    align-items: center;
+    flex-shrink: 0;
+}
+
+.vs-upload-btn {
+    background: none;
+    border: 1px solid #3a3a5a;
+    color: #888;
+    padding: 0.2rem 0.5rem;
+    border-radius: 3px;
+    cursor: pointer;
+    font-size: 0.75rem;
+    font-family: inherit;
+}
+
+.vs-upload-btn:hover {
+    border-color: #4a90d9;
+    color: #4a90d9;
+}
+
+.vs-upload-btn:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+}
+
+.vs-delete-btn {
+    background: none;
+    border: none;
+    color: #666;
+    cursor: pointer;
+    font-size: 1rem;
+    padding: 0 0.25rem;
+    line-height: 1;
+}
+
+.vs-delete-btn:hover {
+    color: #e55;
+}
+
 /* Responsive */
 
 @media (max-width: 768px) {

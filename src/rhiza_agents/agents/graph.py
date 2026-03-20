@@ -20,7 +20,7 @@ def _config_hash(configs: list[AgentConfig]) -> str:
     return hashlib.sha256(data.encode()).hexdigest()
 
 
-def _resolve_tools(config: AgentConfig, mcp_tools: list) -> list:
+async def _resolve_tools(config: AgentConfig, mcp_tools: list, vectorstore_manager=None, db=None) -> list:
     """Resolve tool identifiers to actual tool objects."""
     tools = []
     for tool_id in config.tools:
@@ -34,6 +34,23 @@ def _resolve_tools(config: AgentConfig, mcp_tools: list) -> list:
             # If no API key, silently skip -- agent works without tools
         else:
             logger.info("Tool type %s not yet implemented, skipping", tool_id)
+
+    # Resolve vectorstore_ids into retrieval tools
+    if config.vectorstore_ids and vectorstore_manager and db:
+        from .tools.vectordb import create_retrieval_tool
+
+        for vs_id in config.vectorstore_ids:
+            vs_record = await db.get_vectorstore_by_id(vs_id)
+            if vs_record:
+                tools.append(
+                    create_retrieval_tool(
+                        vectorstore_manager,
+                        vs_record["collection_name"],
+                        vs_record["display_name"],
+                        vs_record.get("description", ""),
+                    )
+                )
+
     return tools
 
 
@@ -41,6 +58,8 @@ async def build_graph(
     configs: list[AgentConfig],
     mcp_tools: list,
     checkpointer,
+    vectorstore_manager=None,
+    db=None,
 ):
     """Build a compiled LangGraph StateGraph from AgentConfig objects."""
     supervisor_config = None
@@ -59,7 +78,7 @@ async def build_graph(
 
     worker_agents = []
     for wc in worker_configs:
-        tools = _resolve_tools(wc, mcp_tools)
+        tools = await _resolve_tools(wc, mcp_tools, vectorstore_manager, db)
         model = ChatAnthropic(model=wc.model).with_retry(stop_after_attempt=3)
         worker = create_react_agent(model, tools, prompt=wc.system_prompt, name=wc.id)
         worker_agents.append(worker)
@@ -82,11 +101,13 @@ async def get_or_build_graph(
     configs: list[AgentConfig],
     mcp_tools: list,
     checkpointer,
+    vectorstore_manager=None,
+    db=None,
 ):
     """Get a cached graph or build a new one."""
     h = _config_hash(configs)
     if h not in _graph_cache:
-        _graph_cache[h] = await build_graph(configs, mcp_tools, checkpointer)
+        _graph_cache[h] = await build_graph(configs, mcp_tools, checkpointer, vectorstore_manager, db)
     return _graph_cache[h]
 
 

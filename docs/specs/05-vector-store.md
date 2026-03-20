@@ -538,3 +538,29 @@ The `/data` directory should already be a volume mount from Phase 1 (for SQLite)
 - **No collection editing** -- once created, you can add documents but cannot remove individual documents. Delete the whole collection and recreate to start fresh.
 - **No large file handling** -- no progress bars, no background processing. Upload is synchronous. Keep file sizes reasonable (< 10MB).
 - **No streaming** -- Phase 6.
+
+## Implementation Notes (Post-Implementation)
+
+### Key changes beyond spec
+
+- **`config.py`**: Added `chroma_persist_dir` field (env: `CHROMA_PERSIST_DIR`, default `./chroma_data`).
+- **`_resolve_tools` made async**: Tool resolution now `await`s DB lookups for vectorstore metadata.
+- **`get_or_build_graph` and `build_graph`**: Accept `vectorstore_manager` and `db` params, threaded through from `get_agent_graph`.
+- **`get_agent_graph`**: Accepts `vectorstore_manager` param, passes to graph builder.
+- **All `get_agent_graph` calls in `main.py`** updated to pass `vectorstore_manager=vectorstore_manager`.
+- **Line length fixes**: `get_agent_graph(...)` calls broken across multiple lines for ruff compliance.
+
+### Config editor UI additions
+
+- **Knowledge Bases sidebar section**: Lists vector stores with document counts, upload buttons (triggers native file picker), and delete (x) buttons.
+- **Agent detail panel**: "Knowledge Bases" checkbox section appears when vector stores exist, allowing users to attach/detach collections from agents. Checkboxes map to `vectorstore_ids` in the agent config.
+- **New Vector Store modal**: Name + description fields, creates via `POST /api/vectorstores`.
+- **Upload flow**: File picker accepts `.txt,.md,.pdf`, uploads via multipart `POST /api/vectorstores/{id}/upload`, shows "Uploading..." state on button.
+
+### `db/sqlite.py` additions
+
+- `get_vectorstore_by_id(id)`: No ownership check, used internally by graph builder to resolve vectorstore_ids to collection metadata.
+
+### Delete cleanup
+
+- Deleting a vector store iterates `user_agent_configs` rows, removes the vectorstore ID from any `vectorstore_ids` lists, saves updated configs, and invalidates the graph cache.

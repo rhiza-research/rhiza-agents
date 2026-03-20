@@ -14,6 +14,7 @@ async def get_agent_graph(
     user_configs: list[AgentConfig] | None = None,
     user_id: str | None = None,
     db: Database | None = None,
+    vectorstore_manager=None,
 ):
     """Get the compiled agent graph.
 
@@ -30,4 +31,4 @@ async def get_agent_graph(
         configs = user_configs
     else:
         configs = get_default_configs()
-    return await get_or_build_graph(configs, mcp_tools, checkpointer)
+    return await get_or_build_graph(configs, mcp_tools, checkpointer, vectorstore_manager, db)

@@ -51,6 +51,7 @@ services:
       DAYTONA_API_KEY: ${DAYTONA_API_KEY:-}
       DAYTONA_API_URL: ${DAYTONA_API_URL:-}
       DAYTONA_PROXY_URL: ${DAYTONA_PROXY_URL:-}
+      CHROMA_PERSIST_DIR: /data/chroma
     depends_on:
       - keycloak
       - sheerwater-mcp

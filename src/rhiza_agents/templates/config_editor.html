@@ -20,6 +20,10 @@
                 <div id="agent-list" class="agent-list"></div>
                 <button id="add-agent-btn" class="add-agent-btn">+ Add Agent</button>
                 <button id="reset-all-btn" class="reset-all-btn">Reset All to Defaults</button>
+
+                <h3 class="config-sidebar-title" style="margin-top: 1.5rem;">Knowledge Bases</h3>
+                <div id="vectorstore-list" class="vectorstore-list"></div>
+                <button id="add-vs-btn" class="add-agent-btn">+ New Knowledge Base</button>
             </div>
 
             <div class="config-detail" id="config-detail">
@@ -59,6 +63,26 @@
             <div class="modal-actions">
                 <button id="cancel-new-agent" class="btn-secondary">Cancel</button>
                 <button id="confirm-new-agent" class="btn-primary">Create</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- New Vector Store Modal -->
+    <div id="new-vs-modal" class="modal hidden">
+        <div class="modal-backdrop"></div>
+        <div class="modal-content">
+            <h3>Create Knowledge Base</h3>
+            <div class="form-group">
+                <label for="new-vs-name">Name</label>
+                <input type="text" id="new-vs-name" placeholder="Research Papers">
+            </div>
+            <div class="form-group">
+                <label for="new-vs-desc">Description</label>
+                <textarea id="new-vs-desc" rows="2" placeholder="What kind of documents will be stored here?"></textarea>
+            </div>
+            <div class="modal-actions">
+                <button id="cancel-new-vs" class="btn-secondary">Cancel</button>
+                <button id="confirm-new-vs" class="btn-primary">Create</button>
             </div>
         </div>
     </div>

@@ -9,7 +9,7 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -37,6 +37,7 @@ db: Database = None
 checkpointer = None
 oauth = None
 mcp_tools: list = []
+vectorstore_manager = None
 _agent_names: dict[str, str] = {}  # agent_id -> display name
 _tool_to_agent: dict[str, str] = {}  # tool_name -> agent_id
 
@@ -44,7 +45,7 @@ _tool_to_agent: dict[str, str] = {}  # tool_name -> agent_id
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler."""
-    global config, db, checkpointer, oauth, mcp_tools, _agent_names, _tool_to_agent
+    global config, db, checkpointer, oauth, mcp_tools, vectorstore_manager, _agent_names, _tool_to_agent
 
     config = Config.from_env()
     db = Database(config.database_url)
@@ -64,6 +65,13 @@ async def lifespan(app: FastAPI):
             logger.info("MCP server not ready, retrying in %ds...", attempt + 1)
             await asyncio.sleep(attempt + 1)
     logger.info("Loaded %d MCP tools", len(mcp_tools))
+
+    # Initialize vector store manager if chroma_persist_dir is set
+    if config.chroma_persist_dir:
+        from .vectorstore.manager import VectorStoreManager
+
+        vectorstore_manager = VectorStoreManager(config.chroma_persist_dir)
+        logger.info("Initialized VectorStoreManager at %s", config.chroma_persist_dir)
 
     configs_by_id = get_default_configs_by_id()
     _agent_names = {agent_id: c.name for agent_id, c in configs_by_id.items()}
@@ -285,7 +293,13 @@ async def conversation_page(request: Request, conversation_id: str, user: dict =
     conversations = await db.list_conversations(user_id)
 
     # Load messages from LangGraph checkpointer
-    graph = await get_agent_graph(mcp_tools, checkpointer, user_id=user_id, db=db)
+    graph = await get_agent_graph(
+        mcp_tools,
+        checkpointer,
+        user_id=user_id,
+        db=db,
+        vectorstore_manager=vectorstore_manager,
+    )
     effective = await _get_effective_configs(user_id)
     agent_names, tool_to_agent_map = _build_name_mappings(effective)
     state = await graph.aget_state({"configurable": {"thread_id": conversation_id}})
@@ -337,7 +351,13 @@ async def send_chat_message(request: Request, body: SendMessageRequest, user: di
         await db.create_conversation(conversation_id, user_id)
 
     # Invoke the supervisor graph with per-user config
-    graph = await get_agent_graph(mcp_tools, checkpointer, user_id=user_id, db=db)
+    graph = await get_agent_graph(
+        mcp_tools,
+        checkpointer,
+        user_id=user_id,
+        db=db,
+        vectorstore_manager=vectorstore_manager,
+    )
     effective = await _get_effective_configs(user_id)
     agent_names, tool_to_agent_map = _build_name_mappings(effective)
     result = await graph.ainvoke(
@@ -407,6 +427,109 @@ async def list_tool_types(user: dict = Depends(require_auth)):
     ]
 
 
+# --- Vector Store API Routes ---
+
+
+@app.get("/api/vectorstores")
+async def list_vectorstores(request: Request, user: dict = Depends(require_auth)):
+    """List user's vector stores."""
+    user_id = get_user_id(request)
+    return await db.list_vectorstores(user_id)
+
+
+@app.post("/api/vectorstores")
+async def create_vectorstore(request: Request, user: dict = Depends(require_auth)):
+    """Create a new vector store."""
+    if not vectorstore_manager:
+        raise HTTPException(status_code=503, detail="Vector store not configured")
+    user_id = get_user_id(request)
+    body = await request.json()
+
+    display_name = body.get("name", "").strip()
+    if not display_name:
+        raise HTTPException(status_code=400, detail="Name is required")
+    description = body.get("description", "")
+
+    # Namespace collection name per user
+    sanitized = re.sub(r"[^a-zA-Z0-9_]", "_", display_name.lower())
+    collection_name = f"{user_id}_{sanitized}"
+
+    vs_id = str(uuid.uuid4())
+    vectorstore_manager.create_collection(collection_name, {"description": description})
+    record = await db.create_vectorstore(vs_id, user_id, collection_name, display_name, description)
+    return record
+
+
+@app.delete("/api/vectorstores/{vs_id}")
+async def delete_vectorstore(request: Request, vs_id: str, user: dict = Depends(require_auth)):
+    """Delete a vector store."""
+    user_id = get_user_id(request)
+    vs = await db.get_vectorstore(vs_id, user_id)
+    if not vs:
+        raise HTTPException(status_code=404, detail="Vector store not found")
+
+    # Delete ChromaDB collection
+    if vectorstore_manager:
+        try:
+            vectorstore_manager.delete_collection(vs["collection_name"])
+        except Exception:
+            logger.warning("Failed to delete ChromaDB collection %s", vs["collection_name"], exc_info=True)
+
+    # Delete DB record
+    await db.delete_vectorstore(vs_id, user_id)
+
+    # Remove from any agent configs that reference this vectorstore
+    override_rows = await db.get_user_agent_configs(user_id)
+    for row in override_rows:
+        parsed = json.loads(row["config_json"])
+        vs_ids = parsed.get("vectorstore_ids", [])
+        if vs_id in vs_ids:
+            vs_ids.remove(vs_id)
+            parsed["vectorstore_ids"] = vs_ids
+            await db.save_user_agent_config(user_id, parsed["id"], parsed)
+
+    invalidate_graph_cache()
+    return {"status": "deleted"}
+
+
+@app.post("/api/vectorstores/{vs_id}/upload")
+async def upload_documents(
+    request: Request,
+    vs_id: str,
+    files: list[UploadFile] = File(...),
+    user: dict = Depends(require_auth),
+):
+    """Upload documents to a vector store."""
+    if not vectorstore_manager:
+        raise HTTPException(status_code=503, detail="Vector store not configured")
+
+    user_id = get_user_id(request)
+    vs = await db.get_vectorstore(vs_id, user_id)
+    if not vs:
+        raise HTTPException(status_code=404, detail="Vector store not found")
+
+    from .vectorstore.manager import chunk_text, extract_text_from_file
+
+    total_chunks = 0
+    for file in files:
+        content = await file.read()
+        try:
+            text = extract_text_from_file(file.filename, content)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+        chunks = chunk_text(text)
+        if chunks:
+            metadatas = [{"source": file.filename, "chunk_index": i} for i in range(len(chunks))]
+            vectorstore_manager.add_documents(vs["collection_name"], chunks, metadatas)
+            total_chunks += len(chunks)
+
+    new_count = vs["document_count"] + total_chunks
+    await db.update_vectorstore_doc_count(vs_id, new_count)
+
+    return {"document_count": new_count, "chunks_added": total_chunks}
+
+
 @app.get("/api/conversations/{conversation_id}/messages")
 async def get_conversation_messages(request: Request, conversation_id: str, user: dict = Depends(require_auth)):
     """Get full ordered message history for a conversation, for debugging and analysis."""
@@ -415,7 +538,13 @@ async def get_conversation_messages(request: Request, conversation_id: str, user
     if not conversation:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
-    graph = await get_agent_graph(mcp_tools, checkpointer, user_id=user_id, db=db)
+    graph = await get_agent_graph(
+        mcp_tools,
+        checkpointer,
+        user_id=user_id,
+        db=db,
+        vectorstore_manager=vectorstore_manager,
+    )
     effective = await _get_effective_configs(user_id)
     agent_names, tool_to_agent_map = _build_name_mappings(effective)
     state = await graph.aget_state({"configurable": {"thread_id": conversation_id}})

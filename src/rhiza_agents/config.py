@@ -26,6 +26,9 @@ class Config:
     daytona_api_url: str
     daytona_proxy_url: str
 
+    # Vector store
+    chroma_persist_dir: str
+
     # App settings
     secret_key: str
     database_url: str
@@ -47,6 +50,7 @@ class Config:
             daytona_api_key=os.environ.get("DAYTONA_API_KEY", ""),
             daytona_api_url=os.environ.get("DAYTONA_API_URL", ""),
             daytona_proxy_url=os.environ.get("DAYTONA_PROXY_URL", ""),
+            chroma_persist_dir=os.environ.get("CHROMA_PERSIST_DIR", "./chroma_data"),
             secret_key=os.environ["SECRET_KEY"],
             database_url=os.environ.get("DATABASE_URL", "sqlite:///./rhiza_agents.db"),
             checkpoint_db_path=os.environ.get("CHECKPOINT_DB_PATH", "./checkpoints.db"),

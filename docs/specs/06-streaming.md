@@ -78,7 +78,9 @@ async def stream_chat_message(
         await db.create_conversation(conversation_id, user_id)
 
     # Build the graph
-    graph = await get_agent_graph(mcp_tools, checkpointer, user_id=user_id, db=db)
+    graph = await get_agent_graph(
+        mcp_tools, checkpointer, user_id=user_id, db=db, vectorstore_manager=vectorstore_manager,
+    )
 
     async def event_generator():
         # Send conversation_id as the first event (needed for new conversations)

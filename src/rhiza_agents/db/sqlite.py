@@ -47,6 +47,21 @@ class Database:
             )
         """)
 
+        await self.database.execute("""
+            CREATE TABLE IF NOT EXISTS user_vectorstores (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                collection_name TEXT NOT NULL UNIQUE,
+                display_name TEXT NOT NULL,
+                description TEXT DEFAULT '',
+                document_count INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await self.database.execute(
+            "CREATE INDEX IF NOT EXISTS idx_user_vectorstores_user_id ON user_vectorstores(user_id)"
+        )
+
     async def create_conversation(self, conversation_id: str, user_id: str, title: str | None = None) -> dict:
         """Create a new conversation."""
         await self.database.execute(
@@ -140,4 +155,68 @@ class Database:
         await self.database.execute(
             "DELETE FROM user_agent_configs WHERE user_id = :user_id",
             {"user_id": user_id},
+        )
+
+    # --- Vector Stores ---
+
+    async def create_vectorstore(
+        self, id: str, user_id: str, collection_name: str, display_name: str, description: str = ""
+    ) -> dict:
+        """Register a new vector store."""
+        await self.database.execute(
+            """INSERT INTO user_vectorstores (id, user_id, collection_name, display_name, description)
+               VALUES (:id, :user_id, :collection_name, :display_name, :description)""",
+            {
+                "id": id,
+                "user_id": user_id,
+                "collection_name": collection_name,
+                "display_name": display_name,
+                "description": description,
+            },
+        )
+        return {
+            "id": id,
+            "user_id": user_id,
+            "collection_name": collection_name,
+            "display_name": display_name,
+            "description": description,
+            "document_count": 0,
+        }
+
+    async def list_vectorstores(self, user_id: str) -> list[dict]:
+        """List all vector stores for a user."""
+        rows = await self.database.fetch_all(
+            "SELECT * FROM user_vectorstores WHERE user_id = :user_id ORDER BY created_at DESC",
+            {"user_id": user_id},
+        )
+        return [dict(row._mapping) for row in rows]
+
+    async def get_vectorstore(self, id: str, user_id: str) -> dict | None:
+        """Get a vector store by ID, with ownership check."""
+        row = await self.database.fetch_one(
+            "SELECT * FROM user_vectorstores WHERE id = :id AND user_id = :user_id",
+            {"id": id, "user_id": user_id},
+        )
+        return dict(row._mapping) if row else None
+
+    async def get_vectorstore_by_id(self, id: str) -> dict | None:
+        """Get a vector store by ID (no ownership check, for tool resolution)."""
+        row = await self.database.fetch_one(
+            "SELECT * FROM user_vectorstores WHERE id = :id",
+            {"id": id},
+        )
+        return dict(row._mapping) if row else None
+
+    async def update_vectorstore_doc_count(self, id: str, count: int):
+        """Update the document count for a vector store."""
+        await self.database.execute(
+            "UPDATE user_vectorstores SET document_count = :count WHERE id = :id",
+            {"count": count, "id": id},
+        )
+
+    async def delete_vectorstore(self, id: str, user_id: str):
+        """Delete a vector store record."""
+        await self.database.execute(
+            "DELETE FROM user_vectorstores WHERE id = :id AND user_id = :user_id",
+            {"id": id, "user_id": user_id},
         )
