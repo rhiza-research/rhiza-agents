@@ -12,6 +12,17 @@ const activityPanel = document.getElementById('activity-panel');
 const activityContent = document.getElementById('activity-content');
 const activityToggle = document.getElementById('activity-toggle');
 const activityClose = document.getElementById('activity-close');
+const filesPanel = document.getElementById('files-panel');
+const filesList = document.getElementById('files-list');
+const fileViewer = document.getElementById('file-viewer');
+const fileViewerPath = document.getElementById('file-viewer-path');
+const fileViewerCode = document.getElementById('file-viewer-code');
+const fileViewerClose = document.getElementById('file-viewer-close');
+const fileDownloadBtn = document.getElementById('file-download-btn');
+const fileApproveBtn = document.getElementById('file-approve-btn');
+const filesToggle = document.getElementById('files-toggle');
+const filesClose = document.getElementById('files-close');
+const execModeToggle = document.getElementById('exec-mode-toggle');
 
 // Configure marked.js with highlight.js
 marked.use(markedHighlight({
@@ -121,6 +132,189 @@ if (activityDataEl) {
         activityData.forEach(item => renderActivityItem(item));
     } catch (e) {
         console.error('Failed to parse activity data:', e);
+    }
+}
+
+// --- Files Panel ---
+
+function toggleFilesPanel() {
+    filesPanel.classList.toggle('hidden');
+    filesToggle.classList.toggle('active');
+    localStorage.setItem('filesPanelOpen', !filesPanel.classList.contains('hidden'));
+    // Refresh file list when opening
+    if (!filesPanel.classList.contains('hidden')) {
+        loadFiles();
+    }
+}
+
+filesToggle.addEventListener('click', toggleFilesPanel);
+filesClose.addEventListener('click', toggleFilesPanel);
+
+// Restore files panel state
+if (localStorage.getItem('filesPanelOpen') === 'true') {
+    filesPanel.classList.remove('hidden');
+    filesToggle.classList.add('active');
+}
+
+// Track the currently viewed file path for download/approve
+let currentViewedFilePath = null;
+let currentViewedFileContent = null;
+
+async function loadFiles() {
+    const convId = conversationIdInput.value;
+    if (!convId) {
+        filesList.innerHTML = '<div class="files-empty">No conversation selected</div>';
+        return;
+    }
+
+    try {
+        const response = await fetch(`/api/conversations/${convId}/files`);
+        if (!response.ok) {
+            filesList.innerHTML = '<div class="files-empty">Failed to load files</div>';
+            return;
+        }
+
+        const files = await response.json();
+        if (files.length === 0) {
+            filesList.innerHTML = '<div class="files-empty">No files yet</div>';
+            filesToggle.classList.remove('has-files');
+            return;
+        }
+
+        filesToggle.classList.add('has-files');
+        filesList.innerHTML = '';
+        for (const file of files) {
+            const item = document.createElement('div');
+            item.className = 'file-item';
+            item.addEventListener('click', () => openFile(file.path));
+
+            const pathSpan = document.createElement('span');
+            pathSpan.className = 'file-item-path';
+            pathSpan.textContent = file.path;
+            item.appendChild(pathSpan);
+
+            const meta = document.createElement('span');
+            meta.className = 'file-item-meta';
+            meta.textContent = formatFileSize(file.size);
+            item.appendChild(meta);
+
+            filesList.appendChild(item);
+        }
+    } catch (e) {
+        console.error('Failed to load files:', e);
+        filesList.innerHTML = '<div class="files-empty">Error loading files</div>';
+    }
+}
+
+function formatFileSize(bytes) {
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+async function openFile(path) {
+    const convId = conversationIdInput.value;
+    if (!convId) return;
+
+    try {
+        // Strip leading slash for the URL path
+        const urlPath = path.startsWith('/') ? path.slice(1) : path;
+        const response = await fetch(`/api/conversations/${convId}/files/${urlPath}`);
+        if (!response.ok) {
+            console.error('Failed to load file:', response.status);
+            return;
+        }
+
+        const data = await response.json();
+        currentViewedFilePath = data.path;
+        currentViewedFileContent = data.content;
+
+        fileViewerPath.textContent = data.path;
+
+        // Syntax highlight based on file extension
+        const ext = data.path.split('.').pop().toLowerCase();
+        const langMap = {
+            'py': 'python', 'js': 'javascript', 'ts': 'typescript',
+            'json': 'json', 'csv': 'plaintext', 'md': 'markdown',
+            'html': 'html', 'css': 'css', 'sql': 'sql',
+            'sh': 'bash', 'bash': 'bash', 'yaml': 'yaml', 'yml': 'yaml',
+            'txt': 'plaintext', 'xml': 'xml', 'toml': 'toml',
+        };
+        const lang = langMap[ext] || 'plaintext';
+
+        if (hljs.getLanguage(lang)) {
+            fileViewerCode.innerHTML = hljs.highlight(data.content, { language: lang }).value;
+        } else {
+            fileViewerCode.textContent = data.content;
+        }
+
+        // Show approve button for code files in review mode
+        const codeExts = ['py', 'js', 'ts', 'sh', 'bash'];
+        const isReviewMode = execModeToggle.checked;
+        if (codeExts.includes(ext) && isReviewMode) {
+            fileApproveBtn.classList.remove('hidden');
+        } else {
+            fileApproveBtn.classList.add('hidden');
+        }
+
+        // Show the viewer, hide the list
+        filesList.classList.add('hidden');
+        fileViewer.classList.remove('hidden');
+    } catch (e) {
+        console.error('Failed to open file:', e);
+    }
+}
+
+fileViewerClose.addEventListener('click', () => {
+    fileViewer.classList.add('hidden');
+    filesList.classList.remove('hidden');
+    currentViewedFilePath = null;
+    currentViewedFileContent = null;
+});
+
+fileDownloadBtn.addEventListener('click', () => {
+    if (!currentViewedFilePath || currentViewedFileContent === null) return;
+    const blob = new Blob([currentViewedFileContent], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = currentViewedFilePath.split('/').pop();
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+});
+
+// Approve & Run: send a chat message asking the agent to run the file
+fileApproveBtn.addEventListener('click', () => {
+    if (!currentViewedFilePath) return;
+    const message = `Run the file ${currentViewedFilePath}`;
+    input.value = message;
+    form.dispatchEvent(new Event('submit'));
+
+    // Close the file viewer back to the list
+    fileViewer.classList.add('hidden');
+    filesList.classList.remove('hidden');
+});
+
+// Execution mode toggle -- persisted in localStorage
+if (localStorage.getItem('execReviewMode') === 'true') {
+    execModeToggle.checked = true;
+}
+execModeToggle.addEventListener('change', () => {
+    localStorage.setItem('execReviewMode', execModeToggle.checked);
+});
+
+// Load files on page load if conversation has files
+const hasFilesEl = document.getElementById('has-files-data');
+if (hasFilesEl) {
+    try {
+        const hasFiles = JSON.parse(hasFilesEl.textContent);
+        if (hasFiles) {
+            loadFiles();
+        }
+    } catch (e) {
+        // ignore
     }
 }
 
@@ -248,6 +442,12 @@ function handleStreamEvent(event, msgDiv) {
 
         case 'tool_end':
             renderActivityItem({type: 'tool_result', name: event.data.name, content: event.data.output});
+            break;
+
+        case 'files_changed':
+            // Refresh file list when a file is written
+            loadFiles();
+            filesToggle.classList.add('has-files');
             break;
 
         case 'error':

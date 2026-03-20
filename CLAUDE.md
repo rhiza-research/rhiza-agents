@@ -71,6 +71,7 @@ src/rhiza_agents/
     tools/
       mcp.py        # MCP tool loading
       sandbox.py    # Daytona sandbox tool
+      files.py      # File write/run tools (state-based virtual filesystem)
       vectordb.py   # RAG retrieval tool factory
   vectorstore/
     manager.py      # ChromaDB collection management

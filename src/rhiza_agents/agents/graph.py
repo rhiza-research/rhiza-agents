@@ -3,10 +3,14 @@
 import hashlib
 import json
 import logging
+from collections.abc import Sequence
+from typing import Annotated, NotRequired, TypedDict
 
 from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import AnyMessage, SystemMessage
 from langchain_core.messages.utils import count_tokens_approximately, trim_messages
+from langgraph.graph.message import add_messages
+from langgraph.managed.is_last_step import RemainingStepsManager
 from langgraph.prebuilt import create_react_agent
 from langgraph_supervisor import create_supervisor
 
@@ -15,6 +19,27 @@ from ..db.models import AgentConfig
 logger = logging.getLogger(__name__)
 
 _graph_cache: dict = {}
+
+
+def _merge_files(current: dict, update: dict) -> dict:
+    """Reducer that merges file updates into the existing files dict.
+
+    Each update is a dict of path -> file_data. New entries are added,
+    existing entries are replaced (last write wins).
+    """
+    merged = dict(current) if current else {}
+    if update:
+        merged.update(update)
+    return merged
+
+
+class AgentGraphState(TypedDict):
+    """Custom state schema for the supervisor graph, extending the default with files."""
+
+    messages: Annotated[Sequence[AnyMessage], add_messages]
+    remaining_steps: NotRequired[Annotated[int, RemainingStepsManager]]
+    files: Annotated[dict, _merge_files]
+
 
 # Max tokens for message history sent to the LLM. 100k leaves headroom
 # within Claude's 200k context window for the system prompt, tool
@@ -57,11 +82,15 @@ async def _resolve_tools(config: AgentConfig, mcp_tools: list, vectorstore_manag
         if tool_id == "mcp:sheerwater":
             tools.extend(mcp_tools)
         elif tool_id == "sandbox:daytona":
+            from .tools.files import run_file, write_file
             from .tools.sandbox import execute_python_code, is_sandbox_available
 
+            # File tools are always available (write to state, not sandbox)
+            tools.append(write_file)
             if is_sandbox_available():
                 tools.append(execute_python_code)
-            # If no API key, silently skip -- agent works without tools
+                tools.append(run_file)
+            # If no API key, silently skip sandbox tools -- agent works without them
         else:
             logger.info("Tool type %s not yet implemented, skipping", tool_id)
 
@@ -113,7 +142,13 @@ async def build_graph(
         # ChatModel to call .bind_tools(). Retry wrapping produces a
         # RunnableRetry which lacks that method.
         model = ChatAnthropic(model=wc.model, max_retries=3)
-        worker = create_react_agent(model, tools, prompt=_make_prompt_with_trimming(wc.system_prompt), name=wc.id)
+        worker = create_react_agent(
+            model,
+            tools,
+            prompt=_make_prompt_with_trimming(wc.system_prompt),
+            name=wc.id,
+            state_schema=AgentGraphState,
+        )
         worker_agents.append(worker)
         logger.info("Created worker agent: %s (%d tools)", wc.id, len(tools))
 
@@ -121,6 +156,7 @@ async def build_graph(
         model=ChatAnthropic(model=supervisor_config.model, max_retries=3),
         agents=worker_agents,
         prompt=_make_prompt_with_trimming(supervisor_config.system_prompt),
+        state_schema=AgentGraphState,
         output_mode="full_history",
         add_handoff_back_messages=True,
     )

@@ -33,7 +33,16 @@
 
         <main class="chat-area">
             <div class="chat-header">
-                <button id="activity-toggle" class="activity-toggle-btn" title="Toggle activity panel">Activity</button>
+                <div class="chat-header-left">
+                    <label class="exec-mode-toggle" title="When enabled, code must be approved before execution">
+                        <input type="checkbox" id="exec-mode-toggle">
+                        <span class="exec-mode-label">Review code</span>
+                    </label>
+                </div>
+                <div class="chat-header-right">
+                    <button id="files-toggle" class="files-toggle-btn{% if has_files %} has-files{% endif %}" title="Toggle file viewer">Files</button>
+                    <button id="activity-toggle" class="activity-toggle-btn" title="Toggle activity panel">Activity</button>
+                </div>
             </div>
             <div class="messages" id="messages">
                 {% if not messages %}
@@ -57,6 +66,25 @@
             </form>
         </main>
 
+        <aside class="files-panel hidden" id="files-panel">
+            <div class="files-header">
+                <span class="files-title">Files</span>
+                <button id="files-close" class="files-close-btn" title="Close panel">&times;</button>
+            </div>
+            <div class="files-list" id="files-list"></div>
+            <div class="file-viewer hidden" id="file-viewer">
+                <div class="file-viewer-header">
+                    <span class="file-viewer-path" id="file-viewer-path"></span>
+                    <div class="file-viewer-actions">
+                        <button class="file-approve-btn hidden" id="file-approve-btn" title="Execute this file in the sandbox">Approve &amp; Run</button>
+                        <button class="file-download-btn" id="file-download-btn" title="Download file">Download</button>
+                        <button class="file-viewer-close-btn" id="file-viewer-close" title="Back to file list">&larr;</button>
+                    </div>
+                </div>
+                <pre class="file-viewer-content" id="file-viewer-content"><code id="file-viewer-code"></code></pre>
+            </div>
+        </aside>
+
         <aside class="activity-panel" id="activity-panel">
             <div class="activity-header">
                 <span class="activity-title">Activity</span>
@@ -67,6 +95,7 @@
     </div>
 
     <script id="activity-data" type="application/json">{{ activity_json | safe }}</script>
+    <script id="has-files-data" type="application/json">{{ has_files | tojson }}</script>
     <script type="module" src="/static/chat.js"></script>
 </body>
 </html>

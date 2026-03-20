@@ -9,7 +9,7 @@ rhiza-agents is a multi-agent chat platform built on LangGraph. Users log in, in
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                        Web Browser                           │
-│  Chat UI  │  Activity Panel  │  Config Editor  │  Auth       │
+│  Chat UI  │  Activity Panel  │  File Viewer  │  Config  │  Auth │
 └────────────────────────┬────────────────────────────────────┘
                      │ HTTP
 ┌────────────────────▼────────────────────────────────┐
@@ -180,6 +180,36 @@ Key patterns:
 - **Graceful degradation**: If `DAYTONA_API_KEY` is not set, sandbox tool is not added to the agent; code_runner responds conversationally
 
 See `docs/reference/daytona-integration.md` for SDK details.
+
+## State-Based Virtual Filesystem
+
+Agents can write files to a virtual filesystem stored in the LangGraph checkpoint state. Files persist as long as the conversation exists and survive message summarization.
+
+### Graph State
+
+`AgentGraphState` in `agents/graph.py` extends the default supervisor state with a `files` dict:
+```
+files: Annotated[dict, _merge_files]  # path -> {content, created_at, modified_at}
+```
+
+The `_merge_files` reducer merges updates additively -- each tool call adds or overwrites specific paths without replacing the entire dict. File content is stored as a list of lines (matching the `deepagents` `StateBackend` format).
+
+### Tools
+
+- **`write_file(path, content)`**: Writes a file to state. Returns a `Command` with both a `ToolMessage` (for the LLM) and a `files` update (for the state). Always available to sandbox agents.
+- **`run_file(path)`**: Reads a file from state (via `ToolRuntime.state`) and executes it in the Daytona sandbox. Only available when `DAYTONA_API_KEY` is set.
+- **`execute_python_code(code)`**: Original inline execution tool, unchanged.
+
+Both `write_file` and `run_file` use `ToolRuntime` from `langgraph.prebuilt` to access graph state and `tool_call_id` without exposing these to the LLM. They return `Command` objects from `langgraph.types` to update non-messages state fields.
+
+### API
+
+- `GET /api/conversations/{id}/files` -- list files (path, size, modified_at)
+- `GET /api/conversations/{id}/files/{path}` -- get file content
+
+### UI
+
+A collapsible "Files" panel in the chat UI shows conversation files. Files can be viewed with syntax highlighting and downloaded. A "Review code" toggle enables an approval flow where code files show an "Approve & Run" button that sends a chat message to trigger `run_file`.
 
 ## Context Management
 

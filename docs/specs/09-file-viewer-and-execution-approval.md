@@ -146,3 +146,63 @@ files: dict[str, dict]  # path -> file data
 7. Reload the page — files are still there (persisted in checkpoint)
 8. Files survive message summarization (Phase 8 pruning doesn't affect them)
 9. In auto-execute mode, behavior matches current Phase 4 behavior (no regression)
+
+---
+
+## Implementation Notes
+
+### What was built
+
+**Custom graph state schema** (`AgentGraphState` in `agents/graph.py`):
+- Extends the default LangGraph `_OuterState` with a `files: Annotated[dict, _merge_files]` field
+- `_merge_files` reducer merges file dicts additively (new paths added, existing paths overwritten)
+- Passed to `create_supervisor()` via the `state_schema` parameter
+
+**File tools** (`agents/tools/files.py`):
+- `write_file(path, content)` -- writes file to graph state via `Command(update={"files": ..., "messages": ...})`
+- `run_file(path)` -- reads file from state via `ToolRuntime.state`, executes in sandbox, returns output
+- Both tools use `ToolRuntime` to access `tool_call_id` and graph state
+- Both return `Command` objects to update state (required for tools that modify non-messages state)
+- File size limit: 1MB per file
+
+**Tool registration** (`agents/graph.py` `_resolve_tools`):
+- `write_file` is always added when `sandbox:daytona` is in the agent's tools (writing to state doesn't need the sandbox)
+- `run_file` and `execute_python_code` are only added when `DAYTONA_API_KEY` is configured
+- Tool-to-agent mappings updated in both `_build_name_mappings()` and the lifespan startup
+
+**API endpoints** (`main.py`):
+- `GET /api/conversations/{id}/files` -- lists files from checkpoint state
+- `GET /api/conversations/{id}/files/{path:path}` -- returns file content from checkpoint state
+- No `POST .../run` endpoint was implemented; "Approve & Run" sends a chat message instead (simpler, leverages existing streaming pipeline)
+
+**SSE event**:
+- `files_changed` event emitted when `write_file` tool completes, triggers UI file list refresh
+
+**File viewer UI** (`templates/chat.html`, `static/chat.js`, `static/style.css`):
+- Collapsible "Files" panel (right side, alongside Activity panel)
+- "Files" toggle button in chat header with `has-files` indicator
+- File list view with path and size
+- File detail view with syntax highlighting via highlight.js (reuses existing CDN import)
+- Download button (client-side blob download)
+- "Approve & Run" button visible on code files (.py, .js, .ts, .sh, .bash) when review mode is enabled
+- Panel state persisted in localStorage
+
+**Execution mode toggle**:
+- "Review code" checkbox in chat header
+- Persisted in localStorage (`execReviewMode`)
+- When enabled, code files show "Approve & Run" button in file viewer
+- "Approve & Run" sends `"Run the file /path/to/file"` as a chat message, which the agent processes via the `run_file` tool
+
+### Deviations from spec
+
+1. **No `POST /api/conversations/{id}/files/{path}/run` endpoint**: The spec proposed a dedicated execution endpoint. Instead, "Approve & Run" sends a chat message. This is simpler and more consistent -- the agent decides whether to use `run_file`, and the execution flows through the normal streaming pipeline with proper activity panel integration.
+
+2. **No sandbox output file copying**: The spec mentioned copying output files from the sandbox back to state after `execute_python_code` runs. This was not implemented because the Daytona SDK's `code_run` only returns stdout/stderr -- there's no API to enumerate files created during execution. The `run_file` tool similarly only returns execution output. Users who want files persisted should have the agent use `write_file` explicitly.
+
+3. **Execution mode is per-browser, not per-conversation**: The toggle is stored in localStorage, not in the conversation or user settings DB. This keeps it simple with no schema changes.
+
+### Key technical details
+
+- `ToolRuntime` from `langgraph.prebuilt` provides `state`, `tool_call_id`, and `config` to tools without exposing them to the LLM's tool-calling interface
+- `Command` from `langgraph.types` lets tools return state updates alongside a `ToolMessage` response
+- The `files` reducer in the state schema handles merging -- each `Command` update only contains the new/changed files, and the reducer merges them into the existing dict

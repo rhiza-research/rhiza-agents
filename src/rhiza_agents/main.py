@@ -84,6 +84,8 @@ async def lifespan(app: FastAPI):
                 _tool_to_agent[t.name] = agent_id
         if "sandbox:daytona" in c.tools:
             _tool_to_agent["execute_python_code"] = agent_id
+            _tool_to_agent["write_file"] = agent_id
+            _tool_to_agent["run_file"] = agent_id
 
     async def _sandbox_cleanup_loop():
         """Background task to clean up idle sandboxes."""
@@ -158,6 +160,8 @@ def _build_name_mappings(configs: list[AgentConfig]) -> tuple[dict[str, str], di
                 tool_to_agent[t.name] = c.id
         if "sandbox:daytona" in c.tools:
             tool_to_agent["execute_python_code"] = c.id
+            tool_to_agent["write_file"] = c.id
+            tool_to_agent["run_file"] = c.id
     return agent_names, tool_to_agent
 
 
@@ -363,6 +367,7 @@ async def index(request: Request):
             "current_conversation": None,
             "messages": [],
             "activity_json": "[]",
+            "has_files": False,
         },
     )
 
@@ -392,6 +397,7 @@ async def conversation_page(request: Request, conversation_id: str, user: dict =
     all_messages = _process_messages(raw_messages, agent_names, tool_to_agent_map)
     chat_messages = [m for m in all_messages if m["type"] in ("human", "ai")]
     activity = [m for m in all_messages if m["type"] in ("thinking", "tool_call", "tool_result")]
+    has_files = bool(state.values.get("files"))
 
     return templates.TemplateResponse(
         "chat.html",
@@ -402,6 +408,7 @@ async def conversation_page(request: Request, conversation_id: str, user: dict =
             "current_conversation": conversation,
             "messages": chat_messages,
             "activity_json": json.dumps(activity, default=str),
+            "has_files": has_files,
         },
     )
 
@@ -525,6 +532,13 @@ async def stream_chat_message(
                         f"event: tool_end\ndata: "
                         f"{json.dumps({'name': tool_name, 'output': str(tool_output)[:1000]})}\n\n"
                     )
+                    # Notify the UI when a file tool completes so it can refresh the file panel
+                    if tool_name in ("write_file", "run_file"):
+                        yield f"event: files_changed\ndata: {json.dumps({})}\n\n"
+
+                elif kind == "on_custom_event" and event.get("name") == "write_file":
+                    # Command-based tools may emit custom events instead of on_tool_end
+                    yield f"event: files_changed\ndata: {json.dumps({})}\n\n"
 
         except Exception as e:
             logger.exception("Streaming error")
@@ -539,6 +553,10 @@ async def stream_chat_message(
 
         # Summarize old messages in the background if the conversation is long
         asyncio.create_task(_maybe_summarize(graph, conversation_id))
+
+        # Always notify files_changed at end of stream as a fallback,
+        # in case Command-based tool updates weren't caught during streaming
+        yield f"event: files_changed\ndata: {json.dumps({})}\n\n"
 
         yield f"event: done\ndata: {json.dumps({})}\n\n"
 
@@ -710,6 +728,74 @@ async def get_conversation_messages(request: Request, conversation_id: str, user
     return {
         "conversation_id": conversation_id,
         "messages": _process_messages(raw_messages, agent_names, tool_to_agent_map),
+    }
+
+
+@app.get("/api/conversations/{conversation_id}/files")
+async def list_conversation_files(request: Request, conversation_id: str, user: dict = Depends(require_auth)):
+    """List files in a conversation's virtual filesystem."""
+    user_id = get_user_id(request)
+    conversation = await db.get_conversation(conversation_id, user_id)
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    graph = await get_agent_graph(
+        mcp_tools,
+        checkpointer,
+        user_id=user_id,
+        db=db,
+        vectorstore_manager=vectorstore_manager,
+    )
+    state = await graph.aget_state({"configurable": {"thread_id": conversation_id}})
+    files = state.values.get("files", {})
+
+    file_list = []
+    for path, file_data in files.items():
+        content_lines = file_data.get("content", [])
+        content_str = "\n".join(content_lines)
+        file_list.append(
+            {
+                "path": path,
+                "size": len(content_str.encode("utf-8")),
+                "modified_at": file_data.get("modified_at", ""),
+            }
+        )
+    return file_list
+
+
+@app.get("/api/conversations/{conversation_id}/files/{file_path:path}")
+async def get_conversation_file(
+    request: Request, conversation_id: str, file_path: str, user: dict = Depends(require_auth)
+):
+    """Get a file's contents from a conversation's virtual filesystem."""
+    user_id = get_user_id(request)
+    conversation = await db.get_conversation(conversation_id, user_id)
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    graph = await get_agent_graph(
+        mcp_tools,
+        checkpointer,
+        user_id=user_id,
+        db=db,
+        vectorstore_manager=vectorstore_manager,
+    )
+    state = await graph.aget_state({"configurable": {"thread_id": conversation_id}})
+    files = state.values.get("files", {})
+
+    # Normalize path -- the stored keys start with /
+    lookup_path = file_path if file_path.startswith("/") else "/" + file_path
+    file_data = files.get(lookup_path)
+    if not file_data:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    content_lines = file_data.get("content", [])
+    content_str = "\n".join(content_lines)
+
+    return {
+        "path": lookup_path,
+        "content": content_str,
+        "modified_at": file_data.get("modified_at", ""),
     }
 
 
