@@ -5,6 +5,8 @@ import json
 import logging
 
 from langchain_anthropic import ChatAnthropic
+from langchain_core.messages import SystemMessage
+from langchain_core.messages.utils import count_tokens_approximately, trim_messages
 from langgraph.prebuilt import create_react_agent
 from langgraph_supervisor import create_supervisor
 
@@ -13,6 +15,34 @@ from ..db.models import AgentConfig
 logger = logging.getLogger(__name__)
 
 _graph_cache: dict = {}
+
+# Max tokens for message history sent to the LLM. 100k leaves headroom
+# within Claude's 200k context window for the system prompt, tool
+# definitions, and the model's response.
+_TRIM_MAX_TOKENS = 100_000
+
+
+def _make_prompt_with_trimming(system_prompt: str, max_tokens: int = _TRIM_MAX_TOKENS):
+    """Create a prompt callable that prepends the system prompt and trims messages.
+
+    The callable receives the full graph state (dict with "messages" key)
+    and returns a list of messages suitable for the LLM.
+    """
+
+    def prompt(state: dict) -> list:
+        messages = state.get("messages", [])
+        trimmed = trim_messages(
+            messages,
+            strategy="last",
+            token_counter=count_tokens_approximately,
+            max_tokens=max_tokens,
+            start_on="human",
+            end_on=("human", "tool"),
+            include_system=False,
+        )
+        return [SystemMessage(content=system_prompt)] + trimmed
+
+    return prompt
 
 
 def _config_hash(configs: list[AgentConfig]) -> str:
@@ -80,14 +110,14 @@ async def build_graph(
     for wc in worker_configs:
         tools = await _resolve_tools(wc, mcp_tools, vectorstore_manager, db)
         model = ChatAnthropic(model=wc.model).with_retry(stop_after_attempt=3)
-        worker = create_react_agent(model, tools, prompt=wc.system_prompt, name=wc.id)
+        worker = create_react_agent(model, tools, prompt=_make_prompt_with_trimming(wc.system_prompt), name=wc.id)
         worker_agents.append(worker)
         logger.info("Created worker agent: %s (%d tools)", wc.id, len(tools))
 
     supervisor = create_supervisor(
         model=ChatAnthropic(model=supervisor_config.model).with_retry(stop_after_attempt=3),
         agents=worker_agents,
-        prompt=supervisor_config.system_prompt,
+        prompt=_make_prompt_with_trimming(supervisor_config.system_prompt),
         output_mode="full_history",
         add_handoff_back_messages=True,
     )
