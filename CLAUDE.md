@@ -103,7 +103,7 @@ The goal is that specs always reflect the current state of the code, not the ori
 | 6 | `docs/specs/06-streaming.md` | Complete |
 | 7 | `docs/specs/07-production-deploy.md` | Complete |
 | 8 | `docs/specs/08-context-management.md` | Complete (now uses SummarizationMiddleware) |
-| 9 | `docs/specs/09-file-viewer-and-execution-approval.md` | Partial — files/viewer done, HITL/streaming/execution mode remaining |
+| 9 | `docs/specs/09-file-viewer-and-execution-approval.md` | Complete |
 | 10 | `docs/specs/10-extended-thinking.md` | Not started — depends on Phase 9 streaming work |
 
 ## Key Principles
