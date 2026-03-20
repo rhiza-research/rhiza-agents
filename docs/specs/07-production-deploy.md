@@ -535,3 +535,20 @@ Ensure the repository visibility allows GHCR image pulls from the cluster. If th
 - **Do NOT set up monitoring/alerting** -- LangSmith tracing is sufficient for initial observability. Prometheus/Grafana integration can come later.
 - **Do NOT configure auto-scaling** -- single replica with Recreate strategy. Scaling requires Postgres first.
 - **Do NOT manually build or push Docker images** -- always use the CI/CD pipeline.
+
+## Implementation Notes
+
+Most of this phase was already implemented in a prior session:
+- `.github/workflows/build.yml` — multi-arch CI/CD with native arm64 runners (not QEMU)
+- `chart/` — full Helm chart (Chart.yaml, values.yaml, templates for deployment, service, ingress, PVC)
+- `Dockerfile` — with build args for GIT_SHA and BUILD_TIMESTAMP
+
+Changes made in this phase:
+- **Health probes**: Added liveness and readiness probes to `deployment.yaml` hitting `/login`
+- **DATABASE_URL fix**: Changed from `app.db` to `rhiza_agents.db` to be consistent with config.py default
+- **Resource requests**: Increased from 250m/512Mi to 500m/1Gi due to in-process ChromaDB with embedding model. TODO: validate against actual pod metrics.
+
+Deviations from spec:
+- **LangSmith not configured**: We don't use LangSmith/LangChain paid services. The spec's LangSmith env vars and config.py fields were not added.
+- **No config.py changes**: The `langsmith_api_key` and `langsmith_project` fields specified in the spec were not needed since LangChain reads env vars directly and we don't use LangSmith.
+- **Workflow uses native arm64 runners** instead of QEMU emulation, which is faster and more reliable.
