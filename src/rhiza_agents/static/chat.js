@@ -38,6 +38,70 @@ function renderMarkdown(content) {
     }
 }
 
+// --- Code Execution Blocks ---
+
+function renderCodeExecutionBlocks(activity) {
+    // Pair up execute_python_code tool calls with their results
+    for (let i = 0; i < activity.length; i++) {
+        const item = activity[i];
+        if (item.type === 'tool_call' && item.name === 'execute_python_code') {
+            const code = item.args?.code || '';
+            // Find the matching tool_result
+            let output = '';
+            for (let j = i + 1; j < activity.length; j++) {
+                if (activity[j].type === 'tool_result' && activity[j].name === 'execute_python_code') {
+                    output = typeof activity[j].content === 'string' ? activity[j].content : JSON.stringify(activity[j].content, null, 2);
+                    break;
+                }
+            }
+            addCodeExecutionBlock(code, output);
+        }
+    }
+}
+
+function addCodeExecutionBlock(code, output) {
+    const block = document.createElement('div');
+    block.className = 'message assistant';
+
+    const exec = document.createElement('div');
+    exec.className = 'code-execution';
+
+    // Code section
+    const codeHeader = document.createElement('div');
+    codeHeader.className = 'code-execution-header';
+    codeHeader.textContent = 'Code';
+    exec.appendChild(codeHeader);
+
+    const codePre = document.createElement('pre');
+    codePre.className = 'code-execution-code';
+    const codeEl = document.createElement('code');
+    codeEl.className = 'hljs language-python';
+    try {
+        codeEl.innerHTML = hljs.highlight(code, { language: 'python' }).value;
+    } catch (e) {
+        codeEl.textContent = code;
+    }
+    codePre.appendChild(codeEl);
+    exec.appendChild(codePre);
+
+    // Output section
+    if (output) {
+        const outputHeader = document.createElement('div');
+        outputHeader.className = 'code-execution-header';
+        outputHeader.textContent = 'Output';
+        exec.appendChild(outputHeader);
+
+        const outputPre = document.createElement('pre');
+        outputPre.className = 'code-execution-output';
+        outputPre.textContent = output;
+        exec.appendChild(outputPre);
+    }
+
+    block.appendChild(exec);
+    messagesDiv.appendChild(block);
+    messagesDiv.scrollTop = messagesDiv.scrollHeight;
+}
+
 // --- Activity Panel ---
 
 function toggleActivityPanel() {
@@ -123,6 +187,8 @@ if (activityDataEl) {
         console.error('Failed to parse activity data:', e);
     }
 }
+// Note: Server-rendered code execution blocks are handled via the chat.html template.
+// The JS renderCodeExecutionBlocks() is only used for live/dynamic responses.
 
 // --- Messages ---
 
@@ -187,12 +253,14 @@ if (form) form.addEventListener('submit', async (e) => {
         }
 
         loadingMsg.remove();
-        addMessage('assistant', data.response, false, data.agent_name);
 
-        // Render activity in the side panel
+        // Render code execution blocks inline before the response
         if (data.activity && data.activity.length > 0) {
+            renderCodeExecutionBlocks(data.activity);
             data.activity.forEach(item => renderActivityItem(item));
         }
+
+        addMessage('assistant', data.response, false, data.agent_name);
 
     } catch (error) {
         loadingMsg.remove();

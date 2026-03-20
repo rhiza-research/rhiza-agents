@@ -114,6 +114,7 @@ def get_default_configs() -> list[AgentConfig]:
             name="Code Runner",
             type="worker",
             system_prompt=_CODE_RUNNER_PROMPT,
+            tools=["sandbox:daytona"],
         ),
         AgentConfig(
             id="research_assistant",

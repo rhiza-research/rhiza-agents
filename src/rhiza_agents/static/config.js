@@ -1,5 +1,6 @@
 let agents = [];
 let selectedAgentId = null;
+let toolTypes = {}; // id -> {name, available}
 
 const agentList = document.getElementById('agent-list');
 const configDetail = document.getElementById('config-detail');
@@ -7,7 +8,18 @@ const addAgentBtn = document.getElementById('add-agent-btn');
 const resetAllBtn = document.getElementById('reset-all-btn');
 const modal = document.getElementById('new-agent-modal');
 
+async function loadToolTypes() {
+    const res = await fetch('/api/tool-types');
+    if (!res.ok) return;
+    const types = await res.json();
+    toolTypes = {};
+    for (const t of types) {
+        toolTypes[t.id] = t;
+    }
+}
+
 async function loadAgents() {
+    await loadToolTypes();
     const res = await fetch('/api/agents');
     if (!res.ok) return;
     agents = await res.json();
@@ -91,14 +103,16 @@ function selectAgent(agentId) {
             <div class="form-group">
                 <label>Tools</label>
                 <div class="tools-checkboxes">
-                    <label class="tool-checkbox">
-                        <input type="checkbox" value="mcp:sheerwater" ${agent.tools.includes('mcp:sheerwater') ? 'checked' : ''}>
-                        mcp:sheerwater
-                    </label>
-                    <label class="tool-checkbox disabled">
-                        <input type="checkbox" value="sandbox:daytona" disabled ${agent.tools.includes('sandbox:daytona') ? 'checked' : ''}>
-                        sandbox:daytona <span class="coming-soon">Coming soon</span>
-                    </label>
+                    ${Object.entries(toolTypes).map(([id, t]) => {
+                        const checked = agent.tools.includes(id) ? 'checked' : '';
+                        const disabled = !t.available ? 'disabled' : '';
+                        const cls = !t.available ? 'tool-checkbox disabled' : 'tool-checkbox';
+                        const badge = !t.available ? ' <span class="coming-soon">Not configured</span>' : '';
+                        return `<label class="${cls}">
+                            <input type="checkbox" value="${escapeAttr(id)}" ${checked} ${disabled}>
+                            ${escapeHtml(id)}${badge}
+                        </label>`;
+                    }).join('')}
                 </div>
             </div>
 
@@ -128,7 +142,7 @@ async function saveAgent(agent) {
     const model = document.getElementById('edit-model').value;
     const system_prompt = document.getElementById('edit-prompt').value;
     const tools = [];
-    document.querySelectorAll('.tools-checkboxes input:checked:not(:disabled)').forEach(cb => {
+    document.querySelectorAll('.tools-checkboxes input:checked').forEach(cb => {
         tools.push(cb.value);
     });
 

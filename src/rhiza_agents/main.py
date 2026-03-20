@@ -22,6 +22,7 @@ from .agents.graph import invalidate_graph_cache
 from .agents.registry import get_default_configs, get_default_configs_by_id, merge_configs
 from .agents.supervisor import get_agent_graph
 from .agents.tools.mcp import create_mcp_client
+from .agents.tools.sandbox import cleanup_idle_sandboxes, cleanup_sandbox, is_sandbox_available
 from .auth import create_oauth, get_user_from_session, get_user_id, get_user_name
 from .config import Config
 from .db.models import AgentConfig
@@ -72,12 +73,22 @@ async def lifespan(app: FastAPI):
         if "mcp:sheerwater" in c.tools:
             for t in mcp_tools:
                 _tool_to_agent[t.name] = agent_id
+        if "sandbox:daytona" in c.tools:
+            _tool_to_agent["execute_python_code"] = agent_id
+
+    async def _sandbox_cleanup_loop():
+        """Background task to clean up idle sandboxes."""
+        while True:
+            await asyncio.sleep(60)
+            await cleanup_idle_sandboxes()
 
     async with AsyncSqliteSaver.from_conn_string(config.checkpoint_db_path) as cp:
         checkpointer = cp
         logger.info("Supervisor graph ready (built on first request)")
 
+        cleanup_task = asyncio.create_task(_sandbox_cleanup_loop())
         yield
+        cleanup_task.cancel()
 
     await db.disconnect()
 
@@ -136,6 +147,8 @@ def _build_name_mappings(configs: list[AgentConfig]) -> tuple[dict[str, str], di
         if "mcp:sheerwater" in c.tools:
             for t in mcp_tools:
                 tool_to_agent[t.name] = c.id
+        if "sandbox:daytona" in c.tools:
+            tool_to_agent["execute_python_code"] = c.id
     return agent_names, tool_to_agent
 
 
@@ -329,7 +342,7 @@ async def send_chat_message(request: Request, body: SendMessageRequest, user: di
     agent_names, tool_to_agent_map = _build_name_mappings(effective)
     result = await graph.ainvoke(
         {"messages": [HumanMessage(content=body.message)]},
-        config={"configurable": {"thread_id": conversation_id}},
+        config={"configurable": {"thread_id": conversation_id}, "recursion_limit": 50},
     )
 
     # Find the new turn's messages (after the last HumanMessage)
@@ -372,9 +385,10 @@ async def list_conversations(request: Request, user: dict = Depends(require_auth
 
 @app.delete("/api/conversations/{conversation_id}")
 async def delete_conversation(request: Request, conversation_id: str, user: dict = Depends(require_auth)):
-    """Delete a conversation."""
+    """Delete a conversation and clean up its sandbox."""
     user_id = get_user_id(request)
     await db.delete_conversation(conversation_id, user_id)
+    await asyncio.to_thread(cleanup_sandbox, conversation_id)
     return {"status": "deleted"}
 
 
@@ -382,6 +396,15 @@ async def delete_conversation(request: Request, conversation_id: str, user: dict
 async def list_tools(user: dict = Depends(require_auth)):
     """List available MCP tools."""
     return [{"name": t.name, "description": t.description} for t in mcp_tools]
+
+
+@app.get("/api/tool-types")
+async def list_tool_types(user: dict = Depends(require_auth)):
+    """List available tool types and their availability status."""
+    return [
+        {"id": "mcp:sheerwater", "name": "Sheerwater MCP Tools", "available": len(mcp_tools) > 0},
+        {"id": "sandbox:daytona", "name": "Code Sandbox (Daytona)", "available": is_sandbox_available()},
+    ]
 
 
 @app.get("/api/conversations/{conversation_id}/messages")

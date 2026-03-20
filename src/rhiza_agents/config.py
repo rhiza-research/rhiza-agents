@@ -21,6 +21,11 @@ class Config:
     # Anthropic API
     anthropic_api_key: str
 
+    # Daytona sandbox
+    daytona_api_key: str
+    daytona_api_url: str
+    daytona_proxy_url: str
+
     # App settings
     secret_key: str
     database_url: str
@@ -39,6 +44,9 @@ class Config:
             keycloak_client_secret=os.environ["KEYCLOAK_CLIENT_SECRET"],
             mcp_server_url=os.environ.get("MCP_SERVER_URL", "http://localhost:8000/sse"),
             anthropic_api_key=os.environ["ANTHROPIC_API_KEY"],
+            daytona_api_key=os.environ.get("DAYTONA_API_KEY", ""),
+            daytona_api_url=os.environ.get("DAYTONA_API_URL", ""),
+            daytona_proxy_url=os.environ.get("DAYTONA_PROXY_URL", ""),
             secret_key=os.environ["SECRET_KEY"],
             database_url=os.environ.get("DATABASE_URL", "sqlite:///./rhiza_agents.db"),
             checkpoint_db_path=os.environ.get("CHECKPOINT_DB_PATH", "./checkpoints.db"),

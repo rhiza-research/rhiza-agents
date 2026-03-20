@@ -26,6 +26,12 @@ def _resolve_tools(config: AgentConfig, mcp_tools: list) -> list:
     for tool_id in config.tools:
         if tool_id == "mcp:sheerwater":
             tools.extend(mcp_tools)
+        elif tool_id == "sandbox:daytona":
+            from .tools.sandbox import execute_python_code, is_sandbox_available
+
+            if is_sandbox_available():
+                tools.append(execute_python_code)
+            # If no API key, silently skip -- agent works without tools
         else:
             logger.info("Tool type %s not yet implemented, skipping", tool_id)
     return tools
@@ -54,13 +60,13 @@ async def build_graph(
     worker_agents = []
     for wc in worker_configs:
         tools = _resolve_tools(wc, mcp_tools)
-        model = ChatAnthropic(model=wc.model)
+        model = ChatAnthropic(model=wc.model).with_retry(stop_after_attempt=3)
         worker = create_react_agent(model, tools, prompt=wc.system_prompt, name=wc.id)
         worker_agents.append(worker)
         logger.info("Created worker agent: %s (%d tools)", wc.id, len(tools))
 
     supervisor = create_supervisor(
-        model=ChatAnthropic(model=supervisor_config.model),
+        model=ChatAnthropic(model=supervisor_config.model).with_retry(stop_after_attempt=3),
         agents=worker_agents,
         prompt=supervisor_config.system_prompt,
         output_mode="full_history",
