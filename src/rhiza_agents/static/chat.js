@@ -38,70 +38,6 @@ function renderMarkdown(content) {
     }
 }
 
-// --- Code Execution Blocks ---
-
-function renderCodeExecutionBlocks(activity) {
-    // Pair up execute_python_code tool calls with their results
-    for (let i = 0; i < activity.length; i++) {
-        const item = activity[i];
-        if (item.type === 'tool_call' && item.name === 'execute_python_code') {
-            const code = item.args?.code || '';
-            // Find the matching tool_result
-            let output = '';
-            for (let j = i + 1; j < activity.length; j++) {
-                if (activity[j].type === 'tool_result' && activity[j].name === 'execute_python_code') {
-                    output = typeof activity[j].content === 'string' ? activity[j].content : JSON.stringify(activity[j].content, null, 2);
-                    break;
-                }
-            }
-            addCodeExecutionBlock(code, output);
-        }
-    }
-}
-
-function addCodeExecutionBlock(code, output) {
-    const block = document.createElement('div');
-    block.className = 'message assistant';
-
-    const exec = document.createElement('div');
-    exec.className = 'code-execution';
-
-    // Code section
-    const codeHeader = document.createElement('div');
-    codeHeader.className = 'code-execution-header';
-    codeHeader.textContent = 'Code';
-    exec.appendChild(codeHeader);
-
-    const codePre = document.createElement('pre');
-    codePre.className = 'code-execution-code';
-    const codeEl = document.createElement('code');
-    codeEl.className = 'hljs language-python';
-    try {
-        codeEl.innerHTML = hljs.highlight(code, { language: 'python' }).value;
-    } catch (e) {
-        codeEl.textContent = code;
-    }
-    codePre.appendChild(codeEl);
-    exec.appendChild(codePre);
-
-    // Output section
-    if (output) {
-        const outputHeader = document.createElement('div');
-        outputHeader.className = 'code-execution-header';
-        outputHeader.textContent = 'Output';
-        exec.appendChild(outputHeader);
-
-        const outputPre = document.createElement('pre');
-        outputPre.className = 'code-execution-output';
-        outputPre.textContent = output;
-        exec.appendChild(outputPre);
-    }
-
-    block.appendChild(exec);
-    messagesDiv.appendChild(block);
-    messagesDiv.scrollTop = messagesDiv.scrollHeight;
-}
-
 // --- Activity Panel ---
 
 function toggleActivityPanel() {
@@ -187,8 +123,6 @@ if (activityDataEl) {
         console.error('Failed to parse activity data:', e);
     }
 }
-// Note: Server-rendered code execution blocks are handled via the chat.html template.
-// The JS renderCodeExecutionBlocks() is only used for live/dynamic responses.
 
 // --- Messages ---
 
@@ -209,12 +143,131 @@ if (input) {
     });
 }
 
-// Handle form submission
+// --- SSE Streaming ---
+
+function parseSSEEvents(buffer) {
+    const parsed = [];
+    const lines = buffer.split('\n');
+    let remaining = '';
+    let currentEvent = null;
+
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+
+        if (line.startsWith('event: ')) {
+            currentEvent = { type: line.slice(7).trim(), data: '' };
+        } else if (line.startsWith('data: ') && currentEvent) {
+            currentEvent.data = line.slice(6);
+        } else if (line === '' && currentEvent) {
+            try {
+                currentEvent.data = JSON.parse(currentEvent.data);
+            } catch (e) { /* keep as string */ }
+            parsed.push(currentEvent);
+            currentEvent = null;
+        }
+    }
+
+    // Keep unparsed data in buffer
+    if (currentEvent) {
+        const dataStr = typeof currentEvent.data === 'string'
+            ? currentEvent.data
+            : JSON.stringify(currentEvent.data);
+        remaining = `event: ${currentEvent.type}\ndata: ${dataStr}\n`;
+    }
+
+    return { parsed, remaining };
+}
+
+let streamedContent = '';
+let activeAbortController = null;
+
+function addStreamingMessage() {
+    streamedContent = '';
+    const div = document.createElement('div');
+    div.className = 'message assistant streaming';
+    div.innerHTML = `
+        <div class="agent-badge-container"></div>
+        <div class="message-content"></div>
+    `;
+    messagesDiv.appendChild(div);
+    messagesDiv.scrollTop = messagesDiv.scrollHeight;
+    return div;
+}
+
+function appendToken(msgDiv, token) {
+    streamedContent += token;
+    const contentDiv = msgDiv.querySelector('.message-content');
+    contentDiv.innerHTML = renderMarkdown(streamedContent);
+    messagesDiv.scrollTop = messagesDiv.scrollHeight;
+}
+
+function updateAgentBadge(msgDiv, agentName) {
+    if (!agentName) return;
+    const container = msgDiv.querySelector('.agent-badge-container');
+    const escaped = document.createElement('span');
+    escaped.textContent = agentName;
+    container.innerHTML = `<span class="agent-badge">${escaped.innerHTML}</span>`;
+}
+
+function finalizeMessage(msgDiv) {
+    msgDiv.classList.remove('streaming');
+    streamedContent = '';
+}
+
+function setMessageError(msgDiv, error) {
+    msgDiv.classList.remove('streaming');
+    const contentDiv = msgDiv.querySelector('.message-content');
+    contentDiv.textContent = 'Error: ' + error;
+    streamedContent = '';
+}
+
+function handleStreamEvent(event, msgDiv) {
+    switch (event.type) {
+        case 'conversation_id':
+            if (!conversationIdInput.value) {
+                conversationIdInput.value = event.data.conversation_id;
+                history.pushState({}, '', `/c/${event.data.conversation_id}`);
+            }
+            break;
+
+        case 'agent_start':
+            updateAgentBadge(msgDiv, event.data.agent);
+            break;
+
+        case 'token':
+            appendToken(msgDiv, event.data.content);
+            break;
+
+        case 'tool_start':
+            renderActivityItem({type: 'tool_call', name: event.data.name, args: event.data.input});
+            break;
+
+        case 'tool_end':
+            renderActivityItem({type: 'tool_result', name: event.data.name, content: event.data.output});
+            break;
+
+        case 'error':
+            setMessageError(msgDiv, event.data.error);
+            break;
+
+        case 'done':
+            finalizeMessage(msgDiv);
+            break;
+    }
+}
+
+// Handle form submission with streaming
 if (form) form.addEventListener('submit', async (e) => {
     e.preventDefault();
 
     const message = input.value.trim();
     if (!message) return;
+
+    // Cancel any active stream
+    if (activeAbortController) {
+        activeAbortController.abort();
+    }
+    activeAbortController = new AbortController();
 
     input.disabled = true;
     sendBtn.disabled = true;
@@ -227,16 +280,17 @@ if (form) form.addEventListener('submit', async (e) => {
     input.value = '';
     input.style.height = 'auto';
 
-    const loadingMsg = addMessage('assistant', 'Thinking', true);
+    const assistantMsg = addStreamingMessage();
 
     try {
-        const response = await fetch('/api/chat', {
+        const response = await fetch('/api/chat/stream', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 message: message,
                 conversation_id: conversationIdInput.value || null
-            })
+            }),
+            signal: activeAbortController.signal,
         });
 
         if (!response.ok) {
@@ -244,28 +298,36 @@ if (form) form.addEventListener('submit', async (e) => {
             throw new Error(`Server error ${response.status}${errorText ? ': ' + errorText : ''}`);
         }
 
-        const data = await response.json();
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
 
-        // Update conversation ID for new conversations
-        if (!conversationIdInput.value) {
-            conversationIdInput.value = data.conversation_id;
-            history.pushState({}, '', `/c/${data.conversation_id}`);
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const events = parseSSEEvents(buffer);
+            buffer = events.remaining;
+
+            for (const event of events.parsed) {
+                handleStreamEvent(event, assistantMsg);
+            }
         }
 
-        loadingMsg.remove();
-
-        // Render code execution blocks inline before the response
-        if (data.activity && data.activity.length > 0) {
-            renderCodeExecutionBlocks(data.activity);
-            data.activity.forEach(item => renderActivityItem(item));
+        // Ensure finalized even if no done event
+        if (assistantMsg.classList.contains('streaming')) {
+            finalizeMessage(assistantMsg);
         }
-
-        addMessage('assistant', data.response, false, data.agent_name);
 
     } catch (error) {
-        loadingMsg.remove();
-        addMessage('assistant', 'Error: ' + error.message);
+        if (error.name === 'AbortError') {
+            finalizeMessage(assistantMsg);
+        } else {
+            setMessageError(assistantMsg, error.message);
+        }
     } finally {
+        activeAbortController = null;
         input.disabled = false;
         sendBtn.disabled = false;
         input.focus();

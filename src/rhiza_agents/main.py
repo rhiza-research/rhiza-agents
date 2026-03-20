@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -393,6 +393,100 @@ async def send_chat_message(request: Request, body: SendMessageRequest, user: di
         response=response_text,
         activity=activity,
         agent_name=agent_name,
+    )
+
+
+@app.post("/api/chat/stream")
+async def stream_chat_message(
+    request: Request,
+    body: SendMessageRequest,
+    user: dict = Depends(require_auth),
+):
+    """Send a message and stream the response via SSE."""
+    user_id = get_user_id(request)
+
+    if body.conversation_id:
+        conversation = await db.get_conversation(body.conversation_id, user_id)
+        if not conversation:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        conversation_id = body.conversation_id
+    else:
+        conversation_id = str(uuid.uuid4())
+        await db.create_conversation(conversation_id, user_id)
+
+    graph = await get_agent_graph(
+        mcp_tools,
+        checkpointer,
+        user_id=user_id,
+        db=db,
+        vectorstore_manager=vectorstore_manager,
+    )
+    effective = await _get_effective_configs(user_id)
+    agent_names, _ = _build_name_mappings(effective)
+
+    async def event_generator():
+        yield f"event: conversation_id\ndata: {json.dumps({'conversation_id': conversation_id})}\n\n"
+
+        current_agent = None
+
+        try:
+            async for event in graph.astream_events(
+                {"messages": [HumanMessage(content=body.message)]},
+                config={"configurable": {"thread_id": conversation_id}, "recursion_limit": 50},
+                version="v2",
+            ):
+                kind = event["event"]
+
+                if kind == "on_chat_model_stream":
+                    chunk = event["data"]["chunk"]
+                    if hasattr(chunk, "content") and isinstance(chunk.content, str) and chunk.content:
+                        node = event.get("metadata", {}).get("langgraph_node", "")
+                        display = agent_names.get(node, node)
+                        if node != current_agent:
+                            current_agent = node
+                            yield f"event: agent_start\ndata: {json.dumps({'agent': display})}\n\n"
+                        yield f"event: token\ndata: {json.dumps({'content': chunk.content})}\n\n"
+
+                elif kind == "on_tool_start":
+                    tool_name = event.get("name", "")
+                    if tool_name.startswith(("transfer_to_", "transfer_back_to_")):
+                        continue
+                    tool_input = event.get("data", {}).get("input", {})
+                    yield (f"event: tool_start\ndata: {json.dumps({'name': tool_name, 'input': tool_input})}\n\n")
+
+                elif kind == "on_tool_end":
+                    tool_name = event.get("name", "")
+                    if tool_name.startswith(("transfer_to_", "transfer_back_to_")):
+                        continue
+                    tool_output = event.get("data", {}).get("output", "")
+                    if hasattr(tool_output, "content"):
+                        tool_output = tool_output.content
+                    yield (
+                        f"event: tool_end\ndata: "
+                        f"{json.dumps({'name': tool_name, 'output': str(tool_output)[:1000]})}\n\n"
+                    )
+
+        except Exception as e:
+            logger.exception("Streaming error")
+            yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
+
+        # Update conversation metadata
+        await db.touch_conversation(conversation_id)
+        conv = await db.get_conversation(conversation_id, user_id)
+        if conv and not conv.get("title"):
+            title = body.message[:50] + ("..." if len(body.message) > 50 else "")
+            await db.update_conversation_title(conversation_id, user_id, title)
+
+        yield f"event: done\ndata: {json.dumps({})}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 

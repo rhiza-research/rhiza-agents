@@ -526,6 +526,22 @@ body {
     60%, 100% { content: "..."; }
 }
 
+/* Streaming indicator */
+.message.streaming .message-content::after {
+    content: "\25ca";
+    animation: blink 1s infinite;
+    color: #4a90d9;
+}
+
+@keyframes blink {
+    0%, 50% { opacity: 1; }
+    51%, 100% { opacity: 0; }
+}
+
+.agent-badge-container {
+    margin-bottom: 0.25rem;
+}
+
 /* Code Execution Blocks */
 .code-execution {
     margin-top: 0.75rem;
