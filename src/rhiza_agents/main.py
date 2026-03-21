@@ -476,6 +476,13 @@ async def stream_chat_message(
         conversation_id = str(uuid.uuid4())
         await db.create_conversation(conversation_id, user_id)
 
+    log_chat_events = await _is_chat_logging_enabled(user_id)
+
+    def _log_event(event: str, **data):
+        if log_chat_events:
+            chat_event_logger.info(event, extra={"conversation_id": conversation_id, "user_id": user_id, **data})
+
+    _log_event("graph_build", status="start")
     graph = await get_agent_graph(
         mcp_tools,
         checkpointer,
@@ -484,15 +491,36 @@ async def stream_chat_message(
         vectorstore_manager=vectorstore_manager,
     )
     effective = await _get_effective_configs(user_id)
-    agent_names, _ = _build_name_mappings(effective)
+    agent_names, tool_to_agent = _build_name_mappings(effective)
+    # Map the langgraph default node name "agent" to the supervisor's display name
+    supervisor_name = next((c.name for c in effective if c.type == "supervisor"), "Supervisor")
+    agent_names["agent"] = supervisor_name
+    _log_event("graph_build", status="ready", agents=", ".join(dict.fromkeys(agent_names.values())))
+
+    def _resolve_tool_agent(tool_name: str, fallback: str | None) -> str | None:
+        """Resolve agent display name from tool name via tool_to_agent mapping."""
+        agent_id = tool_to_agent.get(tool_name)
+        if agent_id:
+            return agent_names.get(agent_id, fallback)
+        return fallback
 
     async def event_generator():
         yield f"event: conversation_id\ndata: {json.dumps({'conversation_id': conversation_id})}\n\n"
 
         current_agent = None
+        current_agent_display = None
+        accumulated_text = []
         seen_tool_call_ids = set()
         seen_tool_result_ids = set()
         stream_input = {"messages": [HumanMessage(content=body.message)]}
+
+        def _flush_accumulated():
+            nonlocal accumulated_text
+            if accumulated_text:
+                _log_event("agent_message", agent=current_agent_display, content="".join(accumulated_text)[:2000])
+                accumulated_text = []
+
+        _log_event("user_message", content=body.message[:500])
 
         try:
             while True:
@@ -518,19 +546,33 @@ async def stream_chat_message(
                         if not text and not reasoning:
                             continue
 
-                        # Resolve agent display name from metadata or subgraph namespace
+                        # Resolve agent display name from subgraph namespace or metadata.
+                        # ns may be ["code_runner", "model"] — find the first
+                        # element that maps to a known agent name.
+                        # Internal node names like "model" or "tools" are ignored —
+                        # if we can't resolve a known agent, keep the current one.
                         node = metadata.get("lc_agent_name") or metadata.get("langgraph_node", "")
                         ns = chunk.get("ns", [])
-                        agent_id = ns[-1] if ns else node
-                        display = agent_names.get(agent_id) or agent_names.get(node, node)
-                        if agent_id != current_agent:
+                        agent_id = None
+                        for ns_part in ns:
+                            if ns_part in agent_names:
+                                agent_id = ns_part
+                                break
+                        if not agent_id:
+                            agent_id = node if node in agent_names else current_agent
+                        display = agent_names.get(agent_id, current_agent_display)
+                        if agent_id and agent_id != current_agent:
+                            _flush_accumulated()
                             current_agent = agent_id
+                            current_agent_display = display
                             yield f"event: agent_start\ndata: {json.dumps({'agent': display})}\n\n"
+                            _log_event("agent_start", agent=display)
 
                         if reasoning:
                             yield f"event: thinking\ndata: {json.dumps({'content': reasoning})}\n\n"
                         if text:
                             yield f"event: token\ndata: {json.dumps({'content': text})}\n\n"
+                            accumulated_text.append(text)
 
                     elif chunk_type == "updates":
                         update_data = chunk["data"]
@@ -550,11 +592,22 @@ async def stream_chat_message(
                                 for intr in update_data["__interrupt__"]:
                                     intr_data = getattr(intr, "value", intr)
                                     yield (f"event: interrupt\ndata: {json.dumps(intr_data, default=str)}\n\n")
+                                    _log_event("interrupt", data=str(intr_data)[:500])
                                 continue
 
                         # Extract tool call/result info from node updates.
                         # Deduplicate by tool call ID since subgraphs=True
                         # surfaces the same event from both subgraph and parent.
+                        # Resolve the agent from the subgraph namespace.
+                        # ns may be ["code_runner"] or ["code_runner", "model"] —
+                        # find the first element that maps to a known agent name.
+                        ns = chunk.get("ns", [])
+                        update_agent_display = current_agent_display
+                        for ns_part in ns:
+                            if ns_part in agent_names:
+                                update_agent_display = agent_names[ns_part]
+                                break
+
                         for _node_name, node_data in update_data.items():
                             if not isinstance(node_data, dict):
                                 continue
@@ -574,6 +627,13 @@ async def stream_chat_message(
                                             default=str,
                                         )
                                         yield f"event: tool_start\ndata: {data}\n\n"
+                                        tool_agent = _resolve_tool_agent(tc["name"], update_agent_display)
+                                        _log_event(
+                                            "tool_start",
+                                            agent=tool_agent,
+                                            tool=tc["name"],
+                                            tool_args=str(tc["args"])[:500],
+                                        )
                                         # Emit file data immediately so the UI can
                                         # show the file before the checkpoint saves
                                         if tc["name"] == "write_file" and isinstance(tc.get("args"), dict):
@@ -601,9 +661,16 @@ async def stream_chat_message(
                                             tool_content = json.loads(tool_content)
                                         except (json.JSONDecodeError, TypeError):
                                             pass
+                                    tool_output_str = str(tool_content)[:1000]
                                     yield (
                                         f"event: tool_end\ndata: "
-                                        f"{json.dumps({'name': msg.name, 'output': str(tool_content)[:1000]})}\n\n"
+                                        f"{json.dumps({'name': msg.name, 'output': tool_output_str})}\n\n"
+                                    )
+                                    _log_event(
+                                        "tool_end",
+                                        agent=_resolve_tool_agent(msg.name, update_agent_display),
+                                        tool=msg.name,
+                                        output=tool_output_str,
                                     )
                                     # Emit chart event for plotly renders
                                     if msg.name in ("tool_render_plotly", "tool_generate_comparison_chart"):
@@ -628,6 +695,9 @@ async def stream_chat_message(
         except Exception as e:
             logger.exception("Streaming error")
             yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
+            _log_event("error", error=str(e))
+
+        _flush_accumulated()
 
         # Update conversation metadata
         await db.touch_conversation(conversation_id)
@@ -638,6 +708,7 @@ async def stream_chat_message(
 
         yield f"event: files_changed\ndata: {json.dumps({})}\n\n"
         yield f"event: done\ndata: {json.dumps({})}\n\n"
+        _log_event("done")
 
     return StreamingResponse(
         event_generator(),
@@ -670,17 +741,61 @@ async def resume_chat(
         vectorstore_manager=vectorstore_manager,
     )
     effective = await _get_effective_configs(user_id)
-    agent_names, _ = _build_name_mappings(effective)
+    agent_names, tool_to_agent = _build_name_mappings(effective)
+    supervisor_name = next((c.name for c in effective if c.type == "supervisor"), "Supervisor")
+    agent_names["agent"] = supervisor_name
+
+    def _resolve_tool_agent(tool_name: str, fallback: str | None) -> str | None:
+        agent_id = tool_to_agent.get(tool_name)
+        if agent_id:
+            return agent_names.get(agent_id, fallback)
+        return fallback
 
     if body.decision == "approve":
         decision = {"type": "approve"}
     else:
         decision = {"type": "reject", "message": body.message or "Rejected by user"}
 
+    log_chat_events = await _is_chat_logging_enabled(user_id)
+    conversation_id = body.conversation_id
+
+    def _log_event(event: str, **data):
+        if log_chat_events:
+            chat_event_logger.info(event, extra={"conversation_id": conversation_id, "user_id": user_id, **data})
+
+    # Seed initial agent from the interrupted tool so resume logs
+    # attribute the first message correctly (before any agent_start fires).
+    state = await graph.aget_state(config={"configurable": {"thread_id": conversation_id}})
+    initial_agent = None
+    initial_agent_display = None
+    if state and state.next:
+        # state.tasks contains the interrupted tool info
+        for task in getattr(state, "tasks", []):
+            for intr in getattr(task, "interrupts", []):
+                intr_value = getattr(intr, "value", {})
+                for ar in intr_value.get("action_requests", []):
+                    tool_name = ar.get("name")
+                    if tool_name:
+                        agent_id = tool_to_agent.get(tool_name)
+                        if agent_id and agent_id in agent_names:
+                            initial_agent = agent_id
+                            initial_agent_display = agent_names[agent_id]
+                            break
+
     async def event_generator():
-        current_agent = None
+        current_agent = initial_agent
+        current_agent_display = initial_agent_display
+        accumulated_text = []
         seen_tool_call_ids = set()
         seen_tool_result_ids = set()
+
+        def _flush_accumulated():
+            nonlocal accumulated_text
+            if accumulated_text:
+                _log_event("agent_message", agent=current_agent_display, content="".join(accumulated_text)[:2000])
+                accumulated_text = []
+
+        _log_event("resume", decision=body.decision)
 
         try:
             async for chunk in graph.astream(
@@ -702,18 +817,33 @@ async def resume_chat(
                     if not text and not reasoning:
                         continue
 
+                    # Resolve agent display name from subgraph namespace or metadata.
+                    # ns may be ["code_runner", "model"] — find the first
+                    # element that maps to a known agent name.
+                    # Internal node names like "model" or "tools" are ignored —
+                    # if we can't resolve a known agent, keep the current one.
                     node = metadata.get("lc_agent_name") or metadata.get("langgraph_node", "")
                     ns = chunk.get("ns", [])
-                    agent_id = ns[-1] if ns else node
-                    display = agent_names.get(agent_id) or agent_names.get(node, node)
-                    if agent_id != current_agent:
+                    agent_id = None
+                    for ns_part in ns:
+                        if ns_part in agent_names:
+                            agent_id = ns_part
+                            break
+                    if not agent_id:
+                        agent_id = node if node in agent_names else current_agent
+                    display = agent_names.get(agent_id, current_agent_display)
+                    if agent_id and agent_id != current_agent:
+                        _flush_accumulated()
                         current_agent = agent_id
+                        current_agent_display = display
                         yield f"event: agent_start\ndata: {json.dumps({'agent': display})}\n\n"
+                        _log_event("agent_start", agent=display)
 
                     if reasoning:
                         yield f"event: thinking\ndata: {json.dumps({'content': reasoning})}\n\n"
                     if text:
                         yield f"event: token\ndata: {json.dumps({'content': text})}\n\n"
+                        accumulated_text.append(text)
 
                 elif chunk_type == "updates":
                     update_data = chunk["data"]
@@ -725,11 +855,20 @@ async def resume_chat(
                         for intr in update_data["__interrupt__"]:
                             intr_data = getattr(intr, "value", intr)
                             yield f"event: interrupt\ndata: {json.dumps(intr_data, default=str)}\n\n"
+                            _log_event("interrupt", data=str(intr_data)[:500])
                         continue
 
                     # Extract tool call/result info from node updates.
                     # Deduplicate by tool call ID since subgraphs=True
                     # surfaces the same event from both subgraph and parent.
+                    # Resolve the agent from the subgraph namespace.
+                    ns = chunk.get("ns", [])
+                    update_agent_display = current_agent_display
+                    for ns_part in ns:
+                        if ns_part in agent_names:
+                            update_agent_display = agent_names[ns_part]
+                            break
+
                     for _node_name, node_data in update_data.items():
                         if not isinstance(node_data, dict):
                             continue
@@ -748,6 +887,12 @@ async def resume_chat(
                                         default=str,
                                     )
                                     yield f"event: tool_start\ndata: {data}\n\n"
+                                    _log_event(
+                                        "tool_start",
+                                        agent=_resolve_tool_agent(tc["name"], update_agent_display),
+                                        tool=tc["name"],
+                                        tool_args=str(tc["args"])[:500],
+                                    )
                                     # Emit file data immediately so the UI can
                                     # show the file before the checkpoint saves
                                     if tc["name"] == "write_file" and isinstance(tc.get("args"), dict):
@@ -774,9 +919,16 @@ async def resume_chat(
                                         tool_content = json.loads(tool_content)
                                     except (json.JSONDecodeError, TypeError):
                                         pass
+                                tool_output_str = str(tool_content)[:1000]
                                 yield (
                                     f"event: tool_end\ndata: "
-                                    f"{json.dumps({'name': msg.name, 'output': str(tool_content)[:1000]})}\n\n"
+                                    f"{json.dumps({'name': msg.name, 'output': tool_output_str})}\n\n"
+                                )
+                                _log_event(
+                                    "tool_end",
+                                    agent=_resolve_tool_agent(msg.name, update_agent_display),
+                                    tool=msg.name,
+                                    output=tool_output_str,
                                 )
                                 # Emit chart event for plotly renders
                                 if msg.name in ("tool_render_plotly", "tool_generate_comparison_chart"):
@@ -794,9 +946,13 @@ async def resume_chat(
         except Exception as e:
             logger.exception("Resume streaming error")
             yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
+            _log_event("error", error=str(e))
+
+        _flush_accumulated()
 
         yield f"event: files_changed\ndata: {json.dumps({})}\n\n"
         yield f"event: done\ndata: {json.dumps({})}\n\n"
+        _log_event("done")
 
     return StreamingResponse(
         event_generator(),
