@@ -389,6 +389,7 @@ function addStreamingMessage() {
 }
 
 function appendToken(msgDiv, token) {
+    if (!token) return;
     streamedContent += token;
     const contentDiv = msgDiv.querySelector('.message-content');
     contentDiv.innerHTML = renderMarkdown(streamedContent);
@@ -432,9 +433,21 @@ function handleStreamEvent(event, msgDiv) {
             appendToken(msgDiv, event.data.content);
             break;
 
-        case 'thinking':
+        case 'thinking': {
+            // Append to the latest thinking item if one exists,
+            // otherwise create a new one
+            const lastItem = activityContent.lastElementChild;
+            if (lastItem && lastItem.classList.contains('thinking')) {
+                const contentEl = lastItem.querySelector('.item-content');
+                if (contentEl) {
+                    contentEl.textContent += event.data.content;
+                    activityContent.scrollTop = activityContent.scrollHeight;
+                    break;
+                }
+            }
             renderActivityItem({type: 'thinking', content: event.data.content});
             break;
+        }
 
         case 'tool_start':
             renderActivityItem({type: 'tool_call', name: event.data.name, args: event.data.input});

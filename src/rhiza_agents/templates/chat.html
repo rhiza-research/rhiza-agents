@@ -101,6 +101,6 @@
 
     <script id="activity-data" type="application/json">{{ activity_json | safe }}</script>
     <script id="has-files-data" type="application/json">{{ has_files | tojson }}</script>
-    <script type="module" src="/static/chat.js"></script>
+    <script type="module" src="/static/chat.js?v={{ static_version }}"></script>
 </body>
 </html>

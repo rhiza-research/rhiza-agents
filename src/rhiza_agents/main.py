@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -41,6 +42,7 @@ mcp_tools: list = []
 vectorstore_manager = None
 _agent_names: dict[str, str] = {}  # agent_id -> display name
 _tool_to_agent: dict[str, str] = {}  # tool_name -> agent_id
+_static_version = str(int(time.time()))  # Cache-busting for static assets
 
 
 @asynccontextmanager
@@ -119,24 +121,41 @@ def _extract_content_blocks(content) -> tuple[str, str]:
     Returns (text, reasoning) where each is a concatenation of the
     respective content blocks. If content is a plain string, it's
     returned as text with empty reasoning.
+
+    Handles both LangChain-normalized types ("reasoning") and
+    Anthropic raw types ("thinking").
     """
     if isinstance(content, list):
         text_parts = []
         reasoning_parts = []
         for block in content:
             if isinstance(block, dict):
-                if block.get("type") == "text":
+                block_type = block.get("type", "")
+                if block_type == "text":
                     text_parts.append(block.get("text", ""))
-                elif block.get("type") == "reasoning":
-                    reasoning_parts.append(block.get("reasoning", ""))
+                elif block_type in ("reasoning", "thinking"):
+                    reasoning_parts.append(block.get("reasoning") or block.get("thinking") or "")
             elif hasattr(block, "type"):
-                if block.type == "text":
+                block_type = block.type
+                if block_type == "text":
                     text_parts.append(getattr(block, "text", ""))
-                elif block.type == "reasoning":
-                    text_val = getattr(block, "reasoning", "")
-                    reasoning_parts.append(text_val)
-        return "\n".join(text_parts), "\n".join(reasoning_parts)
+                elif block_type in ("reasoning", "thinking"):
+                    reasoning_parts.append(getattr(block, "reasoning", "") or getattr(block, "thinking", "") or "")
+        return "\n".join(filter(None, text_parts)), "\n".join(filter(None, reasoning_parts))
     return (content or "").strip(), ""
+
+
+def _extract_content_blocks_from_token(token) -> tuple[str, str]:
+    """Extract text and reasoning from a streaming token.
+
+    Prefers content_blocks (LangChain-normalized) over raw content.
+    """
+    # Use content_blocks if available (normalized by LangChain)
+    if hasattr(token, "content_blocks") and token.content_blocks:
+        return _extract_content_blocks(token.content_blocks)
+    if hasattr(token, "content"):
+        return _extract_content_blocks(token.content)
+    return "", ""
 
 
 _HANDOFF_BACK_KEY = "__is_handoff_back"
@@ -212,10 +231,15 @@ def _process_messages(raw_messages, agent_names=None, tool_to_agent_map=None):
             if msg.response_metadata.get(_HANDOFF_BACK_KEY, False):
                 continue
             content = msg.content
-            try:
-                content = json.loads(content)
-            except (json.JSONDecodeError, TypeError):
-                pass
+            # Extract text from content block lists
+            if isinstance(content, list):
+                text, _ = _extract_content_blocks(content)
+                content = text or content
+            if isinstance(content, str):
+                try:
+                    content = json.loads(content)
+                except (json.JSONDecodeError, TypeError):
+                    pass
             messages.append({"type": "tool_result", "name": msg.name, "content": content})
 
     return messages
@@ -279,6 +303,7 @@ async def index(request: Request):
             "messages": [],
             "activity_json": "[]",
             "has_files": False,
+            "static_version": _static_version,
         },
     )
 
@@ -320,6 +345,7 @@ async def conversation_page(request: Request, conversation_id: str, user: dict =
             "messages": chat_messages,
             "activity_json": json.dumps(activity, default=str),
             "has_files": has_files,
+            "static_version": _static_version,
         },
     )
 
@@ -387,15 +413,20 @@ async def stream_chat_message(
 
                     if chunk_type == "messages":
                         token, metadata = chunk["data"]
-                        if not hasattr(token, "content"):
+                        # Only process AI model output, not tool results
+                        if isinstance(token, ToolMessage):
+                            continue
+                        text, reasoning = _extract_content_blocks_from_token(token)
+                        if not text and not reasoning:
                             continue
 
-                        text, reasoning = _extract_content_blocks(token.content)
-
+                        # Resolve agent display name from metadata or subgraph namespace
                         node = metadata.get("lc_agent_name") or metadata.get("langgraph_node", "")
-                        display = agent_names.get(node, node)
-                        if node != current_agent:
-                            current_agent = node
+                        ns = chunk.get("ns", [])
+                        agent_id = ns[-1] if ns else node
+                        display = agent_names.get(agent_id) or agent_names.get(node, node)
+                        if agent_id != current_agent:
+                            current_agent = agent_id
                             yield f"event: agent_start\ndata: {json.dumps({'agent': display})}\n\n"
 
                         if reasoning:
@@ -415,7 +446,8 @@ async def stream_chat_message(
                                 break
                             else:
                                 for intr in update_data["__interrupt__"]:
-                                    yield (f"event: interrupt\ndata: {json.dumps(intr, default=str)}\n\n")
+                                    intr_data = getattr(intr, "value", intr)
+                                    yield (f"event: interrupt\ndata: {json.dumps(intr_data, default=str)}\n\n")
                                 continue
 
                         # Extract tool call/result info from node updates
@@ -446,6 +478,10 @@ async def stream_chat_message(
                                         f"event: tool_end\ndata: "
                                         f"{json.dumps({'name': msg.name, 'output': str(tool_content)[:1000]})}\n\n"
                                     )
+                                    # Fallback files_changed for tools in subgraphs
+                                    # where stream_writer events may not propagate
+                                    if msg.name in ("write_file", "run_file"):
+                                        yield f"event: files_changed\ndata: {json.dumps({})}\n\n"
 
                     elif chunk_type == "custom":
                         custom_data = chunk["data"]
@@ -522,15 +558,16 @@ async def resume_chat(
 
                 if chunk_type == "messages":
                     token, metadata = chunk["data"]
-                    if not hasattr(token, "content"):
+                    text, reasoning = _extract_content_blocks_from_token(token)
+                    if not text and not reasoning:
                         continue
 
-                    text, reasoning = _extract_content_blocks(token.content)
-
                     node = metadata.get("lc_agent_name") or metadata.get("langgraph_node", "")
-                    display = agent_names.get(node, node)
-                    if node != current_agent:
-                        current_agent = node
+                    ns = chunk.get("ns", [])
+                    agent_id = ns[-1] if ns else node
+                    display = agent_names.get(agent_id) or agent_names.get(node, node)
+                    if agent_id != current_agent:
+                        current_agent = agent_id
                         yield f"event: agent_start\ndata: {json.dumps({'agent': display})}\n\n"
 
                     if reasoning:
@@ -542,8 +579,9 @@ async def resume_chat(
                     update_data = chunk["data"]
 
                     if "__interrupt__" in update_data:
-                        for interrupt in update_data["__interrupt__"]:
-                            yield f"event: interrupt\ndata: {json.dumps(interrupt, default=str)}\n\n"
+                        for intr in update_data["__interrupt__"]:
+                            intr_data = getattr(intr, "value", intr)
+                            yield f"event: interrupt\ndata: {json.dumps(intr_data, default=str)}\n\n"
                         continue
 
                     for _node_name, node_data in update_data.items():
@@ -571,6 +609,8 @@ async def resume_chat(
                                     f"event: tool_end\ndata: "
                                     f"{json.dumps({'name': msg.name, 'output': str(tool_content)[:1000]})}\n\n"
                                 )
+                                if msg.name in ("write_file", "run_file"):
+                                    yield f"event: files_changed\ndata: {json.dumps({})}\n\n"
 
                 elif chunk_type == "custom":
                     custom_data = chunk["data"]
