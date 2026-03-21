@@ -115,6 +115,31 @@ templates = Jinja2Templates(directory=BASE_DIR / "templates")
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 
 
+def _extract_chart_url(content) -> str | None:
+    """Try to extract html_url from tool result content in any format.
+
+    MCP tool results may have JSON followed by a description on a new line,
+    so we try parsing just the first line if full parse fails.
+    """
+    if isinstance(content, dict):
+        return content.get("html_url")
+    if isinstance(content, str):
+        # Try full string first, then first line (MCP appends description)
+        for text in [content, content.split("\n")[0]]:
+            try:
+                parsed = json.loads(text)
+                if isinstance(parsed, dict) and "html_url" in parsed:
+                    return parsed["html_url"]
+            except (json.JSONDecodeError, TypeError):
+                continue
+    if isinstance(content, list):
+        # Content block list — extract text, then parse as JSON
+        text, _ = _extract_content_blocks(content)
+        if text:
+            return _extract_chart_url(text)
+    return None
+
+
 def _extract_content_blocks(content) -> tuple[str, str]:
     """Extract text and reasoning from AIMessage content.
 
@@ -241,6 +266,11 @@ def _process_messages(raw_messages, agent_names=None, tool_to_agent_map=None):
                 except (json.JSONDecodeError, TypeError):
                     pass
             messages.append({"type": "tool_result", "name": msg.name, "content": content})
+            # Extract chart URL from plotly tool results
+            if msg.name in ("tool_render_plotly", "tool_generate_comparison_chart"):
+                html_url = _extract_chart_url(content)
+                if html_url:
+                    messages.append({"type": "chart", "url": html_url})
 
     return messages
 
@@ -314,24 +344,30 @@ async def conversation_page(request: Request, conversation_id: str, user: dict =
     user_id = get_user_id(request)
     conversation = await db.get_conversation(conversation_id, user_id)
     if not conversation:
-        raise HTTPException(status_code=404, detail="Conversation not found")
+        # Allow read-only access to other users' conversations
+        conversation = await db.get_conversation_by_id(conversation_id)
+        if not conversation:
+            raise HTTPException(status_code=404, detail="Conversation not found")
 
     conversations = await db.list_conversations(user_id)
+
+    # Use the conversation owner's configs for agent name resolution
+    owner_id = conversation.get("user_id", user_id)
 
     # Load messages from LangGraph checkpointer
     graph = await get_agent_graph(
         mcp_tools,
         checkpointer,
-        user_id=user_id,
+        user_id=owner_id,
         db=db,
         vectorstore_manager=vectorstore_manager,
     )
-    effective = await _get_effective_configs(user_id)
+    effective = await _get_effective_configs(owner_id)
     agent_names, tool_to_agent_map = _build_name_mappings(effective)
     state = await graph.aget_state({"configurable": {"thread_id": conversation_id}})
     raw_messages = state.values.get("messages", [])
     all_messages = _process_messages(raw_messages, agent_names, tool_to_agent_map)
-    chat_messages = [m for m in all_messages if m["type"] in ("human", "ai")]
+    chat_messages = [m for m in all_messages if m["type"] in ("human", "ai", "chart")]
     activity = [m for m in all_messages if m["type"] in ("thinking", "tool_call", "tool_result")]
     has_files = bool(state.values.get("files"))
 
@@ -397,6 +433,8 @@ async def stream_chat_message(
         yield f"event: conversation_id\ndata: {json.dumps({'conversation_id': conversation_id})}\n\n"
 
         current_agent = None
+        seen_tool_call_ids = set()
+        seen_tool_result_ids = set()
         stream_input = {"messages": [HumanMessage(content=body.message)]}
 
         try:
@@ -415,6 +453,9 @@ async def stream_chat_message(
                         token, metadata = chunk["data"]
                         # Only process AI model output, not tool results
                         if isinstance(token, ToolMessage):
+                            continue
+                        node_name = metadata.get("langgraph_node", "")
+                        if node_name == "tools":
                             continue
                         text, reasoning = _extract_content_blocks_from_token(token)
                         if not text and not reasoning:
@@ -437,8 +478,12 @@ async def stream_chat_message(
                     elif chunk_type == "updates":
                         update_data = chunk["data"]
 
-                        # HITL interrupts appear as __interrupt__ in updates
+                        # HITL interrupts appear as __interrupt__ in updates.
+                        # Only handle top-level (empty ns) to avoid duplicates
+                        # from subgraphs.
                         if "__interrupt__" in update_data:
+                            if chunk.get("ns"):
+                                continue
                             if body.execution_mode == "auto":
                                 # Auto-approve: resume immediately without user interaction
                                 stream_input = Command(resume={"decisions": [{"type": "approve"}]})
@@ -450,7 +495,9 @@ async def stream_chat_message(
                                     yield (f"event: interrupt\ndata: {json.dumps(intr_data, default=str)}\n\n")
                                 continue
 
-                        # Extract tool call/result info from node updates
+                        # Extract tool call/result info from node updates.
+                        # Deduplicate by tool call ID since subgraphs=True
+                        # surfaces the same event from both subgraph and parent.
                         for _node_name, node_data in update_data.items():
                             if not isinstance(node_data, dict):
                                 continue
@@ -460,24 +507,52 @@ async def stream_chat_message(
                                     for tc in msg.tool_calls:
                                         if tc["name"].startswith(("transfer_to_", "transfer_back_to_")):
                                             continue
+                                        tc_id = tc.get("id")
+                                        if tc_id:
+                                            if tc_id in seen_tool_call_ids:
+                                                continue
+                                            seen_tool_call_ids.add(tc_id)
                                         data = json.dumps(
                                             {"name": tc["name"], "args": tc["args"]},
                                             default=str,
                                         )
                                         yield f"event: tool_start\ndata: {data}\n\n"
+                                        # Emit file data immediately so the UI can
+                                        # show the file before the checkpoint saves
+                                        if tc["name"] == "write_file" and isinstance(tc.get("args"), dict):
+                                            file_data = {
+                                                "path": tc["args"].get("path", ""),
+                                                "content": tc["args"].get("content", ""),
+                                            }
+                                            yield f"event: file_written\ndata: {json.dumps(file_data)}\n\n"
                                 # Tool results from ToolMessages
                                 if isinstance(msg, ToolMessage):
                                     if msg.name and msg.name.startswith(("transfer_to_", "transfer_back_to_")):
                                         continue
+                                    result_id = getattr(msg, "tool_call_id", None)
+                                    if result_id:
+                                        if result_id in seen_tool_result_ids:
+                                            continue
+                                        seen_tool_result_ids.add(result_id)
                                     tool_content = msg.content
-                                    try:
-                                        tool_content = json.loads(tool_content)
-                                    except (json.JSONDecodeError, TypeError):
-                                        pass
+                                    # Extract text from content block lists
+                                    if isinstance(tool_content, list):
+                                        text, _ = _extract_content_blocks(tool_content)
+                                        tool_content = text or tool_content
+                                    if isinstance(tool_content, str):
+                                        try:
+                                            tool_content = json.loads(tool_content)
+                                        except (json.JSONDecodeError, TypeError):
+                                            pass
                                     yield (
                                         f"event: tool_end\ndata: "
                                         f"{json.dumps({'name': msg.name, 'output': str(tool_content)[:1000]})}\n\n"
                                     )
+                                    # Emit chart event for plotly renders
+                                    if msg.name in ("tool_render_plotly", "tool_generate_comparison_chart"):
+                                        html_url = _extract_chart_url(msg.content)
+                                        if html_url:
+                                            yield f"event: chart\ndata: {json.dumps({'url': html_url})}\n\n"
                                     # Fallback files_changed for tools in subgraphs
                                     # where stream_writer events may not propagate
                                     if msg.name in ("write_file", "run_file"):
@@ -545,6 +620,8 @@ async def resume_chat(
 
     async def event_generator():
         current_agent = None
+        seen_tool_call_ids = set()
+        seen_tool_result_ids = set()
 
         try:
             async for chunk in graph.astream(
@@ -558,6 +635,10 @@ async def resume_chat(
 
                 if chunk_type == "messages":
                     token, metadata = chunk["data"]
+                    if isinstance(token, ToolMessage):
+                        continue
+                    if metadata.get("langgraph_node", "") == "tools":
+                        continue
                     text, reasoning = _extract_content_blocks_from_token(token)
                     if not text and not reasoning:
                         continue
@@ -578,12 +659,18 @@ async def resume_chat(
                 elif chunk_type == "updates":
                     update_data = chunk["data"]
 
+                    # Interrupts: only from top-level to avoid duplicates
                     if "__interrupt__" in update_data:
+                        if chunk.get("ns"):
+                            continue
                         for intr in update_data["__interrupt__"]:
                             intr_data = getattr(intr, "value", intr)
                             yield f"event: interrupt\ndata: {json.dumps(intr_data, default=str)}\n\n"
                         continue
 
+                    # Extract tool call/result info from node updates.
+                    # Deduplicate by tool call ID since subgraphs=True
+                    # surfaces the same event from both subgraph and parent.
                     for _node_name, node_data in update_data.items():
                         if not isinstance(node_data, dict):
                             continue
@@ -592,23 +679,51 @@ async def resume_chat(
                                 for tc in msg.tool_calls:
                                     if tc["name"].startswith(("transfer_to_", "transfer_back_to_")):
                                         continue
+                                    tc_id = tc.get("id")
+                                    if tc_id:
+                                        if tc_id in seen_tool_call_ids:
+                                            continue
+                                        seen_tool_call_ids.add(tc_id)
                                     data = json.dumps(
                                         {"name": tc["name"], "args": tc["args"]},
                                         default=str,
                                     )
                                     yield f"event: tool_start\ndata: {data}\n\n"
+                                    # Emit file data immediately so the UI can
+                                    # show the file before the checkpoint saves
+                                    if tc["name"] == "write_file" and isinstance(tc.get("args"), dict):
+                                        file_data = {
+                                            "path": tc["args"].get("path", ""),
+                                            "content": tc["args"].get("content", ""),
+                                        }
+                                        yield f"event: file_written\ndata: {json.dumps(file_data)}\n\n"
                             if isinstance(msg, ToolMessage):
                                 if msg.name and msg.name.startswith(("transfer_to_", "transfer_back_to_")):
                                     continue
+                                result_id = getattr(msg, "tool_call_id", None)
+                                if result_id:
+                                    if result_id in seen_tool_result_ids:
+                                        continue
+                                    seen_tool_result_ids.add(result_id)
                                 tool_content = msg.content
-                                try:
-                                    tool_content = json.loads(tool_content)
-                                except (json.JSONDecodeError, TypeError):
-                                    pass
+                                # Extract text from content block lists
+                                if isinstance(tool_content, list):
+                                    text, _ = _extract_content_blocks(tool_content)
+                                    tool_content = text or tool_content
+                                if isinstance(tool_content, str):
+                                    try:
+                                        tool_content = json.loads(tool_content)
+                                    except (json.JSONDecodeError, TypeError):
+                                        pass
                                 yield (
                                     f"event: tool_end\ndata: "
                                     f"{json.dumps({'name': msg.name, 'output': str(tool_content)[:1000]})}\n\n"
                                 )
+                                # Emit chart event for plotly renders
+                                if msg.name in ("tool_render_plotly", "tool_generate_comparison_chart"):
+                                    html_url = _extract_chart_url(msg.content)
+                                    if html_url:
+                                        yield f"event: chart\ndata: {json.dumps({'url': html_url})}\n\n"
                                 if msg.name in ("write_file", "run_file"):
                                     yield f"event: files_changed\ndata: {json.dumps({})}\n\n"
 
@@ -771,20 +886,29 @@ async def upload_documents(
 
 @app.get("/api/conversations/{conversation_id}/messages")
 async def get_conversation_messages(request: Request, conversation_id: str, user: dict = Depends(require_auth)):
-    """Get full ordered message history for a conversation, for debugging and analysis."""
+    """Get full ordered message history for a conversation, for debugging and analysis.
+
+    Supports read-only access to other users' conversations — the conversation
+    owner's configs are used for agent name resolution.
+    """
     user_id = get_user_id(request)
     conversation = await db.get_conversation(conversation_id, user_id)
     if not conversation:
-        raise HTTPException(status_code=404, detail="Conversation not found")
+        # Allow read-only access to any conversation
+        conversation = await db.get_conversation_by_id(conversation_id)
+        if not conversation:
+            raise HTTPException(status_code=404, detail="Conversation not found")
 
+    # Use the conversation owner's configs for agent name resolution
+    owner_id = conversation.get("user_id", user_id)
     graph = await get_agent_graph(
         mcp_tools,
         checkpointer,
-        user_id=user_id,
+        user_id=owner_id,
         db=db,
         vectorstore_manager=vectorstore_manager,
     )
-    effective = await _get_effective_configs(user_id)
+    effective = await _get_effective_configs(owner_id)
     agent_names, tool_to_agent_map = _build_name_mappings(effective)
     state = await graph.aget_state({"configurable": {"thread_id": conversation_id}})
     raw_messages = state.values.get("messages", [])

@@ -206,6 +206,95 @@ async function loadFiles() {
     }
 }
 
+// Cache of files received via streaming (before checkpoint saves)
+const streamedFiles = {};
+
+function addFileToList(path, content) {
+    if (!path) return;
+    // Normalize path
+    if (!path.startsWith('/')) path = '/' + path;
+    // Store content for immediate viewing
+    streamedFiles[path] = content;
+
+    filesToggle.classList.add('has-files');
+    // Auto-open the files panel so user sees the file immediately
+    if (filesPanel.classList.contains('hidden')) {
+        filesPanel.classList.remove('hidden');
+        filesToggle.classList.add('active');
+    }
+
+    // Remove "No files yet" placeholder
+    const empty = filesList.querySelector('.files-empty');
+    if (empty) empty.remove();
+
+    // Check if file already in list and update it
+    const existingItems = filesList.querySelectorAll('.file-item');
+    for (const el of existingItems) {
+        if (el.dataset.path === path) {
+            const metaEl = el.querySelector('.file-item-meta');
+            if (metaEl) metaEl.textContent = formatFileSize(new Blob([content]).size);
+            return;
+        }
+    }
+
+    // Add new file entry
+    const item = document.createElement('div');
+    item.className = 'file-item';
+    item.dataset.path = path;
+    item.addEventListener('click', () => openFileFromCache(path));
+
+    const pathSpan = document.createElement('span');
+    pathSpan.className = 'file-item-path';
+    pathSpan.textContent = path;
+    item.appendChild(pathSpan);
+
+    const meta = document.createElement('span');
+    meta.className = 'file-item-meta';
+    meta.textContent = formatFileSize(new Blob([content]).size);
+    item.appendChild(meta);
+
+    filesList.appendChild(item);
+}
+
+function openFileFromCache(path) {
+    const content = streamedFiles[path];
+    if (content === undefined) {
+        // Fall back to API
+        openFile(path);
+        return;
+    }
+    currentViewedFilePath = path;
+    currentViewedFileContent = content;
+    fileViewerPath.textContent = path;
+
+    const ext = path.split('.').pop().toLowerCase();
+    const langMap = {
+        'py': 'python', 'js': 'javascript', 'ts': 'typescript',
+        'json': 'json', 'csv': 'plaintext', 'md': 'markdown',
+        'html': 'html', 'css': 'css', 'sql': 'sql',
+        'sh': 'bash', 'bash': 'bash', 'yaml': 'yaml', 'yml': 'yaml',
+        'txt': 'plaintext', 'xml': 'xml', 'toml': 'toml',
+    };
+    const lang = langMap[ext] || 'plaintext';
+    if (hljs.getLanguage(lang)) {
+        fileViewerCode.innerHTML = hljs.highlight(content, { language: lang }).value;
+    } else {
+        fileViewerCode.textContent = content;
+    }
+
+    // Show approve button for code files in review mode
+    const codeExts = ['py', 'js', 'ts', 'sh', 'bash'];
+    const isReviewMode = execModeToggle.checked;
+    if (codeExts.includes(ext) && isReviewMode) {
+        fileApproveBtn.classList.remove('hidden');
+    } else {
+        fileApproveBtn.classList.add('hidden');
+    }
+
+    filesList.classList.add('hidden');
+    fileViewer.classList.remove('hidden');
+}
+
 function formatFileSize(bytes) {
     if (bytes < 1024) return bytes + ' B';
     if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
@@ -404,6 +493,21 @@ function updateAgentBadge(msgDiv, agentName) {
     container.innerHTML = `<span class="agent-badge">${escaped.innerHTML}</span>`;
 }
 
+function appendChart(msgDiv, url) {
+    // Append chart as a sibling after message-content, not inside it,
+    // so appendToken's innerHTML replacement doesn't destroy it
+    const iframe = document.createElement('iframe');
+    iframe.src = url;
+    iframe.className = 'chart-iframe';
+    iframe.style.width = '100%';
+    iframe.style.height = '500px';
+    iframe.style.border = 'none';
+    iframe.style.borderRadius = '8px';
+    iframe.style.marginTop = '8px';
+    msgDiv.appendChild(iframe);
+    messagesDiv.scrollTop = messagesDiv.scrollHeight;
+}
+
 function finalizeMessage(msgDiv) {
     msgDiv.classList.remove('streaming');
     streamedContent = '';
@@ -455,6 +559,21 @@ function handleStreamEvent(event, msgDiv) {
 
         case 'tool_end':
             renderActivityItem({type: 'tool_result', name: event.data.name, content: event.data.output});
+            // Refresh file list when a file tool completes
+            if (event.data.name === 'write_file' || event.data.name === 'run_file') {
+                loadFiles();
+                filesToggle.classList.add('has-files');
+            }
+            break;
+
+        case 'chart':
+            appendChart(msgDiv, event.data.url);
+            break;
+
+        case 'file_written':
+            // File data sent directly from stream — add to list immediately
+            // without waiting for checkpoint to save
+            addFileToList(event.data.path, event.data.content);
             break;
 
         case 'files_changed':
@@ -473,6 +592,8 @@ function handleStreamEvent(event, msgDiv) {
 
         case 'done':
             finalizeMessage(msgDiv);
+            // Refresh files after stream completes — checkpoint is fully saved
+            loadFiles();
             break;
     }
 }
@@ -483,8 +604,8 @@ function renderInterruptCard(interruptData, msgDiv) {
     card.className = 'interrupt-card';
 
     const actionRequests = interruptData.action_requests || [];
-    const toolName = actionRequests.length > 0 ? actionRequests[0].action?.name : 'Unknown tool';
-    const toolArgs = actionRequests.length > 0 ? actionRequests[0].action?.args : {};
+    const toolName = actionRequests.length > 0 ? (actionRequests[0].name || actionRequests[0].action?.name || 'Unknown tool') : 'Unknown tool';
+    const toolArgs = actionRequests.length > 0 ? (actionRequests[0].args || actionRequests[0].action?.args || {}) : {};
 
     card.innerHTML = `
         <div class="interrupt-header">Approval Required</div>

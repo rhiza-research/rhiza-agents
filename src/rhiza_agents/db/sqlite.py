@@ -78,6 +78,14 @@ class Database:
         )
         return dict(row._mapping) if row else None
 
+    async def get_conversation_by_id(self, conversation_id: str) -> dict | None:
+        """Get a conversation by ID regardless of owner. For read-only access."""
+        row = await self.database.fetch_one(
+            "SELECT * FROM conversations WHERE id = :id",
+            {"id": conversation_id},
+        )
+        return dict(row._mapping) if row else None
+
     async def list_conversations(self, user_id: str, limit: int = 50) -> list[dict]:
         """List conversations for a user, most recent first."""
         rows = await self.database.fetch_all(
