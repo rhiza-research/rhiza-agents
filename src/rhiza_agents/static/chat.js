@@ -124,15 +124,70 @@ function renderActivityItem(item) {
     activityContent.scrollTop = activityContent.scrollHeight;
 }
 
-// Load activity data embedded by server on page load
-const activityDataEl = document.getElementById('activity-data');
-if (activityDataEl) {
+// Load messages from API on page load (replaces server-side rendering)
+async function loadMessages() {
+    const convId = conversationIdInput.value;
+    if (!convId) return;
+
     try {
-        const activityData = JSON.parse(activityDataEl.textContent);
-        activityData.forEach(item => renderActivityItem(item));
+        const response = await fetch(`/api/conversations/${convId}/messages`);
+        if (!response.ok) {
+            console.error('Failed to load messages:', response.status);
+            return;
+        }
+
+        const data = await response.json();
+        const messages = data.messages || [];
+
+        // Remove loading indicator
+        const loading = messagesDiv.querySelector('.messages-loading');
+        if (loading) loading.remove();
+
+        let hasFiles = false;
+        for (const msg of messages) {
+            if (msg.type === 'human') {
+                addMessage('user', msg.content);
+            } else if (msg.type === 'ai') {
+                addMessage('assistant', msg.content, false, msg.agent_name);
+            } else if (msg.type === 'chart') {
+                const div = document.createElement('div');
+                div.className = 'message assistant';
+                const iframe = document.createElement('iframe');
+                iframe.src = msg.url;
+                iframe.className = 'chart-iframe';
+                iframe.style.cssText = 'width:100%;height:500px;border:none;border-radius:8px;';
+                const contentDiv = document.createElement('div');
+                contentDiv.className = 'message-content';
+                contentDiv.appendChild(iframe);
+                div.appendChild(contentDiv);
+                messagesDiv.appendChild(div);
+            } else if (msg.type === 'thinking') {
+                renderActivityItem({type: 'thinking', content: msg.content});
+            } else if (msg.type === 'tool_call') {
+                renderActivityItem({type: 'tool_call', name: msg.name, args: msg.args});
+                if (msg.name === 'write_file' || msg.name === 'run_file') {
+                    hasFiles = true;
+                }
+            } else if (msg.type === 'tool_result') {
+                renderActivityItem({type: 'tool_result', name: msg.name, content: msg.content});
+            }
+        }
+
+        messagesDiv.scrollTop = messagesDiv.scrollHeight;
+
+        if (hasFiles) {
+            filesToggle.classList.add('has-files');
+            loadFiles();
+        }
     } catch (e) {
-        console.error('Failed to parse activity data:', e);
+        console.error('Failed to load messages:', e);
+        const loading = messagesDiv.querySelector('.messages-loading');
+        if (loading) loading.textContent = 'Failed to load messages';
     }
+}
+
+if (conversationIdInput.value) {
+    loadMessages();
 }
 
 // --- Files Panel ---
@@ -422,29 +477,7 @@ execModeToggle.addEventListener('change', () => {
     localStorage.setItem('execReviewMode', execModeToggle.checked);
 });
 
-// Load files on page load if conversation has files
-const hasFilesEl = document.getElementById('has-files-data');
-if (hasFilesEl) {
-    try {
-        const hasFiles = JSON.parse(hasFilesEl.textContent);
-        if (hasFiles) {
-            loadFiles();
-        }
-    } catch (e) {
-        // ignore
-    }
-}
-
 // --- Messages ---
-
-// Render server-side messages through marked on page load
-document.querySelectorAll('.message-content.needs-render').forEach(el => {
-    const rawContent = el.textContent;
-    if (rawContent) {
-        el.innerHTML = renderMarkdown(rawContent);
-        el.classList.remove('needs-render');
-    }
-});
 
 // Auto-resize textarea
 if (input) {

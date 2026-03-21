@@ -40,12 +40,12 @@
                     </label>
                 </div>
                 <div class="chat-header-right">
-                    <button id="files-toggle" class="files-toggle-btn{% if has_files %} has-files{% endif %}" title="Toggle file viewer">Files</button>
+                    <button id="files-toggle" class="files-toggle-btn" title="Toggle file viewer">Files</button>
                     <button id="activity-toggle" class="activity-toggle-btn" title="Toggle activity panel">Activity</button>
                 </div>
             </div>
             <div class="messages" id="messages">
-                {% if not messages %}
+                {% if not current_conversation %}
                 <div class="welcome">
                     <h2>Rhiza Agents</h2>
                     <p>Ask questions about weather forecast models and data analysis.</p>
@@ -55,19 +55,9 @@
                         <button class="sample-prompt" data-prompt="Can you show a map of Africa?">Show a map of Africa</button>
                     </div>
                 </div>
-                {% endif %}
-                {% for msg in messages %}
-                {% if msg.type == 'chart' %}
-                <div class="message assistant">
-                    <div class="message-content"><iframe src="{{ msg.url }}" class="chart-iframe" style="width:100%;height:500px;border:none;border-radius:8px;"></iframe></div>
-                </div>
                 {% else %}
-                <div class="message {% if msg.type == 'human' %}user{% else %}assistant{% endif %}">
-                    {% if msg.agent_name %}<span class="agent-badge">{{ msg.agent_name }}</span>{% endif %}
-                    <div class="message-content needs-render">{{ msg.content | e }}</div>
-                </div>
+                <div class="messages-loading">Loading messages...</div>
                 {% endif %}
-                {% endfor %}
             </div>
 
             <form class="input-area" id="chat-form">
@@ -105,8 +95,6 @@
         </aside>
     </div>
 
-    <script id="activity-data" type="application/json">{{ activity_json | safe }}</script>
-    <script id="has-files-data" type="application/json">{{ has_files | tojson }}</script>
     <script type="module" src="/static/chat.js?v={{ static_version }}"></script>
 </body>
 </html>

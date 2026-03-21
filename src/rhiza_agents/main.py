@@ -387,9 +387,6 @@ async def index(request: Request):
             "user_name": get_user_name(request),
             "conversations": conversations,
             "current_conversation": None,
-            "messages": [],
-            "activity_json": "[]",
-            "has_files": False,
             "static_version": _static_version,
         },
     )
@@ -408,26 +405,6 @@ async def conversation_page(request: Request, conversation_id: str, user: dict =
 
     conversations = await db.list_conversations(user_id)
 
-    # Use the conversation owner's configs for agent name resolution
-    owner_id = conversation.get("user_id", user_id)
-
-    # Load messages from LangGraph checkpointer
-    graph = await get_agent_graph(
-        mcp_tools,
-        checkpointer,
-        user_id=owner_id,
-        db=db,
-        vectorstore_manager=vectorstore_manager,
-    )
-    effective = await _get_effective_configs(owner_id)
-    agent_names, tool_to_agent_map = _build_name_mappings(effective)
-    state = await graph.aget_state({"configurable": {"thread_id": conversation_id}})
-    raw_messages = state.values.get("messages", [])
-    all_messages = _process_messages(raw_messages, agent_names, tool_to_agent_map)
-    chat_messages = [m for m in all_messages if m["type"] in ("human", "ai", "chart")]
-    activity = [m for m in all_messages if m["type"] in ("thinking", "tool_call", "tool_result")]
-    has_files = bool(state.values.get("files"))
-
     return templates.TemplateResponse(
         "chat.html",
         {
@@ -435,9 +412,6 @@ async def conversation_page(request: Request, conversation_id: str, user: dict =
             "user_name": get_user_name(request),
             "conversations": conversations,
             "current_conversation": conversation,
-            "messages": chat_messages,
-            "activity_json": json.dumps(activity, default=str),
-            "has_files": has_files,
             "static_version": _static_version,
         },
     )

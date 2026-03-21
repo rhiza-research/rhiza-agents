@@ -1380,3 +1380,31 @@ body {
         border-bottom: 1px solid #2a2a4a;
     }
 }
+
+/* Messages loading indicator */
+.messages-loading {
+    text-align: center;
+    padding: 4rem 2rem;
+    color: #666;
+    font-size: 0.9rem;
+}
+
+/* Settings section on config page */
+.settings-section {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.setting-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    color: #ccc;
+    font-size: 0.85rem;
+    cursor: pointer;
+}
+
+.setting-toggle input[type="checkbox"] {
+    accent-color: #6c63ff;
+}
