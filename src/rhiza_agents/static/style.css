@@ -51,6 +51,7 @@ body {
 .app {
     display: flex;
     height: 100vh;
+    position: relative;
 }
 
 .sidebar {
@@ -59,12 +60,23 @@ body {
     display: flex;
     flex-direction: column;
     border-right: 1px solid #2a2a4a;
+    transition: width 0.2s, padding 0.2s, opacity 0.2s;
+    overflow: hidden;
+}
+
+.sidebar.collapsed {
+    width: 0;
+    padding: 0;
+    border-right: none;
+    opacity: 0;
+    pointer-events: none;
 }
 
 .sidebar-header {
     padding: 1rem;
     border-bottom: 1px solid #2a2a4a;
 }
+
 
 .new-chat-btn {
     width: 100%;
@@ -428,8 +440,7 @@ body {
     gap: 0.5rem;
 }
 
-.activity-toggle-btn,
-.files-toggle-btn {
+.panel-toggle-btn {
     background: none;
     border: 1px solid #3a3a5a;
     color: #888;
@@ -439,20 +450,14 @@ body {
     border-radius: 4px;
 }
 
-.activity-toggle-btn:hover,
-.files-toggle-btn:hover {
+.panel-toggle-btn:hover {
     color: #ccc;
     border-color: #4a90d9;
 }
 
-.activity-toggle-btn.active,
-.files-toggle-btn.active {
+.panel-toggle-btn.active {
     color: #4a90d9;
     border-color: #4a90d9;
-}
-
-.files-toggle-btn.has-files {
-    color: #aaa;
 }
 
 /* Execution Mode Toggle */

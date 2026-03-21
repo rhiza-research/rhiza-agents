@@ -9,7 +9,7 @@
 </head>
 <body>
     <div class="app">
-        <aside class="sidebar">
+        <aside class="sidebar" id="sidebar">
             <div class="sidebar-header">
                 <button id="new-chat" class="new-chat-btn">+ New Chat</button>
             </div>
@@ -34,14 +34,15 @@
         <main class="chat-area">
             <div class="chat-header">
                 <div class="chat-header-left">
+                    <button id="sidebar-toggle" class="panel-toggle-btn active" title="Toggle chat history">Chats</button>
                     <label class="exec-mode-toggle" title="When enabled, code must be approved before execution">
                         <input type="checkbox" id="exec-mode-toggle">
                         <span class="exec-mode-label">Review code</span>
                     </label>
                 </div>
                 <div class="chat-header-right">
-                    <button id="files-toggle" class="files-toggle-btn" title="Toggle file viewer">Files</button>
-                    <button id="activity-toggle" class="activity-toggle-btn" title="Toggle activity panel">Activity</button>
+                    <button id="files-toggle" class="panel-toggle-btn" title="Toggle file viewer">Files</button>
+                    <button id="activity-toggle" class="panel-toggle-btn active" title="Toggle activity panel">Activity</button>
                 </div>
             </div>
             <div class="messages" id="messages">

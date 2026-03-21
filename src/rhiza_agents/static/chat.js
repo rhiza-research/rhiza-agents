@@ -23,6 +23,8 @@ const fileApproveBtn = document.getElementById('file-approve-btn');
 const filesToggle = document.getElementById('files-toggle');
 const filesClose = document.getElementById('files-close');
 const execModeToggle = document.getElementById('exec-mode-toggle');
+const sidebar = document.getElementById('sidebar');
+const sidebarToggle = document.getElementById('sidebar-toggle');
 
 // Configure marked.js with highlight.js
 marked.use(markedHighlight({
@@ -63,6 +65,19 @@ activityClose.addEventListener('click', toggleActivityPanel);
 // Restore panel state from localStorage
 if (localStorage.getItem('activityPanelOpen') === 'false') {
     activityPanel.classList.add('hidden');
+    activityToggle.classList.remove('active');
+}
+
+// Sidebar toggle
+function toggleSidebar() {
+    sidebar.classList.toggle('collapsed');
+    sidebarToggle.classList.toggle('active');
+    localStorage.setItem('sidebarOpen', !sidebar.classList.contains('collapsed'));
+}
+sidebarToggle.addEventListener('click', toggleSidebar);
+if (localStorage.getItem('sidebarOpen') === 'false') {
+    sidebar.classList.add('collapsed');
+    sidebarToggle.classList.remove('active');
 }
 
 function renderActivityItem(item) {
