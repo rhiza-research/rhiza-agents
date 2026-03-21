@@ -175,6 +175,14 @@ async function loadFiles() {
         }
 
         const files = await response.json();
+        // Merge with any files received via streaming that aren't in the
+        // checkpoint yet (e.g., during HITL interrupt before worker returns)
+        const apiPaths = new Set(files.map(f => f.path));
+        for (const [path, content] of Object.entries(streamedFiles)) {
+            if (!apiPaths.has(path)) {
+                files.push({ path, size: new Blob([content || '']).size });
+            }
+        }
         if (files.length === 0) {
             filesList.innerHTML = '<div class="files-empty">No files yet</div>';
             filesToggle.classList.remove('has-files');
@@ -186,12 +194,19 @@ async function loadFiles() {
         for (const file of files) {
             const item = document.createElement('div');
             item.className = 'file-item';
+            item.dataset.path = file.path;
             item.addEventListener('click', () => openFile(file.path));
 
             const pathSpan = document.createElement('span');
             pathSpan.className = 'file-item-path';
             pathSpan.textContent = file.path;
             item.appendChild(pathSpan);
+
+            const source = file.source || 'agent';
+            const sourceLabel = document.createElement('span');
+            sourceLabel.className = `file-source file-source-${source}`;
+            sourceLabel.textContent = source === 'output' ? 'code-generated' : 'agent-generated';
+            item.appendChild(sourceLabel);
 
             const meta = document.createElement('span');
             meta.className = 'file-item-meta';
@@ -248,6 +263,11 @@ function addFileToList(path, content) {
     pathSpan.textContent = path;
     item.appendChild(pathSpan);
 
+    const sourceLabel = document.createElement('span');
+    sourceLabel.className = 'file-source file-source-agent';
+    sourceLabel.textContent = 'agent-generated';
+    item.appendChild(sourceLabel);
+
     const meta = document.createElement('span');
     meta.className = 'file-item-meta';
     meta.textContent = formatFileSize(new Blob([content]).size);
@@ -302,6 +322,14 @@ function formatFileSize(bytes) {
 }
 
 async function openFile(path) {
+    // Check streamed file cache first — files may not be in checkpoint yet
+    // (e.g., during HITL interrupt before worker returns to supervisor)
+    const cached = streamedFiles[path];
+    if (cached !== undefined) {
+        openFileFromCache(path);
+        return;
+    }
+
     const convId = conversationIdInput.value;
     if (!convId) return;
 
@@ -559,8 +587,11 @@ function handleStreamEvent(event, msgDiv) {
 
         case 'tool_end':
             renderActivityItem({type: 'tool_result', name: event.data.name, content: event.data.output});
-            // Refresh file list when a file tool completes
-            if (event.data.name === 'write_file' || event.data.name === 'run_file') {
+            // Refresh file list when run_file completes (may modify files)
+            // Skip for write_file — file_written event already added it to the
+            // list immediately, and loadFiles() would overwrite it with empty
+            // data since the checkpoint hasn't saved yet
+            if (event.data.name === 'run_file') {
                 loadFiles();
                 filesToggle.classList.add('has-files');
             }
@@ -594,6 +625,8 @@ function handleStreamEvent(event, msgDiv) {
             finalizeMessage(msgDiv);
             // Refresh files after stream completes — checkpoint is fully saved
             loadFiles();
+            break;
+        default:
             break;
     }
 }

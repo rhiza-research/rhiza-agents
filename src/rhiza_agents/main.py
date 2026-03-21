@@ -553,9 +553,11 @@ async def stream_chat_message(
                                         html_url = _extract_chart_url(msg.content)
                                         if html_url:
                                             yield f"event: chart\ndata: {json.dumps({'url': html_url})}\n\n"
-                                    # Fallback files_changed for tools in subgraphs
-                                    # where stream_writer events may not propagate
-                                    if msg.name in ("write_file", "run_file"):
+                                    # Emit files_changed for run_file results
+                                    # (write_file uses file_written from tool_start instead,
+                                    # since files_changed triggers loadFiles which overwrites
+                                    # the immediate file display before checkpoint saves)
+                                    if msg.name == "run_file":
                                         yield f"event: files_changed\ndata: {json.dumps({})}\n\n"
 
                     elif chunk_type == "custom":
@@ -724,7 +726,7 @@ async def resume_chat(
                                     html_url = _extract_chart_url(msg.content)
                                     if html_url:
                                         yield f"event: chart\ndata: {json.dumps({'url': html_url})}\n\n"
-                                if msg.name in ("write_file", "run_file"):
+                                if msg.name == "run_file":
                                     yield f"event: files_changed\ndata: {json.dumps({})}\n\n"
 
                 elif chunk_type == "custom":
@@ -945,6 +947,7 @@ async def list_conversation_files(request: Request, conversation_id: str, user: 
             {
                 "path": path,
                 "size": len(content_str.encode("utf-8")),
+                "source": file_data.get("source", "agent"),
                 "modified_at": file_data.get("modified_at", ""),
             }
         )

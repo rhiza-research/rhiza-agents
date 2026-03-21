@@ -693,6 +693,27 @@ body {
     margin-left: 0.5rem;
 }
 
+.file-source {
+    font-size: 0.6rem;
+    padding: 1px 5px;
+    border-radius: 3px;
+    flex-shrink: 0;
+    margin-left: 0.5rem;
+    text-transform: uppercase;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+}
+
+.file-source-agent {
+    background: #2a4a5e;
+    color: #7fb8d8;
+}
+
+.file-source-output {
+    background: #3a4a2e;
+    color: #9fc87a;
+}
+
 .files-empty {
     padding: 2rem 1rem;
     text-align: center;

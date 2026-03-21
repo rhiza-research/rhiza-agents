@@ -53,14 +53,16 @@ async def write_file(
 
     file_data = {
         "content": lines,
+        "source": "agent",
         "created_at": now,
         "modified_at": now,
     }
 
     result_msg = f"File written: {path} ({len(lines)} lines, {content_size} bytes)"
 
-    # Emit files_changed event via custom stream so the UI refreshes immediately
-    runtime.stream_writer({"type": "files_changed"})
+    # Note: file display is handled by file_written SSE event from tool_start,
+    # not stream_writer, because loadFiles() would overwrite the immediate
+    # display before the checkpoint saves.
 
     return Command(
         update={
@@ -134,20 +136,57 @@ async def run_file(
 
     def _run():
         sandbox = _get_or_create_sandbox(thread_id)
+
+        # Snapshot files before execution to detect new output files
+        try:
+            pre_files = {f.name for f in sandbox.fs.list_files(".")}
+        except Exception:
+            pre_files = set()
+
         response = sandbox.process.code_run(code)
+
+        # Discover new files created during execution
+        new_files = {}
+        try:
+            post_files = sandbox.fs.list_files(".")
+            for f in post_files:
+                if f.is_dir or f.name in pre_files:
+                    continue
+                # Download new output files (skip large files > 1MB)
+                if f.size and f.size > 1_000_000:
+                    continue
+                try:
+                    content_bytes = sandbox.fs.download_file(f.name)
+                    file_content = content_bytes.decode("utf-8", errors="replace")
+                    new_files[f"/{f.name}"] = file_content
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
         if response.exit_code != 0:
-            return f"Error (exit code {response.exit_code}):\n{response.result}"
-        return response.result
+            return f"Error (exit code {response.exit_code}):\n{response.result}", new_files
+        return response.result, new_files
 
-    result = await asyncio.to_thread(_run)
+    result, new_files = await asyncio.to_thread(_run)
 
-    return Command(
-        update={
-            "messages": [
-                ToolMessage(
-                    content=f"Execution output for {path}:\n{result}",
-                    tool_call_id=runtime.tool_call_id,
-                )
-            ],
-        }
-    )
+    # Add any output files to state
+    files_update = {}
+    for fpath, fcontent in new_files.items():
+        lines = fcontent.split("\n")
+        files_update[fpath] = {"content": lines, "source": "output", "size": len(fcontent)}
+
+    update_dict = {
+        "messages": [
+            ToolMessage(
+                content=f"Execution output for {path}:\n{result}",
+                tool_call_id=runtime.tool_call_id,
+            )
+        ],
+    }
+
+    if files_update:
+        existing_files = runtime.state.get("files", {})
+        update_dict["files"] = {**existing_files, **files_update}
+
+    return Command(update=update_dict)
