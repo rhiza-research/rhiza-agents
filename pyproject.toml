@@ -28,6 +28,8 @@ dependencies = [
     "langsmith",
     # App database
     "databases[aiosqlite]",
+    # Structured logging
+    "python-json-logger>=3.3.0",
 ]
 
 [project.optional-dependencies]

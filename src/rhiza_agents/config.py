@@ -35,6 +35,10 @@ class Config:
     checkpoint_db_path: str
     base_url: str
 
+    # Logging
+    log_level: str
+    chat_event_logging: str  # "false", "true", or "opt-in"
+
     @classmethod
     def from_env(cls) -> "Config":
         """Load configuration from environment variables."""
@@ -55,4 +59,6 @@ class Config:
             database_url=os.environ.get("DATABASE_URL", "sqlite:///./rhiza_agents.db"),
             checkpoint_db_path=os.environ.get("CHECKPOINT_DB_PATH", "./checkpoints.db"),
             base_url=os.environ.get("BASE_URL", "http://localhost:8080"),
+            log_level=os.environ.get("LOG_LEVEL", "INFO"),
+            chat_event_logging=os.environ.get("CHAT_EVENT_LOGGING", "false"),
         )

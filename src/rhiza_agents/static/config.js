@@ -449,5 +449,26 @@ vsModal.querySelector('.modal-backdrop').addEventListener('click', () => {
     vsModal.classList.add('hidden');
 });
 
+// --- User Settings ---
+
+const chatLoggingToggle = document.getElementById('chat-logging-toggle');
+
+async function loadSettings() {
+    const res = await fetch('/api/settings');
+    if (!res.ok) return;
+    const data = await res.json();
+    const settings = data.settings || {};
+    chatLoggingToggle.checked = settings.chat_event_logging === 'true';
+}
+
+chatLoggingToggle.addEventListener('change', async () => {
+    await fetch('/api/settings/chat_event_logging', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value: chatLoggingToggle.checked ? 'true' : 'false' }),
+    });
+});
+
 // Initial load
 loadAgents();
+loadSettings();

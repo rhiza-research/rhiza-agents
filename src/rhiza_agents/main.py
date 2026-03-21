@@ -30,8 +30,63 @@ from .config import Config
 from .db.models import AgentConfig
 from .db.sqlite import Database
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+chat_event_logger = logging.getLogger("rhiza_agents.chat_events")
+
+
+def _setup_logging(log_level: str = "INFO", chat_event_logging: str = "false"):
+    """Configure structured logging with JSON formatter for chat events."""
+    from pythonjsonlogger.json import JsonFormatter
+
+    root = logging.getLogger()
+    root.setLevel(getattr(logging, log_level.upper(), logging.INFO))
+
+    # Replace any existing handlers on root with a basic stderr handler
+    for handler in root.handlers[:]:
+        root.removeHandler(handler)
+    console = logging.StreamHandler()
+    console.setFormatter(logging.Formatter("%(levelname)s: %(name)s: %(message)s"))
+    root.addHandler(console)
+
+    # Configure chat event logger with JSON output
+    chat_event_logger.handlers.clear()
+    chat_event_logger.propagate = False
+    if chat_event_logging != "false":
+        json_handler = logging.StreamHandler()
+        json_handler.setFormatter(
+            JsonFormatter(
+                fmt="%(asctime)s %(levelname)s %(name)s %(message)s",
+                rename_fields={"asctime": "timestamp", "levelname": "level", "name": "logger"},
+            )
+        )
+        chat_event_logger.addHandler(json_handler)
+        chat_event_logger.setLevel(logging.INFO)
+    else:
+        chat_event_logger.setLevel(logging.CRITICAL)
+
+
+# Basic logging until config is loaded in lifespan
+_setup_logging()
+
+
+async def _is_chat_logging_enabled(user_id: str) -> bool:
+    """Check if chat event logging is enabled for a user.
+
+    Combines global config with per-user setting:
+    - "false": off for everyone
+    - "true": on by default, users can opt out
+    - "opt-in": off by default, users must opt in
+    """
+    mode = config.chat_event_logging
+    if mode == "false":
+        return False
+    user_pref = await db.get_user_setting(user_id, "chat_event_logging")
+    if mode == "true":
+        return user_pref != "false"
+    if mode == "opt-in":
+        return user_pref == "true"
+    return False
+
 
 # Global instances
 config: Config = None
@@ -51,6 +106,8 @@ async def lifespan(app: FastAPI):
     global config, db, checkpointer, oauth, mcp_tools, vectorstore_manager, _agent_names, _tool_to_agent
 
     config = Config.from_env()
+    _setup_logging(config.log_level, config.chat_event_logging)
+
     db = Database(config.database_url)
     oauth = create_oauth(config)
 
@@ -884,6 +941,29 @@ async def upload_documents(
     await db.update_vectorstore_doc_count(vs_id, new_count)
 
     return {"document_count": new_count, "chunks_added": total_chunks}
+
+
+# --- User Settings ---
+
+
+@app.get("/api/settings")
+async def get_settings(request: Request, user: dict = Depends(require_auth)):
+    """Get all settings for the current user."""
+    user_id = get_user_id(request)
+    settings = await db.get_user_settings(user_id)
+    return {"settings": settings}
+
+
+class UpdateSettingRequest(BaseModel):
+    value: str
+
+
+@app.put("/api/settings/{key}")
+async def update_setting(request: Request, key: str, body: UpdateSettingRequest, user: dict = Depends(require_auth)):
+    """Set a user setting."""
+    user_id = get_user_id(request)
+    await db.set_user_setting(user_id, key, body.value)
+    return {"key": key, "value": body.value}
 
 
 @app.get("/api/conversations/{conversation_id}/messages")

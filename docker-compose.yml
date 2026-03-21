@@ -52,6 +52,7 @@ services:
       DAYTONA_API_URL: ${DAYTONA_API_URL:-}
       DAYTONA_PROXY_URL: ${DAYTONA_PROXY_URL:-}
       CHROMA_PERSIST_DIR: /data/chroma
+      CHAT_EVENT_LOGGING: "true"
       WATCHFILES_FORCE_POLLING: "true"
     depends_on:
       - keycloak

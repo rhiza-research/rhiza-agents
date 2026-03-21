@@ -62,6 +62,16 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_user_vectorstores_user_id ON user_vectorstores(user_id)"
         )
 
+        await self.database.execute("""
+            CREATE TABLE IF NOT EXISTS user_settings (
+                user_id TEXT NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_id, key)
+            )
+        """)
+
     async def create_conversation(self, conversation_id: str, user_id: str, title: str | None = None) -> dict:
         """Create a new conversation."""
         await self.database.execute(
@@ -227,4 +237,37 @@ class Database:
         await self.database.execute(
             "DELETE FROM user_vectorstores WHERE id = :id AND user_id = :user_id",
             {"id": id, "user_id": user_id},
+        )
+
+    # --- User Settings ---
+
+    async def get_user_setting(self, user_id: str, key: str) -> str | None:
+        """Get a single setting value for a user."""
+        row = await self.database.fetch_one(
+            "SELECT value FROM user_settings WHERE user_id = :user_id AND key = :key",
+            {"user_id": user_id, "key": key},
+        )
+        return row._mapping["value"] if row else None
+
+    async def get_user_settings(self, user_id: str) -> dict[str, str]:
+        """Get all settings for a user as a key-value dict."""
+        rows = await self.database.fetch_all(
+            "SELECT key, value FROM user_settings WHERE user_id = :user_id",
+            {"user_id": user_id},
+        )
+        return {row._mapping["key"]: row._mapping["value"] for row in rows}
+
+    async def set_user_setting(self, user_id: str, key: str, value: str):
+        """Set a user setting (insert or update)."""
+        await self.database.execute(
+            """INSERT INTO user_settings (user_id, key, value, updated_at)
+               VALUES (:user_id, :key, :value, :updated_at)
+               ON CONFLICT (user_id, key) DO UPDATE SET
+                   value = :value, updated_at = :updated_at""",
+            {
+                "user_id": user_id,
+                "key": key,
+                "value": value,
+                "updated_at": datetime.now(UTC),
+            },
         )
