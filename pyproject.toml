@@ -47,7 +47,7 @@ vectorstore = [
 ]
 
 [project.scripts]
-rhiza-agents = "rhiza_agents.main:run"
+rhiza-agents = "rhiza_agents.app:run"
 
 [build-system]
 requires = ["hatchling"]
