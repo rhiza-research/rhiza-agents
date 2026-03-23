@@ -2,6 +2,8 @@ import { CommandRegistry } from '@lumino/commands';
 import { BoxPanel, DockLayout, DockPanel, Menu, MenuBar, Widget } from '@lumino/widgets';
 import '@lumino/default-theme/style/index.css';
 import 'font-awesome/css/font-awesome.css';
+import './theme.css';
+import './style.css';
 
 import { ConversationListWidget, ConversationData } from './widgets/conversations';
 import { ChatWidget } from './widgets/chat';

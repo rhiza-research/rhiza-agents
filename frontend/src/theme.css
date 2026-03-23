@@ -1,0 +1,224 @@
+/*
+ * Based on JupyterLab Dark Theme
+ * https://github.com/jupyterlab/jupyterlab
+ * Copyright (c) Jupyter Development Team
+ * Distributed under the terms of the Modified BSD License
+ */
+
+:root {
+    /* Elevation */
+    --jp-shadow-base-lightness: 32;
+    --jp-shadow-umbra-color: rgba(var(--jp-shadow-base-lightness), var(--jp-shadow-base-lightness), var(--jp-shadow-base-lightness), 0.2);
+    --jp-shadow-penumbra-color: rgba(var(--jp-shadow-base-lightness), var(--jp-shadow-base-lightness), var(--jp-shadow-base-lightness), 0.14);
+    --jp-shadow-ambient-color: rgba(var(--jp-shadow-base-lightness), var(--jp-shadow-base-lightness), var(--jp-shadow-base-lightness), 0.12);
+    --jp-elevation-z0: none;
+    --jp-elevation-z1: 0 2px 1px -1px var(--jp-shadow-umbra-color), 0 1px 1px 0 var(--jp-shadow-penumbra-color), 0 1px 3px 0 var(--jp-shadow-ambient-color);
+    --jp-elevation-z2: 0 3px 1px -2px var(--jp-shadow-umbra-color), 0 2px 2px 0 var(--jp-shadow-penumbra-color), 0 1px 5px 0 var(--jp-shadow-ambient-color);
+    --jp-elevation-z4: 0 2px 4px -1px var(--jp-shadow-umbra-color), 0 4px 5px 0 var(--jp-shadow-penumbra-color), 0 1px 10px 0 var(--jp-shadow-ambient-color);
+
+    /* Borders */
+    --jp-border-width: 1px;
+    --jp-border-color0: #616161;
+    --jp-border-color1: #616161;
+    --jp-border-color2: #424242;
+    --jp-border-color3: #212121;
+    --jp-border-radius: 2px;
+
+    /* UI Fonts */
+    --jp-ui-font-family: system-ui, -apple-system, blinkmacsystemfont, 'Segoe UI', helvetica, arial, sans-serif;
+    --jp-ui-font-size0: 0.83333em;
+    --jp-ui-font-size1: 13px;
+
+    /* UI Font Colors */
+    --jp-ui-font-color0: rgba(255, 255, 255, 1);
+    --jp-ui-font-color1: rgba(255, 255, 255, 0.87);
+    --jp-ui-font-color2: rgba(255, 255, 255, 0.54);
+    --jp-ui-font-color3: rgba(255, 255, 255, 0.38);
+
+    /* Content Font Colors */
+    --jp-content-font-color0: rgba(255, 255, 255, 1);
+    --jp-content-font-color1: rgba(255, 255, 255, 1);
+    --jp-content-font-color2: rgba(255, 255, 255, 0.7);
+    --jp-content-font-color3: rgba(255, 255, 255, 0.5);
+    --jp-content-link-color: #64b5f6;
+    --jp-content-line-height: 1.6;
+    --jp-content-font-size1: 14px;
+    --jp-content-font-family: var(--jp-ui-font-family);
+
+    /* Code Fonts */
+    --jp-code-font-size: 13px;
+    --jp-code-line-height: 1.3077;
+    --jp-code-font-family: menlo, consolas, 'DejaVu Sans Mono', monospace;
+
+    /* Layout Colors */
+    --jp-layout-color0: #111;
+    --jp-layout-color1: #212121;
+    --jp-layout-color2: #424242;
+    --jp-layout-color3: #616161;
+    --jp-layout-color4: #757575;
+
+    /* Brand/Accent */
+    --jp-brand-color0: #1976d2;
+    --jp-brand-color1: #2196f3;
+    --jp-brand-color2: #64b5f6;
+    --jp-brand-color3: #bbdefb;
+    --jp-accent-color0: #388e3c;
+    --jp-accent-color1: #4caf50;
+    --jp-accent-color2: #81c784;
+    --jp-accent-color3: #c8e6c9;
+
+    /* State Colors */
+    --jp-warn-color0: #f57c00;
+    --jp-warn-color1: #ff9800;
+    --jp-error-color0: #d32f2f;
+    --jp-error-color1: #f44336;
+    --jp-success-color0: #388e3c;
+    --jp-success-color1: #4caf50;
+    --jp-info-color0: #0097a7;
+    --jp-info-color1: #00bcd4;
+
+    /* Cell Editor */
+    --jp-cell-editor-background: var(--jp-layout-color1);
+    --jp-cell-editor-border-color: #616161;
+    --jp-cell-editor-active-border-color: var(--jp-brand-color1);
+
+    /* Input */
+    --jp-input-active-background: var(--jp-layout-color0);
+    --jp-input-hover-background: var(--jp-layout-color2);
+    --jp-input-background: #424242;
+    --jp-input-border-color: #757575;
+    --jp-input-active-border-color: var(--jp-brand-color1);
+
+    /* Toolbar */
+    --jp-toolbar-background: var(--jp-layout-color1);
+    --jp-toolbar-border-color: var(--jp-border-color2);
+
+    /* Statusbar */
+    --jp-statusbar-height: 24px;
+
+    /* Dialog */
+    --jp-dialog-background: rgba(0, 0, 0, 0.6);
+
+    /* Sidebar */
+    --jp-sidebar-min-width: 250px;
+
+    /* Scrollbar */
+    --jp-scrollbar-background-color: #3f4244;
+    --jp-scrollbar-thumb-color: 88, 96, 97;
+}
+
+/* Apply theme to Lumino components */
+body {
+    background: var(--jp-layout-color0);
+    color: var(--jp-ui-font-color1);
+    font-family: var(--jp-ui-font-family);
+}
+
+.lm-Widget {
+    background: var(--jp-layout-color1);
+    color: var(--jp-ui-font-color1);
+}
+
+/* Tab bar */
+.lm-TabBar {
+    background: var(--jp-layout-color2);
+    border-bottom: 1px solid var(--jp-border-color1);
+}
+
+.lm-TabBar-tab {
+    color: var(--jp-ui-font-color2);
+    background: var(--jp-layout-color2);
+    font-size: var(--jp-ui-font-size1);
+}
+
+.lm-TabBar-tab.lm-mod-current {
+    color: var(--jp-ui-font-color0);
+    background: var(--jp-layout-color1);
+}
+
+.lm-TabBar-tab:hover:not(.lm-mod-current) {
+    color: var(--jp-ui-font-color1);
+    background: var(--jp-layout-color3);
+}
+
+.lm-TabBar-tabCloseIcon {
+    display: inline-block;
+}
+
+/* Dock panel */
+.lm-DockPanel {
+    background: var(--jp-layout-color0);
+}
+
+.lm-DockPanel-handle {
+    background: var(--jp-border-color2);
+}
+
+/* Split panel */
+.lm-SplitPanel-handle {
+    background: var(--jp-border-color2);
+}
+
+/* Menu bar */
+.lm-MenuBar {
+    background: var(--jp-layout-color1);
+    border-bottom: 1px solid var(--jp-border-color2);
+    color: var(--jp-ui-font-color1);
+    font-size: var(--jp-ui-font-size1);
+}
+
+.lm-MenuBar-item {
+    padding: 4px 10px;
+    color: var(--jp-ui-font-color2);
+}
+
+.lm-MenuBar-item:hover,
+.lm-MenuBar-item.lm-mod-active {
+    background: var(--jp-layout-color2);
+    color: var(--jp-ui-font-color0);
+}
+
+/* Dropdown menus */
+.lm-Menu {
+    background: var(--jp-layout-color1);
+    border: 1px solid var(--jp-border-color1);
+    color: var(--jp-ui-font-color1);
+    font-size: var(--jp-ui-font-size1);
+    box-shadow: var(--jp-elevation-z4);
+}
+
+.lm-Menu-item:hover {
+    background: var(--jp-layout-color2);
+}
+
+.lm-Menu-item.lm-mod-active {
+    background: var(--jp-brand-color1);
+    color: white;
+}
+
+.lm-Menu-itemLabel {
+    color: var(--jp-ui-font-color1);
+}
+
+.lm-Menu-itemShortcut {
+    color: var(--jp-ui-font-color3);
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+::-webkit-scrollbar-track {
+    background: var(--jp-layout-color1);
+}
+
+::-webkit-scrollbar-thumb {
+    background: var(--jp-layout-color3);
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: var(--jp-layout-color4);
+}

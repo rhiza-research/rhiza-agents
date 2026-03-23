@@ -26,8 +26,7 @@ COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
 
 # Copy frontend build output
-COPY --from=frontend /build/src/rhiza_agents/static/app.js src/rhiza_agents/static/app.js
-COPY --from=frontend /build/src/rhiza_agents/static/app.css src/rhiza_agents/static/app.css
+COPY --from=frontend /build/src/rhiza_agents/static/ src/rhiza_agents/static/
 
 # Install dependencies (include sandbox and vectorstore extras)
 RUN uv sync --frozen --no-dev --extra sandbox --extra vectorstore
