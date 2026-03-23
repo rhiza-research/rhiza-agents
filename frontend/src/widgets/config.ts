@@ -23,6 +23,8 @@ export class ConfigWidget extends Widget {
     private _agentList!: HTMLDivElement;
     private _detail!: HTMLDivElement;
     private _vectorstoreList!: HTMLDivElement;
+    private _mcpList!: HTMLDivElement;
+    private _mcpServers: any[] = [];
 
     constructor() {
         super();
@@ -79,6 +81,22 @@ export class ConfigWidget extends Widget {
         addVsBtn.addEventListener('click', () => this._showNewVsModal());
         sidebar.appendChild(addVsBtn);
 
+        const mcpTitle = document.createElement('h3');
+        mcpTitle.className = 'config-sidebar-title';
+        mcpTitle.style.marginTop = '1.5rem';
+        mcpTitle.textContent = 'MCP Servers';
+        sidebar.appendChild(mcpTitle);
+
+        this._mcpList = document.createElement('div');
+        this._mcpList.className = 'vectorstore-list';
+        sidebar.appendChild(this._mcpList);
+
+        const addMcpBtn = document.createElement('button');
+        addMcpBtn.className = 'config-btn';
+        addMcpBtn.textContent = '+ Add MCP Server';
+        addMcpBtn.addEventListener('click', () => this._showNewMcpModal());
+        sidebar.appendChild(addMcpBtn);
+
         const settingsTitle = document.createElement('h3');
         settingsTitle.className = 'config-sidebar-title';
         settingsTitle.style.marginTop = '1.5rem';
@@ -129,7 +147,7 @@ export class ConfigWidget extends Widget {
     }
 
     private async _loadAgents(): Promise<void> {
-        await Promise.all([this._loadToolTypes(), this._loadVectorStores()]);
+        await Promise.all([this._loadToolTypes(), this._loadVectorStores(), this._loadMcpServers()]);
         const res = await fetch('/api/agents');
         if (!res.ok) return;
         this._agents = await res.json();
@@ -259,7 +277,7 @@ export class ConfigWidget extends Widget {
                             const disabled = !t.available ? 'disabled' : '';
                             const cls = !t.available ? 'tool-checkbox disabled' : 'tool-checkbox';
                             const badge = !t.available ? ' <span class="coming-soon">Not configured</span>' : '';
-                            return `<label class="${cls}"><input type="checkbox" value="${escapeAttr(id)}" ${checked} ${disabled}> ${escapeHtml(id)}${badge}</label>`;
+                            return `<label class="${cls}"><input type="checkbox" value="${escapeAttr(id)}" ${checked} ${disabled}> ${escapeHtml(t.name)}${badge}</label>`;
                         }).join('')}
                     </div>
                 </div>
@@ -406,6 +424,124 @@ export class ConfigWidget extends Widget {
 
         await fetch(`/api/vectorstores/${vsId}/upload`, { method: 'POST', body: formData });
         await this._loadVectorStores();
+        if (this._selectedAgentId) this._selectAgent(this._selectedAgentId);
+    }
+
+    // --- MCP Servers ---
+
+    private async _loadMcpServers(): Promise<void> {
+        const res = await fetch('/api/mcp-servers');
+        if (!res.ok) return;
+        this._mcpServers = await res.json();
+        this._renderMcpList();
+    }
+
+    private _renderMcpList(): void {
+        this._mcpList.innerHTML = '';
+        for (const server of this._mcpServers) {
+            const item = document.createElement('div');
+            item.className = 'vs-list-item';
+
+            const info = document.createElement('div');
+            info.className = 'vs-list-info';
+            const name = document.createElement('span');
+            name.className = 'vs-list-name';
+            name.textContent = server.name;
+            info.appendChild(name);
+            const meta = document.createElement('span');
+            meta.className = 'vs-list-count';
+            meta.textContent = `${server.tool_count} tools` + (server.system ? ' · system' : '');
+            info.appendChild(meta);
+            item.appendChild(info);
+
+            const actions = document.createElement('div');
+            actions.className = 'vs-list-actions';
+
+            const testBtn = document.createElement('button');
+            testBtn.className = 'config-btn-sm';
+            testBtn.textContent = 'Test';
+            testBtn.addEventListener('click', () => this._testMcpServer(server.id, testBtn));
+            actions.appendChild(testBtn);
+
+            if (!server.system) {
+                const delBtn = document.createElement('button');
+                delBtn.className = 'config-btn-sm config-btn-danger';
+                delBtn.textContent = '\u00d7';
+                delBtn.title = 'Delete';
+                delBtn.addEventListener('click', () => this._deleteMcpServer(server));
+                actions.appendChild(delBtn);
+            }
+
+            item.appendChild(actions);
+            this._mcpList.appendChild(item);
+        }
+    }
+
+    private async _testMcpServer(serverId: string, btn: HTMLButtonElement): Promise<void> {
+        btn.textContent = 'Testing...';
+        btn.disabled = true;
+        try {
+            const res = await fetch(`/api/mcp-servers/${serverId}/test`, { method: 'POST' });
+            const data = await res.json();
+            btn.textContent = data.connected ? `${data.tool_count} tools` : 'Failed';
+            setTimeout(() => { btn.textContent = 'Test'; btn.disabled = false; }, 2000);
+        } catch {
+            btn.textContent = 'Error';
+            setTimeout(() => { btn.textContent = 'Test'; btn.disabled = false; }, 2000);
+        }
+    }
+
+    private _showNewMcpModal(): void {
+        this._detail.innerHTML = `
+            <div class="config-form">
+                <h2>Add MCP Server</h2>
+                <div class="form-group">
+                    <label for="mcp-name">Name</label>
+                    <input type="text" id="mcp-name" placeholder="My MCP Server">
+                </div>
+                <div class="form-group">
+                    <label for="mcp-url">URL (SSE endpoint)</label>
+                    <input type="text" id="mcp-url" placeholder="http://localhost:8000/sse">
+                </div>
+                <div class="form-group">
+                    <label for="mcp-transport">Transport</label>
+                    <select id="mcp-transport">
+                        <option value="sse" selected>SSE</option>
+                    </select>
+                </div>
+                <div class="config-form-actions">
+                    <button id="cancel-mcp-btn" class="config-btn">Cancel</button>
+                    <button id="save-mcp-btn" class="config-btn config-btn-primary">Add Server</button>
+                </div>
+            </div>
+        `;
+
+        this._detail.querySelector('#cancel-mcp-btn')!.addEventListener('click', () => this._renderPlaceholder());
+        this._detail.querySelector('#save-mcp-btn')!.addEventListener('click', async () => {
+            const name = (this._detail.querySelector('#mcp-name') as HTMLInputElement).value.trim();
+            const url = (this._detail.querySelector('#mcp-url') as HTMLInputElement).value.trim();
+            const transport = (this._detail.querySelector('#mcp-transport') as HTMLSelectElement).value;
+            if (!name || !url) return;
+
+            const res = await fetch('/api/mcp-servers', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name, url, transport }),
+            });
+            if (!res.ok) return;
+            await this._loadMcpServers();
+            await this._loadToolTypes();
+            if (this._selectedAgentId) this._selectAgent(this._selectedAgentId);
+            this._renderPlaceholder();
+        });
+    }
+
+    private async _deleteMcpServer(server: any): Promise<void> {
+        if (!confirm(`Delete MCP server "${server.name}"?`)) return;
+        const res = await fetch(`/api/mcp-servers/${server.id}`, { method: 'DELETE' });
+        if (!res.ok) return;
+        await this._loadMcpServers();
+        await this._loadToolTypes();
         if (this._selectedAgentId) this._selectAgent(this._selectedAgentId);
     }
 }

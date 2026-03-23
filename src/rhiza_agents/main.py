@@ -93,7 +93,8 @@ config: Config = None
 db: Database = None
 checkpointer = None
 oauth = None
-mcp_tools: list = []
+mcp_tools: list = []  # Flat list of all system MCP tools (for backwards compat)
+mcp_tools_by_server: dict[str, list] = {}  # server_id -> tools
 vectorstore_manager = None
 _agent_names: dict[str, str] = {}  # agent_id -> display name
 _tool_to_agent: dict[str, str] = {}  # tool_name -> agent_id
@@ -103,7 +104,16 @@ _static_version = str(int(time.time()))  # Cache-busting for static assets
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler."""
-    global config, db, checkpointer, oauth, mcp_tools, vectorstore_manager, _agent_names, _tool_to_agent
+    global \
+        config, \
+        db, \
+        checkpointer, \
+        oauth, \
+        mcp_tools, \
+        mcp_tools_by_server, \
+        vectorstore_manager, \
+        _agent_names, \
+        _tool_to_agent
 
     config = Config.from_env()
     _setup_logging(config.log_level, config.chat_event_logging)
@@ -114,17 +124,21 @@ async def lifespan(app: FastAPI):
     await db.connect()
     logger.info("Connected to database")
 
-    mcp_client = create_mcp_client(config.mcp_server_url)
-    for attempt in range(10):
-        try:
-            mcp_tools = await mcp_client.get_tools()
-            break
-        except Exception:
-            if attempt == 9:
-                raise
-            logger.info("MCP server not ready, retrying in %ds...", attempt + 1)
-            await asyncio.sleep(attempt + 1)
-    logger.info("Loaded %d MCP tools", len(mcp_tools))
+    # Seed system MCP server into database and load tools
+    if config.mcp_server_url:
+        await db.upsert_system_mcp_server("sheerwater", "Sheerwater", config.mcp_server_url, "sse")
+        mcp_client = create_mcp_client({"sheerwater": {"url": config.mcp_server_url, "transport": "sse"}})
+        for attempt in range(10):
+            try:
+                mcp_tools = await mcp_client.get_tools()
+                break
+            except Exception:
+                if attempt == 9:
+                    raise
+                logger.info("MCP server not ready, retrying in %ds...", attempt + 1)
+                await asyncio.sleep(attempt + 1)
+        mcp_tools_by_server["sheerwater"] = list(mcp_tools)
+        logger.info("Loaded %d MCP tools from sheerwater", len(mcp_tools))
 
     # Initialize vector store manager if chroma_persist_dir is set
     if config.chroma_persist_dir:
@@ -161,6 +175,34 @@ async def lifespan(app: FastAPI):
         cleanup_task.cancel()
 
     await db.disconnect()
+
+
+# Cache of user MCP tools: server_id -> tools list
+_user_mcp_cache: dict[str, list] = {}
+
+
+async def get_mcp_tools_for_user(user_id: str) -> tuple[dict[str, list], dict[str, str]]:
+    """Get MCP tools and server names for a user (system + user servers).
+
+    Returns (tools_by_server, server_names) tuple.
+    """
+    from .agents.tools.mcp import load_mcp_tools_for_server
+
+    result = dict(mcp_tools_by_server)  # Start with system servers
+    names: dict[str, str] = {}
+    user_servers = await db.list_mcp_servers(user_id)
+    for server in user_servers:
+        sid = server["id"]
+        names[sid] = server["name"]
+        if server.get("user_id") is None:
+            continue  # System server tools already in result
+        if not server.get("enabled", True):
+            continue
+        if sid not in _user_mcp_cache:
+            _user_mcp_cache[sid] = await load_mcp_tools_for_server(server["url"], server.get("transport", "sse"))
+        if _user_mcp_cache[sid]:
+            result[sid] = _user_mcp_cache[sid]
+    return result, names
 
 
 app = FastAPI(title="Rhiza Agents", lifespan=lifespan)
@@ -500,19 +542,27 @@ async def stream_chat_message(
             chat_event_logger.info(event, extra={"conversation_id": conversation_id, "user_id": user_id, **data})
 
     _log_event("graph_build", status="start")
+    user_mcp, mcp_names = await get_mcp_tools_for_user(user_id)
     graph = await get_agent_graph(
         mcp_tools,
         checkpointer,
         user_id=user_id,
         db=db,
         vectorstore_manager=vectorstore_manager,
+        mcp_tools_by_server=user_mcp,
+        mcp_server_names=mcp_names,
     )
     effective = await _get_effective_configs(user_id)
     agent_names, tool_to_agent = _build_name_mappings(effective)
     # Map the langgraph default node name "agent" to the supervisor's display name
     supervisor_name = next((c.name for c in effective if c.type == "supervisor"), "Supervisor")
     agent_names["agent"] = supervisor_name
-    _log_event("graph_build", status="ready", agents=", ".join(dict.fromkeys(agent_names.values())))
+    _log_event(
+        "graph_build",
+        status="ready",
+        agents=", ".join(dict.fromkeys(agent_names.values())),
+        mcp_servers={mcp_names.get(k, k): len(v) for k, v in user_mcp.items()},
+    )
 
     def _resolve_tool_agent(tool_name: str, fallback: str | None) -> str | None:
         """Resolve agent display name from tool name via tool_to_agent mapping."""
@@ -735,12 +785,15 @@ async def resume_chat(
     if not conversation:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
+    user_mcp, mcp_names = await get_mcp_tools_for_user(user_id)
     graph = await get_agent_graph(
         mcp_tools,
         checkpointer,
         user_id=user_id,
         db=db,
         vectorstore_manager=vectorstore_manager,
+        mcp_tools_by_server=user_mcp,
+        mcp_server_names=mcp_names,
     )
     effective = await _get_effective_configs(user_id)
     agent_names, tool_to_agent = _build_name_mappings(effective)
@@ -974,12 +1027,133 @@ async def list_tools(user: dict = Depends(require_auth)):
 
 
 @app.get("/api/tool-types")
-async def list_tool_types(user: dict = Depends(require_auth)):
+async def list_tool_types(request: Request, user: dict = Depends(require_auth)):
     """List available tool types and their availability status."""
-    return [
-        {"id": "mcp:sheerwater", "name": "Sheerwater MCP Tools", "available": len(mcp_tools) > 0},
+    user_id = get_user_id(request)
+    tool_types = [
         {"id": "sandbox:daytona", "name": "Code Sandbox (Daytona)", "available": is_sandbox_available()},
     ]
+    # Add all MCP servers (system + user) as tool types
+    servers = await db.list_mcp_servers(user_id)
+    for server in servers:
+        sid = server["id"]
+        tool_types.append(
+            {
+                "id": f"mcp:{sid}",
+                "name": f"{server['name']} MCP Tools",
+                "available": sid in mcp_tools_by_server or sid in _user_mcp_cache,
+            }
+        )
+    return tool_types
+
+
+# --- MCP Server API Routes ---
+
+
+@app.get("/api/mcp-servers")
+async def list_mcp_servers(request: Request, user: dict = Depends(require_auth)):
+    """List all MCP servers visible to the user."""
+    user_id = get_user_id(request)
+    servers = await db.list_mcp_servers(user_id)
+    result = []
+    for s in servers:
+        sid = s["id"]
+        tool_count = len(mcp_tools_by_server.get(sid, [])) or len(_user_mcp_cache.get(sid, []))
+        result.append(
+            {
+                "id": sid,
+                "name": s["name"],
+                "url": s["url"],
+                "transport": s.get("transport", "sse"),
+                "enabled": bool(s.get("enabled", True)),
+                "system": s.get("user_id") is None,
+                "tool_count": tool_count,
+            }
+        )
+    return result
+
+
+class MCPServerCreate(BaseModel):
+    name: str
+    url: str
+    transport: str = "sse"
+
+
+@app.post("/api/mcp-servers")
+async def create_mcp_server(request: Request, body: MCPServerCreate, user: dict = Depends(require_auth)):
+    """Add a user MCP server."""
+    user_id = get_user_id(request)
+    import uuid
+
+    server_id = f"user-{uuid.uuid4().hex[:12]}"
+    server = await db.create_mcp_server(server_id, user_id, body.name, body.url, body.transport)
+    # Invalidate graph cache for this user
+    invalidate_graph_cache()
+    return server
+
+
+class MCPServerUpdate(BaseModel):
+    name: str | None = None
+    url: str | None = None
+    transport: str | None = None
+    enabled: bool | None = None
+
+
+@app.put("/api/mcp-servers/{server_id}")
+async def update_mcp_server(
+    request: Request, server_id: str, body: MCPServerUpdate, user: dict = Depends(require_auth)
+):
+    """Update a user MCP server."""
+    server = await db.get_mcp_server(server_id)
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+    if server.get("user_id") is None:
+        raise HTTPException(status_code=403, detail="Cannot modify system servers")
+    if server.get("user_id") != get_user_id(request):
+        raise HTTPException(status_code=403, detail="Not your server")
+
+    fields = {k: v for k, v in body.model_dump().items() if v is not None}
+    await db.update_mcp_server(server_id, **fields)
+    # Clear cached tools for this server
+    _user_mcp_cache.pop(server_id, None)
+    invalidate_graph_cache()
+    return {"ok": True}
+
+
+@app.delete("/api/mcp-servers/{server_id}")
+async def delete_mcp_server(request: Request, server_id: str, user: dict = Depends(require_auth)):
+    """Delete a user MCP server."""
+    server = await db.get_mcp_server(server_id)
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+    if server.get("user_id") is None:
+        raise HTTPException(status_code=403, detail="Cannot delete system servers")
+    if server.get("user_id") != get_user_id(request):
+        raise HTTPException(status_code=403, detail="Not your server")
+
+    await db.delete_mcp_server(server_id)
+    _user_mcp_cache.pop(server_id, None)
+    invalidate_graph_cache()
+    return {"ok": True}
+
+
+@app.post("/api/mcp-servers/{server_id}/test")
+async def test_mcp_server(request: Request, server_id: str, user: dict = Depends(require_auth)):
+    """Test connectivity to an MCP server and return its tools."""
+    from .agents.tools.mcp import load_mcp_tools_for_server
+
+    server = await db.get_mcp_server(server_id)
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+
+    tools = await load_mcp_tools_for_server(server["url"], server.get("transport", "sse"))
+    if tools:
+        _user_mcp_cache[server_id] = tools
+    return {
+        "connected": len(tools) > 0,
+        "tool_count": len(tools),
+        "tools": [{"name": t.name, "description": t.description} for t in tools],
+    }
 
 
 # --- Vector Store API Routes ---
@@ -1125,12 +1299,15 @@ async def get_conversation_messages(request: Request, conversation_id: str, user
 
     # Use the conversation owner's configs for agent name resolution
     owner_id = conversation.get("user_id", user_id)
+    user_mcp, mcp_names = await get_mcp_tools_for_user(owner_id)
     graph = await get_agent_graph(
         mcp_tools,
         checkpointer,
         user_id=owner_id,
         db=db,
         vectorstore_manager=vectorstore_manager,
+        mcp_tools_by_server=user_mcp,
+        mcp_server_names=mcp_names,
     )
     effective = await _get_effective_configs(owner_id)
     agent_names, tool_to_agent_map = _build_name_mappings(effective)
@@ -1151,12 +1328,15 @@ async def list_conversation_files(request: Request, conversation_id: str, user: 
     if not conversation:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
+    user_mcp, mcp_names = await get_mcp_tools_for_user(user_id)
     graph = await get_agent_graph(
         mcp_tools,
         checkpointer,
         user_id=user_id,
         db=db,
         vectorstore_manager=vectorstore_manager,
+        mcp_tools_by_server=user_mcp,
+        mcp_server_names=mcp_names,
     )
     state = await graph.aget_state({"configurable": {"thread_id": conversation_id}})
     files = state.values.get("files", {})
@@ -1186,12 +1366,15 @@ async def get_conversation_file(
     if not conversation:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
+    user_mcp, mcp_names = await get_mcp_tools_for_user(user_id)
     graph = await get_agent_graph(
         mcp_tools,
         checkpointer,
         user_id=user_id,
         db=db,
         vectorstore_manager=vectorstore_manager,
+        mcp_tools_by_server=user_mcp,
+        mcp_server_names=mcp_names,
     )
     state = await graph.aget_state({"configurable": {"thread_id": conversation_id}})
     files = state.values.get("files", {})

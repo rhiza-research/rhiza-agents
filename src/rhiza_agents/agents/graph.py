@@ -102,17 +102,34 @@ def _build_supervisor_middleware() -> list:
     ]
 
 
-def _config_hash(configs: list[AgentConfig]) -> str:
-    data = json.dumps([c.model_dump() for c in configs], sort_keys=True)
+def _config_hash(configs: list[AgentConfig], mcp_server_ids: list[str] | None = None) -> str:
+    data = json.dumps(
+        {
+            "configs": [c.model_dump() for c in configs],
+            "mcp_servers": sorted(mcp_server_ids or []),
+        },
+        sort_keys=True,
+    )
     return hashlib.sha256(data.encode()).hexdigest()
 
 
-async def _resolve_tools(config: AgentConfig, mcp_tools: list, vectorstore_manager=None, db=None) -> list:
+async def _resolve_tools(
+    config: AgentConfig,
+    mcp_tools: list,
+    vectorstore_manager=None,
+    db=None,
+    mcp_tools_by_server: dict[str, list] | None = None,
+) -> list:
     """Resolve tool identifiers to actual tool objects."""
     tools = []
+    all_mcp = mcp_tools_by_server or {}
     for tool_id in config.tools:
-        if tool_id == "mcp:sheerwater":
-            tools.extend(mcp_tools)
+        if tool_id.startswith("mcp:"):
+            server_id = tool_id[4:]
+            if server_id in all_mcp:
+                tools.extend(all_mcp[server_id])
+            else:
+                logger.info("MCP server %s not loaded, skipping", server_id)
         elif tool_id == "sandbox:daytona":
             from .tools.files import run_file, write_file
             from .tools.sandbox import execute_python_code, is_sandbox_available
@@ -151,6 +168,8 @@ async def build_graph(
     checkpointer,
     vectorstore_manager=None,
     db=None,
+    mcp_tools_by_server: dict[str, list] | None = None,
+    mcp_server_names: dict[str, str] | None = None,
 ):
     """Build a compiled LangGraph StateGraph from AgentConfig objects."""
     supervisor_config = None
@@ -167,9 +186,20 @@ async def build_graph(
     if not supervisor_config:
         raise ValueError("No supervisor config found")
 
+    # Log the full graph configuration for debugging
+    all_mcp = mcp_tools_by_server or {}
+    logger.info(
+        "Building graph: agents=%s, mcp_servers=%s (%s), vectorstore_manager=%s",
+        [c.id for c in configs if c.enabled],
+        list(all_mcp.keys()),
+        {k: len(v) for k, v in all_mcp.items()},
+        vectorstore_manager is not None,
+    )
+
     worker_agents = []
+    agent_tool_descriptions = []
     for wc in worker_configs:
-        tools = await _resolve_tools(wc, mcp_tools, vectorstore_manager, db)
+        tools = await _resolve_tools(wc, mcp_tools, vectorstore_manager, db, mcp_tools_by_server)
         middleware = _build_worker_middleware(tools)
         model = ChatAnthropic(
             model=wc.model,
@@ -185,7 +215,37 @@ async def build_graph(
             state_schema=AgentGraphState,
         )
         worker_agents.append(worker)
-        logger.info("Created worker agent: %s (%d tools, %d middleware)", wc.id, len(tools), len(middleware))
+
+        tool_names = [getattr(t, "name", "?") for t in tools]
+        logger.info(
+            "Created worker: %s model=%s tools=[%s] vectorstores=%s middleware=%d",
+            wc.id,
+            wc.model,
+            ", ".join(tool_names),
+            wc.vectorstore_ids or [],
+            len(middleware),
+        )
+        if tool_names:
+            agent_tool_descriptions.append(f"- {wc.id} ({wc.name}): tools=[{', '.join(tool_names)}]")
+
+    # Build supervisor prompt with dynamic tool info so it knows which agent has what
+    supervisor_prompt = supervisor_config.system_prompt
+    if agent_tool_descriptions:
+        supervisor_prompt += "\n\nCurrent agent tool assignments:\n" + "\n".join(agent_tool_descriptions)
+
+    # Include MCP server names and their tools so supervisor can answer questions about them
+    if mcp_tools_by_server:
+        names = mcp_server_names or {}
+        mcp_info = []
+        for server_id, tools in mcp_tools_by_server.items():
+            display = names.get(server_id, server_id)
+            tool_names = [getattr(t, "name", "?") for t in tools]
+            mcp_info.append(f'- "{display}": tools=[{", ".join(tool_names)}]')
+        supervisor_prompt += "\n\nConnected MCP servers:\n" + "\n".join(mcp_info)
+        supervisor_prompt += (
+            "\n\nIf a user asks about MCP servers or their tools,"
+            " answer directly from this information. Do not delegate."
+        )
 
     supervisor = create_supervisor(
         model=ChatAnthropic(
@@ -194,7 +254,7 @@ async def build_graph(
             thinking={"type": "enabled", "budget_tokens": 10000},
         ),
         agents=worker_agents,
-        prompt=supervisor_config.system_prompt,
+        prompt=supervisor_prompt,
         state_schema=SupervisorGraphState,
         output_mode="full_history",
         add_handoff_back_messages=True,
@@ -211,11 +271,15 @@ async def get_or_build_graph(
     checkpointer,
     vectorstore_manager=None,
     db=None,
+    mcp_tools_by_server: dict[str, list] | None = None,
+    mcp_server_names: dict[str, str] | None = None,
 ):
     """Get a cached graph or build a new one."""
-    h = _config_hash(configs)
+    h = _config_hash(configs, list((mcp_tools_by_server or {}).keys()))
     if h not in _graph_cache:
-        _graph_cache[h] = await build_graph(configs, mcp_tools, checkpointer, vectorstore_manager, db)
+        _graph_cache[h] = await build_graph(
+            configs, mcp_tools, checkpointer, vectorstore_manager, db, mcp_tools_by_server, mcp_server_names
+        )
     return _graph_cache[h]
 
 

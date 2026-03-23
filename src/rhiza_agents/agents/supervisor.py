@@ -15,6 +15,8 @@ async def get_agent_graph(
     user_id: str | None = None,
     db: Database | None = None,
     vectorstore_manager=None,
+    mcp_tools_by_server: dict[str, list] | None = None,
+    mcp_server_names: dict[str, str] | None = None,
 ):
     """Get the compiled agent graph.
 
@@ -31,4 +33,6 @@ async def get_agent_graph(
         configs = user_configs
     else:
         configs = get_default_configs()
-    return await get_or_build_graph(configs, mcp_tools, checkpointer, vectorstore_manager, db)
+    return await get_or_build_graph(
+        configs, mcp_tools, checkpointer, vectorstore_manager, db, mcp_tools_by_server, mcp_server_names
+    )

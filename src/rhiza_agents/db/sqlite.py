@@ -63,6 +63,19 @@ class Database:
         )
 
         await self.database.execute("""
+            CREATE TABLE IF NOT EXISTS mcp_servers (
+                id TEXT PRIMARY KEY,
+                user_id TEXT,
+                name TEXT NOT NULL,
+                url TEXT NOT NULL,
+                transport TEXT NOT NULL DEFAULT 'sse',
+                enabled BOOLEAN DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await self.database.execute("CREATE INDEX IF NOT EXISTS idx_mcp_servers_user_id ON mcp_servers(user_id)")
+
+        await self.database.execute("""
             CREATE TABLE IF NOT EXISTS user_settings (
                 user_id TEXT NOT NULL,
                 key TEXT NOT NULL,
@@ -270,4 +283,63 @@ class Database:
                 "value": value,
                 "updated_at": datetime.now(UTC),
             },
+        )
+
+    # --- MCP Servers ---
+
+    async def list_mcp_servers(self, user_id: str) -> list[dict]:
+        """List all MCP servers visible to a user (system + user-owned)."""
+        rows = await self.database.fetch_all(
+            "SELECT * FROM mcp_servers WHERE user_id IS NULL OR user_id = :user_id ORDER BY created_at",
+            {"user_id": user_id},
+        )
+        return [dict(row._mapping) for row in rows]
+
+    async def get_mcp_server(self, server_id: str) -> dict | None:
+        """Get an MCP server by ID."""
+        row = await self.database.fetch_one(
+            "SELECT * FROM mcp_servers WHERE id = :id",
+            {"id": server_id},
+        )
+        return dict(row._mapping) if row else None
+
+    async def create_mcp_server(
+        self, server_id: str, user_id: str | None, name: str, url: str, transport: str = "sse"
+    ) -> dict:
+        """Create an MCP server entry."""
+        await self.database.execute(
+            """INSERT INTO mcp_servers (id, user_id, name, url, transport)
+               VALUES (:id, :user_id, :name, :url, :transport)""",
+            {"id": server_id, "user_id": user_id, "name": name, "url": url, "transport": transport},
+        )
+        return {"id": server_id, "user_id": user_id, "name": name, "url": url, "transport": transport, "enabled": True}
+
+    async def update_mcp_server(self, server_id: str, **fields) -> bool:
+        """Update fields on an MCP server. Returns True if found."""
+        if not fields:
+            return False
+        sets = ", ".join(f"{k} = :{k}" for k in fields)
+        fields["id"] = server_id
+        result = await self.database.execute(
+            f"UPDATE mcp_servers SET {sets} WHERE id = :id",
+            fields,
+        )
+        return result > 0 if result else True
+
+    async def delete_mcp_server(self, server_id: str) -> bool:
+        """Delete an MCP server. Returns True if found."""
+        result = await self.database.execute(
+            "DELETE FROM mcp_servers WHERE id = :id AND user_id IS NOT NULL",
+            {"id": server_id},
+        )
+        return result > 0 if result else True
+
+    async def upsert_system_mcp_server(self, server_id: str, name: str, url: str, transport: str = "sse"):
+        """Insert or update a system-level MCP server."""
+        await self.database.execute(
+            """INSERT INTO mcp_servers (id, user_id, name, url, transport)
+               VALUES (:id, NULL, :name, :url, :transport)
+               ON CONFLICT (id) DO UPDATE SET
+                   name = :name, url = :url, transport = :transport""",
+            {"id": server_id, "name": name, "url": url, "transport": transport},
         )
