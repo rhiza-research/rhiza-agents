@@ -259,6 +259,40 @@ def _build_name_mappings(configs: list[AgentConfig]) -> tuple[dict[str, str], di
     return agent_names, tool_to_agent
 
 
+def _resolve_agent_name(
+    agent_names: dict[str, str],
+    node_name: str | None = None,
+    ns: list | tuple = (),
+    fallback: str | None = None,
+) -> str | None:
+    """Resolve an agent display name from a node name or namespace.
+
+    This is the single source of truth for agent name resolution, used by both
+    the streaming path and the message loading path.
+
+    Args:
+        agent_names: mapping of agent_id -> display_name
+        node_name: LangGraph node name (e.g. "research_assistant", "agent")
+        ns: subgraph namespace tuple/list (e.g. ("research_assistant:uuid",))
+        fallback: fallback display name if nothing resolves
+
+    Returns:
+        Resolved display name, or fallback
+    """
+    # Try namespace first — strip UUID suffixes
+    # e.g. "research_assistant:76a5e5c1-..." -> "research_assistant"
+    for ns_part in ns:
+        bare = ns_part.split(":")[0] if ":" in str(ns_part) else str(ns_part)
+        if bare in agent_names:
+            return agent_names[bare]
+
+    # Try node name directly
+    if node_name and node_name in agent_names:
+        return agent_names[node_name]
+
+    return fallback
+
+
 def _process_messages(raw_messages, agent_names=None, tool_to_agent_map=None):
     """Process raw LangGraph messages into a single ordered list.
 
@@ -266,7 +300,6 @@ def _process_messages(raw_messages, agent_names=None, tool_to_agent_map=None):
     AI responses include "agent_name" when known. Handoff messages are filtered out.
     """
     names = agent_names or _agent_names
-    t2a = tool_to_agent_map or _tool_to_agent
     messages = []
     current_agent = None  # track which worker agent is active
 
@@ -283,16 +316,16 @@ def _process_messages(raw_messages, agent_names=None, tool_to_agent_map=None):
             text, reasoning = _extract_content_blocks(msg.content)
             tool_calls = msg.tool_calls or []
 
-            # Track current agent from tool calls
+            agent_name = _resolve_agent_name(names, node_name=msg.name, fallback=names.get(current_agent))
+
+            # Track current agent from explicit transfers only.
+            # Tool-to-agent mapping is NOT used here — just because the supervisor
+            # calls a tool belonging to a worker doesn't mean the worker is active.
             for tc in tool_calls:
                 if tc["name"].startswith(_TRANSFER_PREFIX):
                     agent_id = tc["name"][len(_TRANSFER_PREFIX) :]
                     if agent_id in names:
                         current_agent = agent_id
-                elif tc["name"] in t2a:
-                    current_agent = t2a[tc["name"]]
-
-            agent_name = names.get(msg.name) or names.get(current_agent)
 
             if reasoning:
                 messages.append({"type": "thinking", "content": reasoning})
@@ -520,21 +553,13 @@ async def stream_chat_message(
                         if not text and not reasoning:
                             continue
 
-                        # Resolve agent display name from subgraph namespace or metadata.
-                        # ns may be ["code_runner", "model"] — find the first
-                        # element that maps to a known agent name.
-                        # Internal node names like "model" or "tools" are ignored —
-                        # if we can't resolve a known agent, keep the current one.
                         node = metadata.get("lc_agent_name") or metadata.get("langgraph_node", "")
                         ns = chunk.get("ns", [])
-                        agent_id = None
-                        for ns_part in ns:
-                            if ns_part in agent_names:
-                                agent_id = ns_part
-                                break
-                        if not agent_id:
-                            agent_id = node if node in agent_names else current_agent
-                        display = agent_names.get(agent_id, current_agent_display)
+                        display = _resolve_agent_name(
+                            agent_names, node_name=node, ns=ns, fallback=current_agent_display
+                        )
+                        # Find the agent_id for tracking (reverse lookup)
+                        agent_id = next((k for k, v in agent_names.items() if v == display), current_agent)
                         if agent_id and agent_id != current_agent:
                             _flush_accumulated()
                             current_agent = agent_id
@@ -572,15 +597,8 @@ async def stream_chat_message(
                         # Extract tool call/result info from node updates.
                         # Deduplicate by tool call ID since subgraphs=True
                         # surfaces the same event from both subgraph and parent.
-                        # Resolve the agent from the subgraph namespace.
-                        # ns may be ["code_runner"] or ["code_runner", "model"] —
-                        # find the first element that maps to a known agent name.
                         ns = chunk.get("ns", [])
-                        update_agent_display = current_agent_display
-                        for ns_part in ns:
-                            if ns_part in agent_names:
-                                update_agent_display = agent_names[ns_part]
-                                break
+                        update_agent_display = _resolve_agent_name(agent_names, ns=ns, fallback=current_agent_display)
 
                         for _node_name, node_data in update_data.items():
                             if not isinstance(node_data, dict):
@@ -791,21 +809,10 @@ async def resume_chat(
                     if not text and not reasoning:
                         continue
 
-                    # Resolve agent display name from subgraph namespace or metadata.
-                    # ns may be ["code_runner", "model"] — find the first
-                    # element that maps to a known agent name.
-                    # Internal node names like "model" or "tools" are ignored —
-                    # if we can't resolve a known agent, keep the current one.
                     node = metadata.get("lc_agent_name") or metadata.get("langgraph_node", "")
                     ns = chunk.get("ns", [])
-                    agent_id = None
-                    for ns_part in ns:
-                        if ns_part in agent_names:
-                            agent_id = ns_part
-                            break
-                    if not agent_id:
-                        agent_id = node if node in agent_names else current_agent
-                    display = agent_names.get(agent_id, current_agent_display)
+                    display = _resolve_agent_name(agent_names, node_name=node, ns=ns, fallback=current_agent_display)
+                    agent_id = next((k for k, v in agent_names.items() if v == display), current_agent)
                     if agent_id and agent_id != current_agent:
                         _flush_accumulated()
                         current_agent = agent_id
@@ -835,13 +842,8 @@ async def resume_chat(
                     # Extract tool call/result info from node updates.
                     # Deduplicate by tool call ID since subgraphs=True
                     # surfaces the same event from both subgraph and parent.
-                    # Resolve the agent from the subgraph namespace.
                     ns = chunk.get("ns", [])
-                    update_agent_display = current_agent_display
-                    for ns_part in ns:
-                        if ns_part in agent_names:
-                            update_agent_display = agent_names[ns_part]
-                            break
+                    update_agent_display = _resolve_agent_name(agent_names, ns=ns, fallback=current_agent_display)
 
                     for _node_name, node_data in update_data.items():
                         if not isinstance(node_data, dict):
