@@ -30,16 +30,8 @@ def create_retrieval_tool(
     # Sanitize display_name for use as tool name (must be valid identifier)
     tool_name = "search_" + "".join(c if c.isalnum() or c == "_" else "_" for c in display_name.lower())
 
-    @tool(name=tool_name, description=f"Search the '{display_name}' knowledge base. {description}")
-    def search_collection(query: str) -> str:
-        """Search for relevant information in the knowledge base.
-
-        Args:
-            query: The search query describing what information you need.
-
-        Returns:
-            Relevant text passages from the knowledge base.
-        """
+    def search_fn(query: str) -> str:
+        """Search for relevant information in the knowledge base."""
         results = manager.query(collection_name, query, n_results=5)
 
         if not results["documents"] or not results["documents"][0]:
@@ -52,4 +44,8 @@ def create_retrieval_tool(
 
         return f"Found {len(passages)} relevant passages:\n\n" + "\n\n---\n\n".join(passages)
 
-    return search_collection
+    # Set function name before decorating so @tool uses it as the tool name
+    search_fn.__name__ = tool_name
+    search_fn.__doc__ = f"Search the '{display_name}' knowledge base. {description}"
+
+    return tool(search_fn)
