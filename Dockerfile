@@ -1,3 +1,15 @@
+FROM node:23-alpine AS frontend
+
+WORKDIR /build
+COPY frontend/package.json frontend/package-lock.json frontend/
+COPY frontend/tsconfig.json frontend/
+COPY frontend/src frontend/src
+# Create output directory where esbuild expects it
+RUN mkdir -p src/rhiza_agents/static
+WORKDIR /build/frontend
+RUN npm ci && npm run build
+
+
 FROM python:3.12-slim
 
 # Accept git SHA and build timestamp as build arguments
@@ -12,6 +24,10 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 # Copy project files
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
+
+# Copy frontend build output
+COPY --from=frontend /build/src/rhiza_agents/static/app.js src/rhiza_agents/static/app.js
+COPY --from=frontend /build/src/rhiza_agents/static/app.css src/rhiza_agents/static/app.css
 
 # Install dependencies (include sandbox and vectorstore extras)
 RUN uv sync --frozen --no-dev --extra sandbox --extra vectorstore
