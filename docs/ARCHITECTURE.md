@@ -2,29 +2,36 @@
 
 ## Overview
 
-rhiza-agents is a multi-agent chat platform built on LangGraph. Users log in, interact with a team of AI agents, and can customize agent behavior (prompts, tools, knowledge bases) through the UI. The system uses a supervisor agent that routes user messages to specialized sub-agents based on intent.
+rhiza-agents is a multi-agent chat platform built on LangGraph. Users log in, interact with a team of AI agents, and can customize agent behavior (prompts, tools, MCP servers, knowledge bases) through a JupyterLab-style panel UI. The system uses a supervisor agent that routes user messages to specialized sub-agents based on intent.
 
 ## System Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                        Web Browser                           │
-│  Chat UI  │  Activity Panel  │  File Viewer  │  Config  │  Auth │
-└────────────────────────┬────────────────────────────────────┘
-                     │ HTTP
-┌────────────────────▼────────────────────────────────┐
-│              FastAPI Application                     │
-│                                                      │
-│  Routes: /api/chat, /api/agents, /config, etc.       │
-│  Auth: Keycloak OIDC via authlib                     │
-│  Session: itsdangerous signed cookies                │
-└──┬──────────┬──────────┬──────────┬─────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│                    Web Browser (Lumino)                    │
+│  Chats │ Chat │ Activity │ Files │ FileViewer │ Config    │
+│  (dockable, resizable, draggable panels)                  │
+└─────────────────────────┬────────────────────────────────┘
+                       │ HTTP / SSE
+┌──────────────────────▼──────────────────────────────┐
+│              FastAPI Application (app.py)             │
+│                                                       │
+│  routes/chat.py      SSE streaming + resume           │
+│  routes/agents.py    Agent config CRUD                │
+│  routes/mcp_servers.py  MCP server CRUD               │
+│  routes/vectorstores.py Vector store CRUD             │
+│  routes/conversations.py Messages + files API         │
+│  routes/pages.py     HTML page routes                 │
+│  deps.py             Shared dependencies (DI)         │
+│  messages.py         Message processing + name res.   │
+│  Auth: Keycloak OIDC via authlib                      │
+└──┬──────────┬──────────┬──────────┬──────────────────┘
    │          │          │          │
    ▼          ▼          ▼          ▼
 ┌──────┐ ┌────────┐ ┌────────┐ ┌────────────┐
 │ App  │ │LangGraph│ │ChromaDB│ │  LangGraph │
 │  DB  │ │Checkpt. │ │VectorDB│ │   Graph    │
-│SQLite│ │ SQLite  │ │on PVC  │ │  (dynamic) │
+│SQLite│ │ SQLite  │ │        │ │  (dynamic) │
 └──────┘ └────────┘ └────────┘ └──┬───┬───┬──┘
                                   │   │   │
                     ┌─────────────┘   │   └──────────┐
@@ -37,28 +44,58 @@ rhiza-agents is a multi-agent chat platform built on LangGraph. Users log in, in
                    │               │               │
           handoff tools     ┌──────┘          ┌────┘
                             ▼                 ▼
-                     ┌────────────┐    ┌──────────┐
-                     │ Sheerwater │    │ Daytona  │
-                     │ MCP Server │    │ Sandbox  │
-                     │ (SSE)      │    │ (hosted) │
-                     └────────────┘    └──────────┘
+                ┌───────────────────┐  ┌──────────┐
+                │ MCP Servers (SSE) │  │ Daytona  │
+                │ System + User     │  │ Sandbox  │
+                │ (per-user config) │  │ (hosted) │
+                └───────────────────┘  └──────────┘
 ```
+
+## Frontend Architecture
+
+The frontend is a TypeScript application built with esbuild and Lumino (the layout framework from JupyterLab).
+
+### Lumino Widgets
+
+| Widget | Description | Default Position |
+|--------|-------------|-----------------|
+| `ConversationListWidget` | Chat history list, new chat button | Left |
+| `ChatWidget` | Message display, input, SSE streaming | Center |
+| `ActivityWidget` | Thinking, tool calls, tool results | Right |
+| `FilesWidget` | File list from conversation state | Right (below Activity) |
+| `FileViewerWidget` | Syntax-highlighted file content tab | Center (new tab) |
+| `ConfigWidget` | Agent config, MCP servers, knowledge bases, settings | Center (tab) |
+
+Panels are dockable — users can drag tabs to rearrange, resize splits, and close/reopen via the View menu. The layout uses `DockPanel` with explicit initial sizes via `restoreLayout()`.
+
+### Build Chain
+
+- Source: `frontend/src/**/*.ts`
+- Bundler: esbuild (outputs `static/app.js` + `static/app.css`)
+- Watch: `frontend/watch.mjs` (polling-based for Docker volume mount compatibility)
+- Docker: `esbuild` service in docker-compose runs the watcher
+- Theme: JupyterLab dark theme CSS variables in `static/theme.css`
 
 ## Technology Stack
 
-| Component | Package | Version | Purpose |
-|-----------|---------|---------|---------|
-| Agent orchestration | `langgraph` | 1.0.10 | Graph-based agent state machine |
-| Multi-agent routing | `langgraph-supervisor` | 0.0.31 | Supervisor + handoff pattern |
-| LLM integration | `langchain-anthropic` | 1.3.4 | Claude model binding |
-| MCP bridge | `langchain-mcp-adapters` | 0.2.1 | MCP tools → LangChain tools |
-| Chat persistence | `langgraph-checkpoint-sqlite` | 3.0.3 | Conversation state checkpointing |
-| Sandbox | `daytona-sdk` | 0.149.0 | Hosted code execution |
-| Vector store | `langchain-chroma` | 1.1.0 | In-process RAG |
-| Observability | `langsmith` | (latest) | Trace debugging (free tier) |
-| Web framework | `fastapi` + `jinja2` | (latest) | HTTP API + server-rendered UI |
-| Auth | `authlib` | (latest) | Keycloak OIDC |
-| App database | `databases[aiosqlite]` | (latest) | User configs, conversation metadata |
+| Component | Package | Purpose |
+|-----------|---------|---------|
+| Agent orchestration | `langgraph` | Graph-based agent state machine |
+| Multi-agent routing | `langgraph-supervisor` | Supervisor + handoff pattern |
+| LLM integration | `langchain-anthropic` | Claude model binding with extended thinking |
+| MCP bridge | `langchain-mcp-adapters` | MCP tools → LangChain tools (SSE transport) |
+| Chat persistence | `langgraph-checkpoint-sqlite` | Conversation state checkpointing |
+| Context management | `SummarizationMiddleware` | Automatic conversation summarization |
+| Sandbox | `daytona-sdk` | Hosted code execution |
+| Vector store | `langchain-chroma` | In-process RAG |
+| Web framework | `fastapi` | HTTP API with dependency injection |
+| Auth | `authlib` | Keycloak OIDC |
+| App database | `databases[aiosqlite]` | User configs, conversation metadata, MCP servers |
+| Structured logging | `python-json-logger` | JSON chat event logs |
+| Frontend layout | `@lumino/widgets` | Dockable panel layout (from JupyterLab) |
+| Frontend bundler | `esbuild` | TypeScript → JS bundle |
+| Markdown | `marked` + `highlight.js` | Rendering with syntax highlighting |
+| Icons | `font-awesome` | Tab close icons (used by Lumino) |
 
 ## Agent Topology
 
@@ -66,16 +103,20 @@ rhiza-agents is a multi-agent chat platform built on LangGraph. Users log in, in
 
 The supervisor receives every user message and decides which sub-agent should handle it. It uses `create_supervisor()` from `langgraph-supervisor`, which automatically generates `transfer_to_<agent_name>` handoff tools.
 
+The supervisor's system prompt is dynamically enhanced at graph build time with:
+- **Agent tool assignments** — which agent has which tools
+- **MCP server info** — connected server names and their tool lists
+
+This allows the supervisor to answer questions about available tools and route correctly to agents with specific MCP tools.
+
 Configuration:
 - `output_mode="full_history"` — supervisor sees all sub-agent messages
 - `add_handoff_back_messages=True` — supervisor knows when a sub-agent finishes
 
-The supervisor does NOT have direct access to data tools — it only routes.
-
 ### Default Sub-Agents
 
 1. **Data Analyst** (`data_analyst`)
-   - Tools: All sheerwater MCP tools (discovery, evaluation, visualization, data extraction)
+   - Tools: Sheerwater MCP tools + any user-assigned MCP tools
    - Purpose: Answer questions about forecast models, run metrics, generate charts
 
 2. **Code Runner** (`code_runner`)
@@ -90,11 +131,11 @@ The supervisor does NOT have direct access to data tools — it only routes.
 
 Each agent is defined by an `AgentConfig`:
 ```
-id: str              # unique identifier (e.g., "data_analyst")
-name: str            # display name (e.g., "Data Analyst")
+id: str              # unique identifier
+name: str            # display name
 type: str            # "supervisor" or "worker"
 system_prompt: str   # the agent's system prompt
-model: str           # Claude model (e.g., "claude-sonnet-4-20250514")
+model: str           # Claude model
 tools: list[str]     # tool identifiers (e.g., ["mcp:sheerwater", "sandbox:daytona"])
 vectorstore_ids: list[str]  # vector store collection IDs
 enabled: bool        # whether this agent is active
@@ -102,170 +143,97 @@ enabled: bool        # whether this agent is active
 
 **Defaults** are defined in code (`agents/registry.py`). **User overrides** are stored in the app database as JSON per `(user_id, agent_id)`. At graph build time, defaults are loaded and user overrides applied on top.
 
+## MCP Server Integration
+
+MCP servers come in two tiers:
+
+- **System servers** — configured via environment variables, available to all users, seeded into the database at startup
+- **User servers** — configured per-user via the Config UI, stored in `mcp_servers` table
+
+Tool loading:
+1. System MCP tools are loaded at startup and cached globally
+2. User MCP tools are loaded on demand and cached per-server with the `_user_mcp_cache`
+3. Tools are resolved per-agent via the `mcp:<server_id>` pattern in the `tools` list
+4. The graph cache key includes MCP server IDs so it invalidates when tools change
+
+The `/api/mcp-servers` endpoints provide CRUD + connectivity testing. The Config widget shows system servers as read-only and user servers with add/edit/test/delete.
+
 ## Data Flow
 
 ### Chat Message Flow (Streaming)
 
 1. User sends message via `POST /api/chat/stream`
 2. Server loads user's effective agent config (defaults + overrides)
-3. `agents/graph.py` builds or retrieves cached LangGraph graph
-4. Graph is streamed via `graph.astream_events()` with `version="v2"`, `thread_id` = conversation UUID, and `recursion_limit: 50`
-5. Supervisor decides which agent to route to
-6. Sub-agent executes with its tools (MCP calls, sandbox execution, RAG retrieval)
-7. Tokens stream back as SSE events (`token`, `agent_start`, `tool_start`, `tool_end`, `done`)
-8. All state persisted by LangGraph checkpointer
-9. Frontend parses SSE events, renders tokens incrementally with markdown, and streams tool activity to the activity panel
+3. User's MCP tools are loaded (system + per-user servers)
+4. `agents/graph.py` builds or retrieves cached LangGraph graph
+5. Supervisor prompt is enhanced with tool assignments and MCP server info
+6. Graph is streamed via `graph.astream()` with `subgraphs=True`, `stream_mode=["messages", "updates", "custom"]`
+7. Supervisor decides which agent to route to
+8. Sub-agent executes with its tools (MCP calls, sandbox execution, RAG retrieval)
+9. Tokens stream back as SSE events (`token`, `agent_start`, `tool_start`, `tool_end`, `done`)
+10. All state persisted by LangGraph checkpointer
+11. Frontend creates a new chat bubble per agent handoff, renders tokens with markdown
 
-Page reloads (`GET /c/{conversation_id}`) use `graph.aget_state()` + `_process_messages()` to render the conversation server-side. `_process_messages()` converts raw LangGraph messages into a flat ordered list with type fields (`human`, `ai`, `thinking`, `tool_call`, `tool_result`).
+Page reloads use the `/api/conversations/{id}/messages` endpoint which loads from the LangGraph checkpointer via `process_messages()`. Both paths use `resolve_agent_name()` for consistent agent attribution.
 
-### Message Classification
+### Agent Name Resolution
 
-Agent prompts instruct workers to tag output with `[THINKING]` or `[RESPONSE]`. The `_classify_text()` function uses a three-tier priority:
-1. Explicit `[THINKING]`/`[RESPONSE]` tags (highest priority)
-2. `AIMessage` with `tool_calls` → thinking (intermediate step)
-3. Otherwise → response (shown in main chat)
+Agent names are resolved by `resolve_agent_name()` in `messages.py`, used by both streaming and refresh:
+1. Try subgraph namespace (strip UUID suffixes from `ns` tuple)
+2. Try node name directly
+3. Fall back to provided default
 
-### Agent Name Tracking
+The `build_name_mappings()` function creates the `agent_names` and `tool_to_agent` dicts from effective configs.
 
-`AIMessage.name` is always `None` after SQLite checkpoint serialization round-trip. Agent names are tracked via:
-- `_agent_names`: dict mapping agent_id → display name, built from registry at startup (global defaults)
-- `_tool_to_agent`: dict mapping tool names → agent_id (MCP tool names + `execute_python_code` for sandbox), built at startup (global defaults)
-- `_build_name_mappings(configs)`: helper that builds both mappings from an effective config list (used per-user when user overrides exist)
-- `current_agent`: tracked during `_process_messages()` by observing `transfer_to_X` tool calls and MCP tool usage
+### Structured Chat Event Logging
 
-`_process_messages()` accepts optional `agent_names` and `tool_to_agent_map` params. When called with per-user effective configs, these override the global defaults.
+When enabled, every chat event is logged as structured JSON to stdout via `chat_event_logger`:
+- `graph_build` — agents, MCP servers, tool counts
+- `user_message` — message content
+- `agent_start` — which agent is active
+- `agent_message` — accumulated agent response text
+- `tool_start` / `tool_end` — tool name, args, output
+- `interrupt` — HITL approval requests
+- `error` / `done` — completion events
 
-### Config Change Flow
-
-1. User edits agent config in Config Editor UI
-2. `PUT /api/agents/{agent_id}` saves override to `user_agent_configs` table
-3. Graph cache for this user is invalidated
-4. Next chat message triggers graph rebuild with new config
+Each event includes `conversation_id` and `user_id` for filtering. Logging is configurable globally (`CHAT_EVENT_LOGGING` env var) and per-user (opt-in/opt-out setting).
 
 ## Persistence
 
 ### Two Storage Systems
 
-1. **LangGraph Checkpointer** (SQLite → Postgres later)
-   - Stores: full conversation state, all messages, tool calls, intermediate agent states
+1. **LangGraph Checkpointer** (SQLite)
+   - Stores: full conversation state, all messages, tool calls, files
    - Keyed by: `thread_id` (= conversation UUID)
-   - This is the source of truth for chat history
+   - Source of truth for chat history
 
-2. **App Database** (SQLite via `databases[aiosqlite]` → Postgres later)
-   - Stores: conversation metadata, user agent configs, vector store registrations, settings
+2. **App Database** (SQLite via `databases[aiosqlite]`)
+   - Tables: `conversations`, `user_agent_configs`, `user_vectorstores`, `mcp_servers`, `user_settings`
    - Does NOT store messages (that's the checkpointer's job)
 
-### Database Schema
+## Backend Module Structure
 
-See `docs/reference/database-schema.md` for full schema.
-
-## MCP Integration
-
-The sheerwater MCP server runs in GKE at `sheerwater-mcp` namespace, port 8000, SSE transport. It exposes 10+ tools for weather forecast benchmarking.
-
-`langchain-mcp-adapters` (`MultiServerMCPClient`) converts MCP tools to LangChain-compatible tools at startup. Tools are cached and refreshed on reload.
-
-See `docs/reference/mcp-integration.md` for details.
-
-## Sandbox Integration
-
-Daytona SDK provides hosted code execution sandboxes. One sandbox per conversation with idle timeout. The `execute_python_code` LangChain tool accepts Python code and returns the combined output string and exit code.
-
-Key patterns:
-- **Lazy client init**: `Daytona` client initialized on first use, reads `DAYTONA_API_KEY` from env
-- **Per-conversation sandboxes**: Module-level `_sandboxes` dict keyed by thread_id
-- **Proxy URL patching**: `DAYTONA_PROXY_URL` env var overrides unreachable `toolboxProxyUrl` from Daytona API (critical for Docker)
-- **Idle cleanup**: Background task checks every 60s, deletes sandboxes idle >15 minutes
-- **Conversation delete cleanup**: Sandbox is deleted when its conversation is deleted
-- **Graceful degradation**: If `DAYTONA_API_KEY` is not set, sandbox tool is not added to the agent; code_runner responds conversationally
-
-See `docs/reference/daytona-integration.md` for SDK details.
-
-## State-Based Virtual Filesystem
-
-Agents can write files to a virtual filesystem stored in the LangGraph checkpoint state. Files persist as long as the conversation exists and survive message summarization.
-
-### Graph State
-
-`AgentGraphState` in `agents/graph.py` extends the default supervisor state with a `files` dict:
 ```
-files: Annotated[dict, _merge_files]  # path -> {content, created_at, modified_at}
+app.py              # FastAPI app creation, lifespan, shared state on app.state
+deps.py             # Dependency injection: get_db(), require_auth(), get_mcp_tools_for_user()
+messages.py         # resolve_agent_name(), process_messages(), extract_content_blocks()
+logging_config.py   # setup_logging(), chat_event_logger
+routes/
+    chat.py         # SSE streaming (largest module — event generators, tool resolution)
+    agents.py       # Agent config CRUD + tool-types endpoint
+    mcp_servers.py  # MCP server CRUD + test connectivity
+    vectorstores.py # Vector store CRUD + document upload
+    conversations.py # List, delete, messages API, files API
+    pages.py        # HTML page routes
+    settings.py     # User settings API
 ```
 
-The `_merge_files` reducer merges updates additively -- each tool call adds or overwrites specific paths without replacing the entire dict. File content is stored as a list of lines (matching the `deepagents` `StateBackend` format).
-
-### Tools
-
-- **`write_file(path, content)`**: Writes a file to state. Returns a `Command` with both a `ToolMessage` (for the LLM) and a `files` update (for the state). Always available to sandbox agents.
-- **`run_file(path)`**: Reads a file from state (via `ToolRuntime.state`) and executes it in the Daytona sandbox. Only available when `DAYTONA_API_KEY` is set.
-- **`execute_python_code(code)`**: Original inline execution tool, unchanged.
-
-Both `write_file` and `run_file` use `ToolRuntime` from `langgraph.prebuilt` to access graph state and `tool_call_id` without exposing these to the LLM. They return `Command` objects from `langgraph.types` to update non-messages state fields.
-
-### API
-
-- `GET /api/conversations/{id}/files` -- list files (path, size, modified_at)
-- `GET /api/conversations/{id}/files/{path}` -- get file content
-
-### UI
-
-A collapsible "Files" panel in the chat UI shows conversation files. Files can be viewed with syntax highlighting and downloaded. A "Review code" toggle enables an approval flow where code files show an "Approve & Run" button that sends a chat message to trigger `run_file`.
-
-## Context Management
-
-Long conversations are managed at two levels to prevent context window overflows and unbounded checkpoint growth.
-
-### Per-LLM-Call Message Trimming
-
-Each agent (supervisor and workers) uses a callable `prompt` parameter that trims messages before they reach the LLM. This doesn't change what's stored in the checkpoint — it only controls what the model sees.
-
-- `_make_prompt_with_trimming(system_prompt)` in `graph.py` returns a closure that:
-  1. Extracts messages from the graph state
-  2. Runs `trim_messages(strategy="last", max_tokens=100_000)` to keep only recent messages within budget
-  3. Prepends the agent's system prompt as a `SystemMessage`
-- The 100k token limit leaves headroom for system prompt, tool definitions, and response within Claude's 200k context window
-- `count_tokens_approximately` from langchain-core estimates tokens without calling an external tokenizer
-
-### Post-Invocation Checkpoint Summarization
-
-After each streaming response completes, a background task checks if the conversation's checkpoint has grown too large (>50 messages). If so, it summarizes old messages with a Haiku LLM call and prunes the checkpoint.
-
-- **Threshold**: 50 messages trigger summarization; 10 most recent messages are kept
-- **Summary format**: Stored as an `AIMessage` with prefix `"Summary of earlier conversation:"` — visible to both LLM (survives trimming) and users (rendered on reload)
-- **Incremental**: Existing summaries are detected and updated rather than re-summarizing from scratch
-- **Checkpoint update**: Uses `RemoveMessage` + `graph.aupdate_state()` to prune old messages, then appends the summary
-- **Non-blocking**: Runs via `asyncio.create_task()` after the SSE stream completes; errors are logged, never propagated
-
-## Resilience
-
-- **LLM retry**: All `ChatAnthropic` model instances are wrapped with `.with_retry(stop_after_attempt=3)` to handle transient API failures (rate limits, 5xx errors)
-- **Recursion limit**: Graph invocation uses `recursion_limit: 50` to prevent runaway agent loops
-- **Tool availability**: `GET /api/tool-types` endpoint reports which tools are configured and available
-
-## Vector Store Integration
-
-ChromaDB runs in-process with persistent storage on the PVC (`CHROMA_PERSIST_DIR`, default `/data/chroma`). The `VectorStoreManager` class wraps the ChromaDB `PersistentClient`.
-
-Key patterns:
-- **Per-user namespacing**: Collection names are formatted as `{user_id}_{sanitized_display_name}` to prevent collisions
-- **Document ingestion**: Files (.txt, .md, .pdf) are uploaded via `POST /api/vectorstores/{id}/upload`. Text is extracted (PyMuPDF for PDFs), chunked with `RecursiveCharacterTextSplitter` (1000 chars, 200 overlap), and embedded using ChromaDB's default embedding function (all-MiniLM-L6-v2, runs locally)
-- **Retrieval tools**: `create_retrieval_tool()` factory creates a LangChain `@tool` per attached collection. Tool name is `search_{sanitized_display_name}`. Results include source attribution.
-- **Agent attachment**: Agents have a `vectorstore_ids` field. At graph build time, `_resolve_tools()` looks up each ID in the DB and creates a retrieval tool for each attached collection.
-- **Cleanup**: Deleting a vector store removes the ChromaDB collection, the DB record, and any references in agent config overrides.
-- **Config editor UI**: Knowledge base sidebar section shows collections with document counts, upload buttons, and delete buttons. Agent detail panel has knowledge base checkboxes for attachment.
-
-## Authentication
-
-Keycloak OIDC via authlib, same pattern as sheerwater-chat. Dual URL strategy (internal for backend → Keycloak, public for browser → Keycloak).
-
-See `docs/reference/existing-code.md` for the auth pattern to reuse.
+Shared state (database, checkpointer, MCP tools, vectorstore manager) is initialized in the lifespan and stored on `app.state`. Route handlers access it via dependency injection from `deps.py`.
 
 ## Deployment
 
 ### Local Development
-`docker compose up` starts Keycloak, sheerwater-mcp, and the app with hot reload.
+`podman compose up -d` starts Keycloak, sheerwater-mcp, esbuild watcher, and the app with hot reload.
 
 ### Production
-GitOps: push to `main` → GitHub Actions builds image → pushes to GHCR → updates chart values → force-pushes `deploy` branch → ArgoCD syncs to GKE.
-
-Helm chart: Recreate strategy (SQLite), PVC for data, ClusterIP service, nginx ingress with TLS.
+GitOps: push to `main` → GitHub Actions builds image → pushes to GHCR → updates chart values → ArgoCD syncs to GKE.
