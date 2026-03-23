@@ -1,0 +1,21 @@
+{
+  "name": "rhiza-agents-frontend",
+  "private": true,
+  "scripts": {
+    "build": "esbuild src/app.ts --bundle --outfile=../src/rhiza_agents/static/app.js --format=esm --sourcemap --loader:.png=dataurl --loader:.svg=dataurl --loader:.gif=dataurl --loader:.woff=dataurl --loader:.woff2=dataurl --loader:.ttf=dataurl --loader:.eot=dataurl",
+    "watch": "node watch.mjs"
+  },
+  "dependencies": {
+    "@lumino/commands": "^2.3.3",
+    "@lumino/default-theme": "^2.1.14",
+    "@lumino/widgets": "^2.7.5",
+    "font-awesome": "^4.7.0",
+    "highlight.js": "^11.0.0",
+    "marked": "^17.0.0",
+    "marked-highlight": "^2.0.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "typescript": "^5.8.0"
+  }
+}

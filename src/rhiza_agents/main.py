@@ -413,13 +413,18 @@ async def index(request: Request):
     user_id = get_user_id(request)
     conversations = await db.list_conversations(user_id)
 
+    app_data = {
+        "conversations": [{"id": c["id"], "title": c.get("title")} for c in conversations],
+        "conversationId": "",
+        "userName": get_user_name(request),
+    }
+
     return templates.TemplateResponse(
         "chat.html",
         {
             "request": request,
             "user_name": get_user_name(request),
-            "conversations": conversations,
-            "current_conversation": None,
+            "app_data_json": json.dumps(app_data),
             "static_version": _static_version,
         },
     )
@@ -438,13 +443,18 @@ async def conversation_page(request: Request, conversation_id: str, user: dict =
 
     conversations = await db.list_conversations(user_id)
 
+    app_data = {
+        "conversations": [{"id": c["id"], "title": c.get("title")} for c in conversations],
+        "conversationId": conversation_id,
+        "userName": get_user_name(request),
+    }
+
     return templates.TemplateResponse(
         "chat.html",
         {
             "request": request,
             "user_name": get_user_name(request),
-            "conversations": conversations,
-            "current_conversation": conversation,
+            "app_data_json": json.dumps(app_data),
             "static_version": _static_version,
         },
     )

@@ -4,98 +4,14 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Rhiza Agents</title>
+    <link rel="stylesheet" href="/static/app.css">
+    <link rel="stylesheet" href="/static/theme.css">
     <link rel="stylesheet" href="/static/style.css">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
 </head>
 <body>
-    <div class="app">
-        <aside class="sidebar" id="sidebar">
-            <div class="sidebar-header">
-                <button id="new-chat" class="new-chat-btn">+ New Chat</button>
-            </div>
-            <nav class="conversations">
-                {% for conv in conversations %}
-                <a href="/c/{{ conv.id }}" class="conversation-item {% if current_conversation and current_conversation.id == conv.id %}active{% endif %}">
-                    {{ conv.title or "New conversation" }}
-                </a>
-                {% endfor %}
-            </nav>
-            <div class="sidebar-footer">
-                <div class="user-info">
-                    <span class="user-name">{{ user_name }}</span>
-                </div>
-                <div class="sidebar-footer-links">
-                    <a href="/config" class="config-link" title="Agent Config">Config</a>
-                    <a href="/logout" class="logout-link">Logout</a>
-                </div>
-            </div>
-        </aside>
+    <div id="app"></div>
 
-        <main class="chat-area">
-            <div class="chat-header">
-                <div class="chat-header-left">
-                    <button id="sidebar-toggle" class="panel-toggle-btn active" title="Toggle chat history">Chats</button>
-                    <label class="exec-mode-toggle" title="When enabled, code must be approved before execution">
-                        <input type="checkbox" id="exec-mode-toggle">
-                        <span class="exec-mode-label">Review code</span>
-                    </label>
-                </div>
-                <div class="chat-header-right">
-                    <button id="files-toggle" class="panel-toggle-btn" title="Toggle file viewer">Files</button>
-                    <button id="activity-toggle" class="panel-toggle-btn active" title="Toggle activity panel">Activity</button>
-                </div>
-            </div>
-            <div class="messages" id="messages">
-                {% if not current_conversation %}
-                <div class="welcome">
-                    <h2>Rhiza Agents</h2>
-                    <p>Ask questions about weather forecast models and data analysis.</p>
-                    <div class="sample-prompts">
-                        <button class="sample-prompt" data-prompt="What metrics are available in sheerwater?">What metrics are available in sheerwater?</button>
-                        <button class="sample-prompt" data-prompt="Can you write a script that generates a hash of the word 'sheerwater' and saves the file to disk?">Write a script to hash &ldquo;sheerwater&rdquo; and save to file</button>
-                        <button class="sample-prompt" data-prompt="Can you show a map of Africa?">Show a map of Africa</button>
-                    </div>
-                </div>
-                {% else %}
-                <div class="messages-loading">Loading messages...</div>
-                {% endif %}
-            </div>
-
-            <form class="input-area" id="chat-form">
-                <input type="hidden" id="conversation-id" value="{{ current_conversation.id if current_conversation else '' }}">
-                <textarea id="message-input" placeholder="Ask about forecast models..." rows="1"></textarea>
-                <button type="submit" id="send-btn">Send</button>
-            </form>
-        </main>
-
-        <aside class="files-panel hidden" id="files-panel">
-            <div class="files-header">
-                <span class="files-title">Files</span>
-                <button id="files-close" class="files-close-btn" title="Close panel">&times;</button>
-            </div>
-            <div class="files-list" id="files-list"></div>
-            <div class="file-viewer hidden" id="file-viewer">
-                <div class="file-viewer-header">
-                    <span class="file-viewer-path" id="file-viewer-path"></span>
-                    <div class="file-viewer-actions">
-                        <button class="file-approve-btn hidden" id="file-approve-btn" title="Execute this file in the sandbox">Approve &amp; Run</button>
-                        <button class="file-download-btn" id="file-download-btn" title="Download file">Download</button>
-                        <button class="file-viewer-close-btn" id="file-viewer-close" title="Back to file list">&larr;</button>
-                    </div>
-                </div>
-                <pre class="file-viewer-content" id="file-viewer-content"><code id="file-viewer-code"></code></pre>
-            </div>
-        </aside>
-
-        <aside class="activity-panel" id="activity-panel">
-            <div class="activity-header">
-                <span class="activity-title">Activity</span>
-                <button id="activity-close" class="activity-close-btn" title="Close panel">&times;</button>
-            </div>
-            <div class="activity-content" id="activity-content"></div>
-        </aside>
-    </div>
-
-    <script type="module" src="/static/chat.js?v={{ static_version }}"></script>
+    <script id="app-data" type="application/json">{{ app_data_json | safe }}</script>
+    <script type="module" src="/static/app.js"></script>
 </body>
 </html>

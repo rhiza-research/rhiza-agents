@@ -105,6 +105,9 @@ The goal is that specs always reflect the current state of the code, not the ori
 | 8 | `docs/specs/08-context-management.md` | Complete (now uses SummarizationMiddleware) |
 | 9 | `docs/specs/09-file-viewer-and-execution-approval.md` | Complete |
 | 10 | `docs/specs/10-extended-thinking.md` | Complete |
+| 11 | `docs/specs/11-lumino-panel-layout.md` | Complete |
+| 12 | `docs/specs/12-user-mcp-servers.md` | Complete |
+| 13 | `docs/specs/13-main-py-refactor.md` | Complete |
 
 ## Key Principles
 

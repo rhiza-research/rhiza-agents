@@ -27,6 +27,22 @@ services:
       CHART_BUCKET_NAME: sheerwater-mcp-charts
       SIGNING_SERVICE_ACCOUNT: ${SIGNING_SERVICE_ACCOUNT}
 
+  esbuild:
+    image: node:23-alpine
+    working_dir: /app/frontend
+    command: sh -c "npm install --prefer-offline && node watch.mjs"
+    restart: unless-stopped
+    environment:
+      ESBUILD_OUTFILE: /app/static/app.js
+    volumes:
+      - ./frontend/src:/app/frontend/src:ro
+      - ./frontend/package.json:/app/frontend/package.json
+      - ./frontend/package-lock.json:/app/frontend/package-lock.json
+      - ./frontend/tsconfig.json:/app/frontend/tsconfig.json:ro
+      - ./frontend/watch.mjs:/app/frontend/watch.mjs:ro
+      - ./src/rhiza_agents/static:/app/static
+      - esbuild-node-modules:/app/frontend/node_modules
+
   rhiza-agents:
     image: ghcr.io/rhiza-research/rhiza-agents:latest
     build: .
@@ -60,3 +76,4 @@ services:
 
 volumes:
   rhiza-data:
+  esbuild-node-modules:
