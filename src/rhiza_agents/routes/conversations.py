@@ -10,6 +10,7 @@ from ..agents.supervisor import get_agent_graph
 from ..agents.tools.sandbox import cleanup_sandbox
 from ..db.models import AgentConfig
 from ..deps import (
+    _skill_cache,
     _user_mcp_cache,
     get_checkpointer,
     get_db,
@@ -50,6 +51,26 @@ async def _get_mcp_tools_for_owner(request: Request, owner_id: str) -> tuple[dic
         if _user_mcp_cache[sid]:
             result[sid] = _user_mcp_cache[sid]
     return result, names
+
+
+async def _get_skill_tools_for_owner(request: Request, owner_id: str) -> dict:
+    """Get skill tools for a specific user (owner), not necessarily the session user."""
+    from ..agents.tools.skills import create_skill_tool
+
+    db = get_db(request)
+    skills = await db.list_skills(owner_id)
+    result = {}
+    for skill in skills:
+        if not skill.get("enabled", True):
+            continue
+        sid = skill["id"]
+        if sid not in _skill_cache:
+            try:
+                _skill_cache[sid] = create_skill_tool(skill)
+            except (ValueError, Exception):
+                continue
+        result[sid] = _skill_cache[sid]
+    return result
 
 
 async def _get_effective_configs(request: Request, user_id: str) -> list[AgentConfig]:
@@ -104,6 +125,7 @@ async def get_conversation_messages(request: Request, conversation_id: str, user
     # Use the conversation owner's configs for agent name resolution
     owner_id = conversation.get("user_id", user_id)
     user_mcp, mcp_names = await _get_mcp_tools_for_owner(request, owner_id)
+    owner_skills = await _get_skill_tools_for_owner(request, owner_id)
     graph = await get_agent_graph(
         mcp_tools,
         checkpointer,
@@ -112,6 +134,7 @@ async def get_conversation_messages(request: Request, conversation_id: str, user
         vectorstore_manager=vectorstore_manager,
         mcp_tools_by_server=user_mcp,
         mcp_server_names=mcp_names,
+        skill_tools=owner_skills,
     )
     effective = await _get_effective_configs(request, owner_id)
     agent_names, tool_to_agent_map = build_name_mappings(effective, mcp_tools)
@@ -142,6 +165,7 @@ async def list_conversation_files(request: Request, conversation_id: str, user: 
 
     owner_id = conversation.get("user_id", user_id)
     user_mcp, mcp_names = await _get_mcp_tools_for_owner(request, owner_id)
+    owner_skills = await _get_skill_tools_for_owner(request, owner_id)
     graph = await get_agent_graph(
         mcp_tools,
         checkpointer,
@@ -150,6 +174,7 @@ async def list_conversation_files(request: Request, conversation_id: str, user: 
         vectorstore_manager=vectorstore_manager,
         mcp_tools_by_server=user_mcp,
         mcp_server_names=mcp_names,
+        skill_tools=owner_skills,
     )
     state = await graph.aget_state({"configurable": {"thread_id": conversation_id}})
     files = state.values.get("files", {})
@@ -189,6 +214,7 @@ async def get_conversation_file(
 
     owner_id = conversation.get("user_id", user_id)
     user_mcp, mcp_names = await _get_mcp_tools_for_owner(request, owner_id)
+    owner_skills = await _get_skill_tools_for_owner(request, owner_id)
     graph = await get_agent_graph(
         mcp_tools,
         checkpointer,
@@ -197,6 +223,7 @@ async def get_conversation_file(
         vectorstore_manager=vectorstore_manager,
         mcp_tools_by_server=user_mcp,
         mcp_server_names=mcp_names,
+        skill_tools=owner_skills,
     )
     state = await graph.aget_state({"configurable": {"thread_id": conversation_id}})
     files = state.values.get("files", {})

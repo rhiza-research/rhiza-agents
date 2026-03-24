@@ -24,6 +24,61 @@ from .logging_config import setup_logging
 logger = logging.getLogger(__name__)
 
 
+async def _load_system_skills(db):
+    """Scan bundled skills/ directory and upsert each into the database."""
+    from .agents.tools.skills import parse_skill_md
+
+    skills_dir = Path(__file__).parent / "skills"
+    if not skills_dir.is_dir():
+        return
+
+    count = 0
+    for skill_path in sorted(skills_dir.iterdir()):
+        if not skill_path.is_dir():
+            continue
+        skill_md_path = skill_path / "SKILL.md"
+        if not skill_md_path.exists():
+            continue
+        skill_md = skill_md_path.read_text()
+        try:
+            parsed = parse_skill_md(skill_md)
+        except ValueError as e:
+            logger.warning("Skipping invalid system skill %s: %s", skill_path.name, e)
+            continue
+
+        # Load companion files
+        scripts_json = _load_companion_dir(skill_path / "scripts")
+        references_json = _load_companion_dir(skill_path / "references")
+        assets_json = _load_companion_dir(skill_path / "assets")
+
+        await db.upsert_system_skill(
+            skill_id=f"system-{parsed.name}",
+            name=parsed.name,
+            description=parsed.description,
+            skill_md=skill_md,
+            scripts_json=scripts_json,
+            references_json=references_json,
+            assets_json=assets_json,
+        )
+        count += 1
+
+    if count:
+        logger.info("Loaded %d system skills", count)
+
+
+def _load_companion_dir(directory: Path) -> str | None:
+    """Load all files in a companion directory as a JSON dict of filename -> content."""
+    import json
+
+    if not directory.is_dir():
+        return None
+    contents = {}
+    for f in sorted(directory.iterdir()):
+        if f.is_file():
+            contents[f.name] = f.read_text()
+    return json.dumps(contents) if contents else None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler — initialize and clean up shared resources."""
@@ -68,6 +123,9 @@ async def lifespan(app: FastAPI):
         app.state.vectorstore_manager = VectorStoreManager(config.chroma_persist_dir)
         logger.info("Initialized VectorStoreManager at %s", config.chroma_persist_dir)
 
+    # Load system skills from bundled directory
+    await _load_system_skills(db)
+
     # Build initial agent name mappings for logging
     configs_by_id = get_default_configs_by_id()
     app.state.agent_names = {agent_id: c.name for agent_id, c in configs_by_id.items()}
@@ -109,12 +167,13 @@ def create_app() -> FastAPI:
     app.mount("/static", StaticFiles(directory=base_dir / "static"), name="static")
 
     # Register route modules
-    from .routes import agents, chat, conversations, mcp_servers, pages, settings, vectorstores
+    from .routes import agents, chat, conversations, mcp_servers, pages, settings, skills, vectorstores
 
     app.include_router(pages.router)
     app.include_router(chat.router)
     app.include_router(agents.router)
     app.include_router(mcp_servers.router)
+    app.include_router(skills.router)
     app.include_router(vectorstores.router)
     app.include_router(conversations.router)
     app.include_router(settings.router)

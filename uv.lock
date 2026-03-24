@@ -2920,6 +2920,7 @@ dependencies = [
     { name = "langsmith" },
     { name = "python-json-logger" },
     { name = "python-multipart" },
+    { name = "pyyaml" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -2970,6 +2971,7 @@ requires-dist = [
     { name = "pymupdf", marker = "extra == 'vectorstore'" },
     { name = "python-json-logger", specifier = ">=3.3.0" },
     { name = "python-multipart" },
+    { name = "pyyaml", specifier = ">=6.0" },
     { name = "uvicorn", extras = ["standard"] },
 ]
 provides-extras = ["postgres", "sandbox", "vectorstore"]

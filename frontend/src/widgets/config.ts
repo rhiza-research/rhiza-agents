@@ -23,6 +23,8 @@ export class ConfigWidget extends Widget {
     private _agentList!: HTMLDivElement;
     private _detail!: HTMLDivElement;
     private _vectorstoreList!: HTMLDivElement;
+    private _skillList!: HTMLDivElement;
+    private _skills: any[] = [];
     private _mcpList!: HTMLDivElement;
     private _mcpServers: any[] = [];
 
@@ -80,6 +82,22 @@ export class ConfigWidget extends Widget {
         addVsBtn.textContent = '+ New Knowledge Base';
         addVsBtn.addEventListener('click', () => this._showNewVsModal());
         sidebar.appendChild(addVsBtn);
+
+        const skillsTitle = document.createElement('h3');
+        skillsTitle.className = 'config-sidebar-title';
+        skillsTitle.style.marginTop = '1.5rem';
+        skillsTitle.textContent = 'Skills';
+        sidebar.appendChild(skillsTitle);
+
+        this._skillList = document.createElement('div');
+        this._skillList.className = 'vectorstore-list';
+        sidebar.appendChild(this._skillList);
+
+        const addSkillBtn = document.createElement('button');
+        addSkillBtn.className = 'config-btn';
+        addSkillBtn.textContent = '+ Add Skill';
+        addSkillBtn.addEventListener('click', () => this._showNewSkillMenu());
+        sidebar.appendChild(addSkillBtn);
 
         const mcpTitle = document.createElement('h3');
         mcpTitle.className = 'config-sidebar-title';
@@ -147,7 +165,7 @@ export class ConfigWidget extends Widget {
     }
 
     private async _loadAgents(): Promise<void> {
-        await Promise.all([this._loadToolTypes(), this._loadVectorStores(), this._loadMcpServers()]);
+        await Promise.all([this._loadToolTypes(), this._loadVectorStores(), this._loadSkills(), this._loadMcpServers()]);
         const res = await fetch('/api/agents');
         if (!res.ok) return;
         this._agents = await res.json();
@@ -269,15 +287,26 @@ export class ConfigWidget extends Widget {
                     <label for="edit-prompt">System Prompt</label>
                     <textarea id="edit-prompt" rows="12">${escapeHtml(agent.system_prompt)}</textarea>
                 </div>
+                ${agent.type === 'supervisor' ? `
+                <div class="form-group">
+                    <p style="color: var(--text-secondary); font-size: 0.85rem; margin: 0;">The supervisor routes messages to worker agents — it doesn't use tools, skills, or knowledge bases directly. Assign those to worker agents instead.</p>
+                </div>
+                ` : ''}
+                ${agent.type !== 'supervisor' ? `
                 <div class="form-group">
                     <label>Tools</label>
                     <div class="tools-checkboxes">
                         ${Object.entries(this._toolTypes).map(([id, t]: [string, any]) => {
                             const checked = agent.tools.includes(id) ? 'checked' : '';
-                            const disabled = !t.available ? 'disabled' : '';
-                            const cls = !t.available ? 'tool-checkbox disabled' : 'tool-checkbox';
-                            const badge = !t.available ? ' <span class="coming-soon">Not configured</span>' : '';
-                            return `<label class="${cls}"><input type="checkbox" value="${escapeAttr(id)}" ${checked} ${disabled}> ${escapeHtml(t.name)}${badge}</label>`;
+                            const hasSandbox = agent.tools.includes('sandbox:daytona');
+                            const needsSandbox = t.requires_sandbox && !hasSandbox;
+                            const disabled = !t.available || needsSandbox ? 'disabled' : '';
+                            const cls = !t.available || needsSandbox ? 'tool-checkbox disabled' : 'tool-checkbox';
+                            let badge = '';
+                            if (!t.available) badge = ' <span class="coming-soon">Not configured</span>';
+                            else if (needsSandbox) badge = ' <span class="coming-soon">Requires sandbox</span>';
+                            const dataAttr = t.requires_sandbox ? ' data-requires-sandbox="true"' : '';
+                            return `<label class="${cls}"><input type="checkbox" value="${escapeAttr(id)}" ${checked} ${disabled}${dataAttr}> ${escapeHtml(t.name)}${badge}</label>`;
                         }).join('')}
                     </div>
                 </div>
@@ -291,6 +320,7 @@ export class ConfigWidget extends Widget {
                         }).join('')}
                     </div>
                 </div>` : ''}
+                ` : ''}
                 <div class="config-form-actions">
                     ${agent.type !== 'supervisor' ? `<button id="delete-agent-btn" class="config-btn config-btn-danger">${agent.enabled ? 'Disable' : 'Enable'}</button>` : ''}
                     <button id="save-agent-btn" class="config-btn config-btn-primary">Save</button>
@@ -302,6 +332,30 @@ export class ConfigWidget extends Widget {
         const deleteBtn = this._detail.querySelector('#delete-agent-btn');
         if (deleteBtn) {
             deleteBtn.addEventListener('click', () => agent.enabled ? this._deleteAgent(agent) : this._enableAgent(agent));
+        }
+
+        // When sandbox checkbox is toggled, enable/disable skills that require it
+        const sandboxCb = this._detail.querySelector('input[value="sandbox:daytona"]') as HTMLInputElement | null;
+        if (sandboxCb) {
+            sandboxCb.addEventListener('change', () => {
+                const hasSandbox = sandboxCb.checked;
+                this._detail.querySelectorAll<HTMLInputElement>('input[data-requires-sandbox="true"]').forEach(cb => {
+                    const label = cb.closest('label')!;
+                    if (hasSandbox) {
+                        cb.disabled = false;
+                        label.className = 'tool-checkbox';
+                        const badge = label.querySelector('.coming-soon');
+                        if (badge && badge.textContent === 'Requires sandbox') badge.remove();
+                    } else {
+                        cb.disabled = true;
+                        cb.checked = false;
+                        label.className = 'tool-checkbox disabled';
+                        if (!label.querySelector('.coming-soon')) {
+                            label.insertAdjacentHTML('beforeend', ' <span class="coming-soon">Requires sandbox</span>');
+                        }
+                    }
+                });
+            });
         }
     }
 
@@ -424,6 +478,210 @@ export class ConfigWidget extends Widget {
 
         await fetch(`/api/vectorstores/${vsId}/upload`, { method: 'POST', body: formData });
         await this._loadVectorStores();
+        if (this._selectedAgentId) this._selectAgent(this._selectedAgentId);
+    }
+
+    // --- Skills ---
+
+    private async _loadSkills(): Promise<void> {
+        const res = await fetch('/api/skills');
+        if (!res.ok) return;
+        this._skills = await res.json();
+        this._renderSkillList();
+    }
+
+    private _renderSkillList(): void {
+        this._skillList.innerHTML = '';
+        for (const skill of this._skills) {
+            const item = document.createElement('div');
+            item.className = 'vs-list-item';
+
+            const info = document.createElement('div');
+            info.className = 'vs-list-info';
+            const name = document.createElement('span');
+            name.className = 'vs-list-name';
+            name.textContent = skill.name;
+            info.appendChild(name);
+            const meta = document.createElement('span');
+            meta.className = 'vs-list-count';
+            const sourceLabel = skill.system ? 'system' : skill.source;
+            meta.textContent = sourceLabel + (skill.requires_sandbox ? ' · requires sandbox' : '');
+            info.appendChild(meta);
+            item.appendChild(info);
+
+            const actions = document.createElement('div');
+            actions.className = 'vs-list-actions';
+
+            const viewBtn = document.createElement('button');
+            viewBtn.className = 'config-btn-sm';
+            viewBtn.textContent = 'View';
+            viewBtn.addEventListener('click', () => this._viewSkill(skill.id));
+            actions.appendChild(viewBtn);
+
+            if (!skill.system) {
+                const delBtn = document.createElement('button');
+                delBtn.className = 'config-btn-sm config-btn-danger';
+                delBtn.textContent = '\u00d7';
+                delBtn.title = 'Delete';
+                delBtn.addEventListener('click', () => this._deleteSkill(skill));
+                actions.appendChild(delBtn);
+            }
+
+            item.appendChild(actions);
+            this._skillList.appendChild(item);
+        }
+    }
+
+    private async _viewSkill(skillId: string): Promise<void> {
+        const res = await fetch(`/api/skills/${skillId}`);
+        if (!res.ok) return;
+        const skill = await res.json();
+        const sourceLabel = skill.system ? 'SYSTEM' : skill.source.toUpperCase();
+        const refInfo = skill.source_ref ? ` (${escapeHtml(skill.source_ref)})` : '';
+
+        this._detail.innerHTML = `
+            <div class="config-form">
+                <div class="config-form-header">
+                    <h2>${escapeHtml(skill.name)}</h2>
+                    <span class="custom-badge">${sourceLabel}</span>
+                </div>
+                <p style="color: var(--text-secondary); margin-bottom: 1rem;">${escapeHtml(skill.description)}${refInfo}</p>
+                ${skill.scripts.length > 0 ? `<p style="color: var(--text-secondary); margin-bottom: 0.5rem;"><strong>Scripts:</strong> ${skill.scripts.map((s: string) => escapeHtml(s)).join(', ')}</p>` : ''}
+                ${skill.references.length > 0 ? `<p style="color: var(--text-secondary); margin-bottom: 0.5rem;"><strong>References:</strong> ${skill.references.map((r: string) => escapeHtml(r)).join(', ')}</p>` : ''}
+                <div class="form-group">
+                    <label>SKILL.md</label>
+                    <textarea rows="20" readonly style="font-family: monospace; font-size: 0.85rem;">${escapeHtml(skill.skill_md)}</textarea>
+                </div>
+                <div class="config-form-actions">
+                    <button id="close-skill-btn" class="config-btn">Close</button>
+                </div>
+            </div>
+        `;
+        this._detail.querySelector('#close-skill-btn')!.addEventListener('click', () => this._renderPlaceholder());
+    }
+
+    private _showNewSkillMenu(): void {
+        this._detail.innerHTML = `
+            <div class="config-form">
+                <h2>Add Skill</h2>
+                <div style="display: flex; flex-direction: column; gap: 1rem; margin-top: 1rem;">
+                    <button id="skill-from-github" class="config-btn config-btn-primary" style="padding: 0.75rem;">Install from GitHub</button>
+                    <button id="skill-create-custom" class="config-btn config-btn-primary" style="padding: 0.75rem;">Create Custom Skill</button>
+                    <button id="skill-cancel" class="config-btn">Cancel</button>
+                </div>
+            </div>
+        `;
+        this._detail.querySelector('#skill-from-github')!.addEventListener('click', () => this._showInstallSkillForm());
+        this._detail.querySelector('#skill-create-custom')!.addEventListener('click', () => this._showCreateSkillForm());
+        this._detail.querySelector('#skill-cancel')!.addEventListener('click', () => this._renderPlaceholder());
+    }
+
+    private _showInstallSkillForm(): void {
+        this._detail.innerHTML = `
+            <div class="config-form">
+                <h2>Install Skill from GitHub</h2>
+                <div class="form-group">
+                    <label for="skill-repo">Repository (owner/repo)</label>
+                    <input type="text" id="skill-repo" placeholder="anthropics/skills">
+                </div>
+                <div class="form-group">
+                    <label for="skill-path">Path (optional subdirectory)</label>
+                    <input type="text" id="skill-path" placeholder="skills/data-cleaning">
+                </div>
+                <div class="config-form-actions">
+                    <button id="cancel-skill-btn" class="config-btn">Cancel</button>
+                    <button id="install-skill-btn" class="config-btn config-btn-primary">Install</button>
+                </div>
+            </div>
+        `;
+
+        this._detail.querySelector('#cancel-skill-btn')!.addEventListener('click', () => this._renderPlaceholder());
+        this._detail.querySelector('#install-skill-btn')!.addEventListener('click', async () => {
+            const repo = (this._detail.querySelector('#skill-repo') as HTMLInputElement).value.trim();
+            const path = (this._detail.querySelector('#skill-path') as HTMLInputElement).value.trim();
+            if (!repo) return;
+
+            const btn = this._detail.querySelector('#install-skill-btn') as HTMLButtonElement;
+            btn.textContent = 'Installing...';
+            btn.disabled = true;
+
+            try {
+                const res = await fetch('/api/skills/install', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ repo, path: path || undefined }),
+                });
+                if (!res.ok) {
+                    const err = await res.json();
+                    alert(err.detail || 'Install failed');
+                    btn.textContent = 'Install';
+                    btn.disabled = false;
+                    return;
+                }
+                await this._loadSkills();
+                await this._loadToolTypes();
+                if (this._selectedAgentId) this._selectAgent(this._selectedAgentId);
+                this._renderPlaceholder();
+            } catch {
+                btn.textContent = 'Error';
+                setTimeout(() => { btn.textContent = 'Install'; btn.disabled = false; }, 2000);
+            }
+        });
+    }
+
+    private _showCreateSkillForm(): void {
+        this._detail.innerHTML = `
+            <div class="config-form">
+                <h2>Create Custom Skill</h2>
+                <div class="form-group">
+                    <label for="skill-name">Name (lowercase, hyphens)</label>
+                    <input type="text" id="skill-name" placeholder="my-skill">
+                </div>
+                <div class="form-group">
+                    <label for="skill-desc">Description</label>
+                    <input type="text" id="skill-desc" placeholder="What this skill does...">
+                </div>
+                <div class="form-group">
+                    <label for="skill-prompt">Instructions (Markdown)</label>
+                    <textarea id="skill-prompt" rows="12" placeholder="# My Skill&#10;&#10;Step-by-step instructions for the agent..."></textarea>
+                </div>
+                <div class="config-form-actions">
+                    <button id="cancel-skill-btn" class="config-btn">Cancel</button>
+                    <button id="save-skill-btn" class="config-btn config-btn-primary">Create Skill</button>
+                </div>
+            </div>
+        `;
+
+        this._detail.querySelector('#cancel-skill-btn')!.addEventListener('click', () => this._renderPlaceholder());
+        this._detail.querySelector('#save-skill-btn')!.addEventListener('click', async () => {
+            const name = (this._detail.querySelector('#skill-name') as HTMLInputElement).value.trim();
+            const description = (this._detail.querySelector('#skill-desc') as HTMLInputElement).value.trim();
+            const prompt = (this._detail.querySelector('#skill-prompt') as HTMLTextAreaElement).value;
+            if (!name || !description || !prompt) return;
+
+            const res = await fetch('/api/skills', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name, description, prompt }),
+            });
+            if (!res.ok) {
+                const err = await res.json();
+                alert(err.detail || 'Create failed');
+                return;
+            }
+            await this._loadSkills();
+            await this._loadToolTypes();
+            if (this._selectedAgentId) this._selectAgent(this._selectedAgentId);
+            this._renderPlaceholder();
+        });
+    }
+
+    private async _deleteSkill(skill: any): Promise<void> {
+        if (!confirm(`Delete skill "${skill.name}"?`)) return;
+        const res = await fetch(`/api/skills/${skill.id}`, { method: 'DELETE' });
+        if (!res.ok) return;
+        await this._loadSkills();
+        await this._loadToolTypes();
         if (this._selectedAgentId) this._selectAgent(this._selectedAgentId);
     }
 

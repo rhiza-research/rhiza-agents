@@ -102,11 +102,16 @@ def _build_supervisor_middleware() -> list:
     ]
 
 
-def _config_hash(configs: list[AgentConfig], mcp_server_ids: list[str] | None = None) -> str:
+def _config_hash(
+    configs: list[AgentConfig],
+    mcp_server_ids: list[str] | None = None,
+    skill_ids: list[str] | None = None,
+) -> str:
     data = json.dumps(
         {
             "configs": [c.model_dump() for c in configs],
             "mcp_servers": sorted(mcp_server_ids or []),
+            "skills": sorted(skill_ids or []),
         },
         sort_keys=True,
     )
@@ -119,10 +124,13 @@ async def _resolve_tools(
     vectorstore_manager=None,
     db=None,
     mcp_tools_by_server: dict[str, list] | None = None,
+    skill_tools: dict | None = None,
 ) -> list:
     """Resolve tool identifiers to actual tool objects."""
     tools = []
+    has_sandbox = "sandbox:daytona" in config.tools
     all_mcp = mcp_tools_by_server or {}
+    all_skills = skill_tools or {}
     for tool_id in config.tools:
         if tool_id.startswith("mcp:"):
             server_id = tool_id[4:]
@@ -130,6 +138,18 @@ async def _resolve_tools(
                 tools.extend(all_mcp[server_id])
             else:
                 logger.info("MCP server %s not loaded, skipping", server_id)
+        elif tool_id.startswith("skill:"):
+            skill_id = tool_id[6:]
+            if skill_id in all_skills:
+                skill_tool = all_skills[skill_id]
+                # Skills requiring execution need sandbox access
+                tool_meta = getattr(skill_tool, "metadata", {}) or {}
+                if tool_meta.get("requires_sandbox") and not has_sandbox:
+                    logger.info("Skill %s requires sandbox, agent %s lacks it, skipping", skill_id, config.id)
+                else:
+                    tools.append(skill_tool)
+            else:
+                logger.info("Skill %s not loaded, skipping", skill_id)
         elif tool_id == "sandbox:daytona":
             from .tools.files import run_file, write_file
             from .tools.sandbox import execute_python_code, is_sandbox_available
@@ -170,6 +190,7 @@ async def build_graph(
     db=None,
     mcp_tools_by_server: dict[str, list] | None = None,
     mcp_server_names: dict[str, str] | None = None,
+    skill_tools: dict | None = None,
 ):
     """Build a compiled LangGraph StateGraph from AgentConfig objects."""
     supervisor_config = None
@@ -199,7 +220,7 @@ async def build_graph(
     worker_agents = []
     agent_tool_descriptions = []
     for wc in worker_configs:
-        tools = await _resolve_tools(wc, mcp_tools, vectorstore_manager, db, mcp_tools_by_server)
+        tools = await _resolve_tools(wc, mcp_tools, vectorstore_manager, db, mcp_tools_by_server, skill_tools)
         middleware = _build_worker_middleware(tools)
         model = ChatAnthropic(
             model=wc.model,
@@ -247,6 +268,19 @@ async def build_graph(
             " answer directly from this information. Do not delegate."
         )
 
+    # Include available skills info so supervisor knows about skill capabilities
+    if skill_tools:
+        skill_info = []
+        for skill_id, tool in skill_tools.items():
+            desc = tool.description.removeprefix("Skill: ") if tool.description else ""
+            # Find which agents have this skill assigned
+            assigned_agents = [wc.name for wc in worker_configs if f"skill:{skill_id}" in wc.tools]
+            if assigned_agents:
+                agents_str = ", ".join(assigned_agents)
+                skill_info.append(f"- {tool.name} (assigned to {agents_str}): {desc}")
+        if skill_info:
+            supervisor_prompt += "\n\nAvailable skills:\n" + "\n".join(skill_info)
+
     supervisor = create_supervisor(
         model=ChatAnthropic(
             model=supervisor_config.model,
@@ -273,12 +307,20 @@ async def get_or_build_graph(
     db=None,
     mcp_tools_by_server: dict[str, list] | None = None,
     mcp_server_names: dict[str, str] | None = None,
+    skill_tools: dict | None = None,
 ):
     """Get a cached graph or build a new one."""
-    h = _config_hash(configs, list((mcp_tools_by_server or {}).keys()))
+    h = _config_hash(configs, list((mcp_tools_by_server or {}).keys()), list((skill_tools or {}).keys()))
     if h not in _graph_cache:
         _graph_cache[h] = await build_graph(
-            configs, mcp_tools, checkpointer, vectorstore_manager, db, mcp_tools_by_server, mcp_server_names
+            configs,
+            mcp_tools,
+            checkpointer,
+            vectorstore_manager,
+            db,
+            mcp_tools_by_server,
+            mcp_server_names,
+            skill_tools,
         )
     return _graph_cache[h]
 

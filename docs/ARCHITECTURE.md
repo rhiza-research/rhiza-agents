@@ -64,7 +64,7 @@ The frontend is a TypeScript application built with esbuild and Lumino (the layo
 | `ActivityWidget` | Thinking, tool calls, tool results | Right |
 | `FilesWidget` | File list from conversation state | Right (below Activity) |
 | `FileViewerWidget` | Syntax-highlighted file content tab | Center (new tab) |
-| `ConfigWidget` | Agent config, MCP servers, knowledge bases, settings | Center (tab) |
+| `ConfigWidget` | Agent config, skills, MCP servers, knowledge bases, settings | Center (tab) |
 
 Panels are dockable — users can drag tabs to rearrange, resize splits, and close/reopen via the View menu. The layout uses `DockPanel` with explicit initial sizes via `restoreLayout()`.
 
@@ -106,8 +106,9 @@ The supervisor receives every user message and decides which sub-agent should ha
 The supervisor's system prompt is dynamically enhanced at graph build time with:
 - **Agent tool assignments** — which agent has which tools
 - **MCP server info** — connected server names and their tool lists
+- **Available skills** — skill names, assigned agents, and descriptions
 
-This allows the supervisor to answer questions about available tools and route correctly to agents with specific MCP tools.
+This allows the supervisor to answer questions about available tools and route correctly to agents with specific MCP tools or skills.
 
 Configuration:
 - `output_mode="full_history"` — supervisor sees all sub-agent messages
@@ -157,6 +158,35 @@ Tool loading:
 4. The graph cache key includes MCP server IDs so it invalidates when tools change
 
 The `/api/mcp-servers` endpoints provide CRUD + connectivity testing. The Config widget shows system servers as read-only and user servers with add/edit/test/delete.
+
+## Agent Skills
+
+Skills are reusable capability packages following the [Agent Skills standard](https://agentskills.io/specification). Each skill is a `SKILL.md` file with YAML frontmatter (name, description) and markdown instructions, plus optional `scripts/`, `references/`, and `assets/` directories.
+
+### Activation Model (Progressive Disclosure)
+
+Skills register as LangChain tools. At graph build time, only the short description is loaded (~100 tokens). When an agent calls the skill tool, it returns the full prompt + references — keeping context minimal until needed.
+
+### Two Tiers (Same as MCP Servers)
+
+- **System skills** — bundled in `src/rhiza_agents/skills/`, loaded at startup, `user_id = NULL`
+- **User skills** — installed from GitHub repos or created custom via UI, stored per-user
+
+### Script Execution
+
+Skills with scripts require the agent to have sandbox access (`sandbox:daytona`). At graph build time, skills with scripts are not registered on agents without sandbox tools. The config UI shows a warning for such skills.
+
+### Supervisor Awareness
+
+The supervisor prompt is enhanced with an "Available skills" section listing each skill's name, assigned agent, and description — enabling informed delegation.
+
+Tool loading:
+1. System skills are seeded into the DB at startup from `src/rhiza_agents/skills/`
+2. User skills are loaded on demand and cached per-skill with `_skill_cache`
+3. Skills are resolved per-agent via the `skill:<skill_id>` pattern in the `tools` list
+4. The graph cache key includes skill IDs so it invalidates when skills change
+
+The `/api/skills` endpoints provide CRUD + GitHub installation. The Config widget shows system skills as read-only and user skills with create/install/view/delete.
 
 ## Data Flow
 
@@ -208,7 +238,7 @@ Each event includes `conversation_id` and `user_id` for filtering. Logging is co
    - Source of truth for chat history
 
 2. **App Database** (SQLite via `databases[aiosqlite]`)
-   - Tables: `conversations`, `user_agent_configs`, `user_vectorstores`, `mcp_servers`, `user_settings`
+   - Tables: `conversations`, `user_agent_configs`, `user_vectorstores`, `mcp_servers`, `skills`, `user_settings`
    - Does NOT store messages (that's the checkpointer's job)
 
 ## Backend Module Structure
@@ -222,6 +252,7 @@ routes/
     chat.py         # SSE streaming (largest module — event generators, tool resolution)
     agents.py       # Agent config CRUD + tool-types endpoint
     mcp_servers.py  # MCP server CRUD + test connectivity
+    skills.py       # Skills CRUD + GitHub install
     vectorstores.py # Vector store CRUD + document upload
     conversations.py # List, delete, messages API, files API
     pages.py        # HTML page routes
