@@ -287,12 +287,11 @@ export class ConfigWidget extends Widget {
                     <label for="edit-prompt">System Prompt</label>
                     <textarea id="edit-prompt" rows="12">${escapeHtml(agent.system_prompt)}</textarea>
                 </div>
+                ${agent.type !== 'supervisor' ? `
                 <div class="form-group">
                     <label>Tools</label>
                     <div class="tools-checkboxes">
                         ${Object.entries(this._toolTypes).map(([id, t]: [string, any]) => {
-                            // Skills can't be assigned to the supervisor — it only delegates
-                            if (agent.type === 'supervisor' && id.startsWith('skill:')) return '';
                             const checked = agent.tools.includes(id) ? 'checked' : '';
                             const hasSandbox = agent.tools.includes('sandbox:daytona');
                             const needsSandbox = t.requires_sandbox && !hasSandbox;
@@ -316,6 +315,7 @@ export class ConfigWidget extends Widget {
                         }).join('')}
                     </div>
                 </div>` : ''}
+                ` : ''}
                 <div class="config-form-actions">
                     ${agent.type !== 'supervisor' ? `<button id="delete-agent-btn" class="config-btn config-btn-danger">${agent.enabled ? 'Disable' : 'Enable'}</button>` : ''}
                     <button id="save-agent-btn" class="config-btn config-btn-primary">Save</button>
