@@ -292,10 +292,15 @@ export class ConfigWidget extends Widget {
                     <div class="tools-checkboxes">
                         ${Object.entries(this._toolTypes).map(([id, t]: [string, any]) => {
                             const checked = agent.tools.includes(id) ? 'checked' : '';
-                            const disabled = !t.available ? 'disabled' : '';
-                            const cls = !t.available ? 'tool-checkbox disabled' : 'tool-checkbox';
-                            const badge = !t.available ? ' <span class="coming-soon">Not configured</span>' : '';
-                            return `<label class="${cls}"><input type="checkbox" value="${escapeAttr(id)}" ${checked} ${disabled}> ${escapeHtml(t.name)}${badge}</label>`;
+                            const hasSandbox = agent.tools.includes('sandbox:daytona');
+                            const needsSandbox = t.requires_sandbox && !hasSandbox;
+                            const disabled = !t.available || needsSandbox ? 'disabled' : '';
+                            const cls = !t.available || needsSandbox ? 'tool-checkbox disabled' : 'tool-checkbox';
+                            let badge = '';
+                            if (!t.available) badge = ' <span class="coming-soon">Not configured</span>';
+                            else if (needsSandbox) badge = ' <span class="coming-soon">Requires sandbox</span>';
+                            const dataAttr = t.requires_sandbox ? ' data-requires-sandbox="true"' : '';
+                            return `<label class="${cls}"><input type="checkbox" value="${escapeAttr(id)}" ${checked} ${disabled}${dataAttr}> ${escapeHtml(t.name)}${badge}</label>`;
                         }).join('')}
                     </div>
                 </div>
@@ -320,6 +325,30 @@ export class ConfigWidget extends Widget {
         const deleteBtn = this._detail.querySelector('#delete-agent-btn');
         if (deleteBtn) {
             deleteBtn.addEventListener('click', () => agent.enabled ? this._deleteAgent(agent) : this._enableAgent(agent));
+        }
+
+        // When sandbox checkbox is toggled, enable/disable skills that require it
+        const sandboxCb = this._detail.querySelector('input[value="sandbox:daytona"]') as HTMLInputElement | null;
+        if (sandboxCb) {
+            sandboxCb.addEventListener('change', () => {
+                const hasSandbox = sandboxCb.checked;
+                this._detail.querySelectorAll<HTMLInputElement>('input[data-requires-sandbox="true"]').forEach(cb => {
+                    const label = cb.closest('label')!;
+                    if (hasSandbox) {
+                        cb.disabled = false;
+                        label.className = 'tool-checkbox';
+                        const badge = label.querySelector('.coming-soon');
+                        if (badge && badge.textContent === 'Requires sandbox') badge.remove();
+                    } else {
+                        cb.disabled = true;
+                        cb.checked = false;
+                        label.className = 'tool-checkbox disabled';
+                        if (!label.querySelector('.coming-soon')) {
+                            label.insertAdjacentHTML('beforeend', ' <span class="coming-soon">Requires sandbox</span>');
+                        }
+                    }
+                });
+            });
         }
     }
 
