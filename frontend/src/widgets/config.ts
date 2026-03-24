@@ -291,6 +291,8 @@ export class ConfigWidget extends Widget {
                     <label>Tools</label>
                     <div class="tools-checkboxes">
                         ${Object.entries(this._toolTypes).map(([id, t]: [string, any]) => {
+                            // Skills can't be assigned to the supervisor — it only delegates
+                            if (agent.type === 'supervisor' && id.startsWith('skill:')) return '';
                             const checked = agent.tools.includes(id) ? 'checked' : '';
                             const hasSandbox = agent.tools.includes('sandbox:daytona');
                             const needsSandbox = t.requires_sandbox && !hasSandbox;
