@@ -469,7 +469,7 @@ export class ConfigWidget extends Widget {
             const meta = document.createElement('span');
             meta.className = 'vs-list-count';
             const sourceLabel = skill.system ? 'system' : skill.source;
-            meta.textContent = sourceLabel + (skill.has_scripts ? ' · scripts' : '');
+            meta.textContent = sourceLabel + (skill.requires_sandbox ? ' · requires sandbox' : '');
             info.appendChild(meta);
             item.appendChild(info);
 

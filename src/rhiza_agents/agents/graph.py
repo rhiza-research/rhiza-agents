@@ -142,9 +142,9 @@ async def _resolve_tools(
             skill_id = tool_id[6:]
             if skill_id in all_skills:
                 skill_tool = all_skills[skill_id]
-                # Skills with scripts require sandbox access
+                # Skills requiring execution need sandbox access
                 tool_meta = getattr(skill_tool, "metadata", {}) or {}
-                if tool_meta.get("has_scripts") and not has_sandbox:
+                if tool_meta.get("requires_sandbox") and not has_sandbox:
                     logger.info("Skill %s requires sandbox, agent %s lacks it, skipping", skill_id, config.id)
                 else:
                     tools.append(skill_tool)

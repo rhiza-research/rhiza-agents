@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from ..agents.graph import invalidate_graph_cache
-from ..agents.tools.skills import has_scripts, parse_skill_md
+from ..agents.tools.skills import parse_skill_md, requires_sandbox
 from ..deps import get_db, get_user_id, invalidate_skill_cache, require_auth
 
 logger = logging.getLogger(__name__)
@@ -32,7 +32,7 @@ async def list_skills(request: Request, user: dict = Depends(require_auth)):
             "source_ref": s.get("source_ref"),
             "enabled": bool(s.get("enabled", True)),
             "system": s.get("user_id") is None,
-            "has_scripts": has_scripts(s),
+            "requires_sandbox": requires_sandbox(s),
         }
         for s in skills
     ]
@@ -54,7 +54,7 @@ async def get_skill(request: Request, skill_id: str, user: dict = Depends(requir
         "enabled": bool(skill.get("enabled", True)),
         "system": skill.get("user_id") is None,
         "skill_md": skill["skill_md"],
-        "has_scripts": has_scripts(skill),
+        "requires_sandbox": requires_sandbox(skill),
         "scripts": list(json.loads(skill["scripts_json"]).keys()) if skill.get("scripts_json") else [],
         "references": list(json.loads(skill["references_json"]).keys()) if skill.get("references_json") else [],
     }

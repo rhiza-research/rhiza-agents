@@ -112,6 +112,57 @@ def has_scripts(skill_record: dict) -> bool:
     return bool(scripts)
 
 
+# Languages in fenced code blocks that imply execution capability is needed
+_EXECUTABLE_LANGS = {"bash", "sh", "shell", "python", "python3", "py", "zsh", "fish", "powershell", "ruby", "perl"}
+
+# allowed-tools values that imply execution capability
+_EXECUTION_TOOLS = {"bash", "shell", "terminal", "code_execution", "run_file", "execute_python_code"}
+
+
+def requires_sandbox(skill_record: dict) -> bool:
+    """Check if a skill requires sandbox access to be useful.
+
+    A skill requires sandbox when it has:
+    - Bundled scripts (scripts_json)
+    - allowed-tools referencing execution tools (Bash, etc.)
+    - Metadata indicating binary dependencies (openclaw requires.bins)
+    - Executable code blocks in the prompt (```bash, ```python, etc.)
+    """
+    # Check for bundled scripts
+    if has_scripts(skill_record):
+        return True
+
+    skill_md = skill_record.get("skill_md", "")
+    try:
+        parsed = parse_skill_md(skill_md)
+    except ValueError:
+        return False
+
+    # Check allowed-tools for execution tools
+    for tool in parsed.allowed_tools:
+        # allowed-tools can be "Bash(python:*)" style — check the base name
+        base = tool.split("(")[0].strip().lower()
+        if base in _EXECUTION_TOOLS:
+            return True
+
+    # Check openclaw-style metadata for binary requirements
+    raw_meta = yaml.safe_load(re.match(r"^---\s*\n(.*?)\n---", skill_md, re.DOTALL).group(1) or "") or {}
+    openclaw = raw_meta.get("metadata", {})
+    if isinstance(openclaw, dict):
+        openclaw = openclaw.get("openclaw", {})
+        if isinstance(openclaw, dict) and openclaw.get("requires", {}).get("bins"):
+            return True
+
+    # Check for executable code blocks in the prompt body
+    code_block_pattern = re.compile(r"```(\w+)")
+    for match in code_block_pattern.finditer(parsed.prompt):
+        lang = match.group(1).lower()
+        if lang in _EXECUTABLE_LANGS:
+            return True
+
+    return False
+
+
 def create_skill_tool(skill_record: dict) -> StructuredTool:
     """Create a LangChain tool for a skill.
 
@@ -134,6 +185,6 @@ def create_skill_tool(skill_record: dict) -> StructuredTool:
     # Stash metadata on the tool for graph integration
     tool.metadata = {  # type: ignore[assignment]
         "skill_id": skill_id,
-        "has_scripts": has_scripts(skill_record),
+        "requires_sandbox": requires_sandbox(skill_record),
     }
     return tool

@@ -207,20 +207,19 @@ async def list_tool_types(request: Request, user: dict = Depends(require_auth)):
             }
         )
     # Add all skills (system + user) as tool types
-    from ..agents.tools.skills import has_scripts
+    from ..agents.tools.skills import requires_sandbox as skill_requires_sandbox
 
     skills = await db.list_skills(user_id)
     for skill in skills:
         sid = skill["id"]
         name = skill["name"]
         available = bool(skill.get("enabled", True))
-        requires_sandbox = has_scripts(skill)
         tool_types.append(
             {
                 "id": f"skill:{sid}",
                 "name": f"{name} Skill",
                 "available": available,
-                "requires_sandbox": requires_sandbox,
+                "requires_sandbox": skill_requires_sandbox(skill),
             }
         )
     return tool_types
