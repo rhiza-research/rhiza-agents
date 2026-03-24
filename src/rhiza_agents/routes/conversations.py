@@ -15,7 +15,6 @@ from ..deps import (
     get_db,
     get_mcp_tools,
     get_mcp_tools_by_server,
-    get_mcp_tools_for_user,
     get_user_id,
     get_vectorstore_manager,
     require_auth,
@@ -136,13 +135,17 @@ async def list_conversation_files(request: Request, conversation_id: str, user: 
 
     conversation = await db.get_conversation(conversation_id, user_id)
     if not conversation:
-        raise HTTPException(status_code=404, detail="Conversation not found")
+        # Allow read-only access to other users' conversations
+        conversation = await db.get_conversation_by_id(conversation_id)
+        if not conversation:
+            raise HTTPException(status_code=404, detail="Conversation not found")
 
-    user_mcp, mcp_names = await get_mcp_tools_for_user(request)
+    owner_id = conversation.get("user_id", user_id)
+    user_mcp, mcp_names = await _get_mcp_tools_for_owner(request, owner_id)
     graph = await get_agent_graph(
         mcp_tools,
         checkpointer,
-        user_id=user_id,
+        user_id=owner_id,
         db=db,
         vectorstore_manager=vectorstore_manager,
         mcp_tools_by_server=user_mcp,
@@ -179,13 +182,17 @@ async def get_conversation_file(
 
     conversation = await db.get_conversation(conversation_id, user_id)
     if not conversation:
-        raise HTTPException(status_code=404, detail="Conversation not found")
+        # Allow read-only access to other users' conversations
+        conversation = await db.get_conversation_by_id(conversation_id)
+        if not conversation:
+            raise HTTPException(status_code=404, detail="Conversation not found")
 
-    user_mcp, mcp_names = await get_mcp_tools_for_user(request)
+    owner_id = conversation.get("user_id", user_id)
+    user_mcp, mcp_names = await _get_mcp_tools_for_owner(request, owner_id)
     graph = await get_agent_graph(
         mcp_tools,
         checkpointer,
-        user_id=user_id,
+        user_id=owner_id,
         db=db,
         vectorstore_manager=vectorstore_manager,
         mcp_tools_by_server=user_mcp,
