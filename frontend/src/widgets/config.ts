@@ -287,6 +287,11 @@ export class ConfigWidget extends Widget {
                     <label for="edit-prompt">System Prompt</label>
                     <textarea id="edit-prompt" rows="12">${escapeHtml(agent.system_prompt)}</textarea>
                 </div>
+                ${agent.type === 'supervisor' ? `
+                <div class="form-group">
+                    <p style="color: var(--text-secondary); font-size: 0.85rem; margin: 0;">The supervisor routes messages to worker agents — it doesn't use tools, skills, or knowledge bases directly. Assign those to worker agents instead.</p>
+                </div>
+                ` : ''}
                 ${agent.type !== 'supervisor' ? `
                 <div class="form-group">
                     <label>Tools</label>
