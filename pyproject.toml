@@ -30,6 +30,8 @@ dependencies = [
     "databases[aiosqlite]",
     # Structured logging
     "python-json-logger>=3.3.0",
+    # YAML parsing (SKILL.md frontmatter)
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]

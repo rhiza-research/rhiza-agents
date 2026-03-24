@@ -85,6 +85,25 @@ class Database:
             )
         """)
 
+        await self.database.execute("""
+            CREATE TABLE IF NOT EXISTS skills (
+                id TEXT PRIMARY KEY,
+                user_id TEXT,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL,
+                source TEXT NOT NULL,
+                source_ref TEXT,
+                skill_md TEXT NOT NULL,
+                scripts_json TEXT,
+                references_json TEXT,
+                assets_json TEXT,
+                enabled BOOLEAN DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await self.database.execute("CREATE INDEX IF NOT EXISTS idx_skills_user_id ON skills(user_id)")
+
     async def create_conversation(self, conversation_id: str, user_id: str, title: str | None = None) -> dict:
         """Create a new conversation."""
         await self.database.execute(
@@ -342,4 +361,117 @@ class Database:
                ON CONFLICT (id) DO UPDATE SET
                    name = :name, url = :url, transport = :transport""",
             {"id": server_id, "name": name, "url": url, "transport": transport},
+        )
+
+    # --- Skills ---
+
+    async def list_skills(self, user_id: str) -> list[dict]:
+        """List all skills visible to a user (system + user-owned)."""
+        rows = await self.database.fetch_all(
+            "SELECT * FROM skills WHERE user_id IS NULL OR user_id = :user_id ORDER BY created_at",
+            {"user_id": user_id},
+        )
+        return [dict(row._mapping) for row in rows]
+
+    async def get_skill(self, skill_id: str) -> dict | None:
+        """Get a skill by ID."""
+        row = await self.database.fetch_one(
+            "SELECT * FROM skills WHERE id = :id",
+            {"id": skill_id},
+        )
+        return dict(row._mapping) if row else None
+
+    async def create_skill(
+        self,
+        skill_id: str,
+        user_id: str,
+        name: str,
+        description: str,
+        source: str,
+        skill_md: str,
+        source_ref: str | None = None,
+        scripts_json: str | None = None,
+        references_json: str | None = None,
+        assets_json: str | None = None,
+    ) -> dict:
+        """Create a user skill."""
+        await self.database.execute(
+            """INSERT INTO skills (id, user_id, name, description, source, source_ref,
+                   skill_md, scripts_json, references_json, assets_json)
+               VALUES (:id, :user_id, :name, :description, :source, :source_ref,
+                   :skill_md, :scripts_json, :references_json, :assets_json)""",
+            {
+                "id": skill_id,
+                "user_id": user_id,
+                "name": name,
+                "description": description,
+                "source": source,
+                "source_ref": source_ref,
+                "skill_md": skill_md,
+                "scripts_json": scripts_json,
+                "references_json": references_json,
+                "assets_json": assets_json,
+            },
+        )
+        return {
+            "id": skill_id,
+            "user_id": user_id,
+            "name": name,
+            "description": description,
+            "source": source,
+            "source_ref": source_ref,
+            "enabled": True,
+        }
+
+    async def update_skill(self, skill_id: str, **fields) -> bool:
+        """Update fields on a skill. Returns True if found."""
+        if not fields:
+            return False
+        fields["updated_at"] = datetime.now(UTC)
+        sets = ", ".join(f"{k} = :{k}" for k in fields)
+        fields["id"] = skill_id
+        result = await self.database.execute(
+            f"UPDATE skills SET {sets} WHERE id = :id",
+            fields,
+        )
+        return result > 0 if result else True
+
+    async def delete_skill(self, skill_id: str, user_id: str) -> bool:
+        """Delete a user skill (not system skills)."""
+        result = await self.database.execute(
+            "DELETE FROM skills WHERE id = :id AND user_id = :user_id",
+            {"id": skill_id, "user_id": user_id},
+        )
+        return result > 0 if result else True
+
+    async def upsert_system_skill(
+        self,
+        skill_id: str,
+        name: str,
+        description: str,
+        skill_md: str,
+        scripts_json: str | None = None,
+        references_json: str | None = None,
+        assets_json: str | None = None,
+    ):
+        """Insert or update a system-level skill."""
+        await self.database.execute(
+            """INSERT INTO skills (id, user_id, name, description, source, skill_md,
+                   scripts_json, references_json, assets_json)
+               VALUES (:id, NULL, :name, :description, 'system', :skill_md,
+                   :scripts_json, :references_json, :assets_json)
+               ON CONFLICT (id) DO UPDATE SET
+                   name = :name, description = :description, skill_md = :skill_md,
+                   scripts_json = :scripts_json, references_json = :references_json,
+                   assets_json = :assets_json, updated_at = :updated_at""",
+            {
+                "id": skill_id,
+                "name": name,
+                "description": description,
+                "skill_md": skill_md,
+                "scripts_json": scripts_json,
+                "references_json": references_json,
+                "assets_json": assets_json,
+                "updated_at": datetime.now(UTC),
+            },
         )

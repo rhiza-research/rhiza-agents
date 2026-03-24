@@ -18,6 +18,7 @@ from ..deps import (
     get_db,
     get_mcp_tools,
     get_mcp_tools_for_user,
+    get_skill_tools_for_user,
     get_user_id,
     get_vectorstore_manager,
     is_chat_logging_enabled,
@@ -90,6 +91,7 @@ async def stream_chat_message(
 
     _log_event("graph_build", status="start")
     user_mcp, mcp_names = await get_mcp_tools_for_user(request)
+    user_skills = await get_skill_tools_for_user(request)
     graph = await get_agent_graph(
         mcp_tools,
         checkpointer,
@@ -98,6 +100,7 @@ async def stream_chat_message(
         vectorstore_manager=vectorstore_manager,
         mcp_tools_by_server=user_mcp,
         mcp_server_names=mcp_names,
+        skill_tools=user_skills,
     )
     effective = await _get_effective_configs(request, user_id)
     agent_names, tool_to_agent = build_name_mappings(effective, mcp_tools)
@@ -348,6 +351,7 @@ async def resume_chat(
         raise HTTPException(status_code=404, detail="Conversation not found")
 
     user_mcp, mcp_names = await get_mcp_tools_for_user(request)
+    user_skills = await get_skill_tools_for_user(request)
     graph = await get_agent_graph(
         mcp_tools,
         checkpointer,
@@ -356,6 +360,7 @@ async def resume_chat(
         vectorstore_manager=vectorstore_manager,
         mcp_tools_by_server=user_mcp,
         mcp_server_names=mcp_names,
+        skill_tools=user_skills,
     )
     effective = await _get_effective_configs(request, user_id)
     agent_names, tool_to_agent = build_name_mappings(effective, mcp_tools)

@@ -12,6 +12,9 @@ logger = logging.getLogger(__name__)
 # Cache of user MCP tools: server_id -> tools list
 _user_mcp_cache: dict[str, list] = {}
 
+# Cache of skill tools: skill_id -> BaseTool
+_skill_cache: dict[str, "BaseTool"] = {}  # noqa: F821
+
 
 def get_db(request: Request) -> Database:
     """Get the database instance from app state."""
@@ -94,6 +97,40 @@ async def get_mcp_tools_for_user(
 def invalidate_user_mcp_cache(server_id: str):
     """Clear cached tools for a specific user MCP server."""
     _user_mcp_cache.pop(server_id, None)
+
+
+async def get_skill_tools_for_user(request: Request) -> dict[str, "BaseTool"]:  # noqa: F821
+    """Get skill tools for the current user (system + user skills).
+
+    Returns a dict of skill_id -> BaseTool.
+    """
+    from .agents.tools.skills import create_skill_tool
+
+    db = get_db(request)
+    user_id = get_user_id(request)
+    skills = await db.list_skills(user_id)
+
+    result = {}
+    for skill in skills:
+        if not skill.get("enabled", True):
+            continue
+        sid = skill["id"]
+        if sid not in _skill_cache:
+            try:
+                _skill_cache[sid] = create_skill_tool(skill)
+            except (ValueError, Exception) as e:
+                logger.warning("Failed to create tool for skill %s: %s", sid, e)
+                continue
+        result[sid] = _skill_cache[sid]
+    return result
+
+
+def invalidate_skill_cache(skill_id: str | None = None):
+    """Clear cached skill tools. If skill_id is None, clear all."""
+    if skill_id is None:
+        _skill_cache.clear()
+    else:
+        _skill_cache.pop(skill_id, None)
 
 
 async def is_chat_logging_enabled(request: Request, user_id: str) -> bool:
