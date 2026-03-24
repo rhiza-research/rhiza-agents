@@ -5,7 +5,7 @@ Multi-agent chat platform built on LangGraph.
 ## Before Starting Work
 
 1. Read `docs/ARCHITECTURE.md` for full system overview
-2. Read the relevant phase spec in `docs/specs/` for your task
+2. Read the relevant spec issue on GitHub for your task (see Specs section below)
 3. Read the reference docs in `docs/reference/` as needed
 
 ## Development
@@ -79,35 +79,48 @@ src/rhiza_agents/
   static/           # CSS, JS
 ```
 
-## Phase Completion Process
+## Spec Completion Process
 
-After completing implementation for a phase, before considering the phase done:
+After completing implementation for a spec, before considering it done:
 
-1. **Update the phase spec** (`docs/specs/XX-*.md`) to reflect what was actually built. Document deviations from the original spec: workarounds, changed approaches, discovered constraints (e.g., checkpoint serialization losing `msg.name`).
-2. **Update earlier phase specs** if the implementation changed shared interfaces (e.g., `_process_messages()` return format).
-3. **Update future phase specs** that reference changed interfaces (e.g., function signatures, JS function names, API response formats). These specs are used as implementation guides, so they must reference the correct current APIs.
-4. **Update `docs/ARCHITECTURE.md`** with any new architectural patterns, data flows, or constraints discovered during implementation.
-5. **Commit the doc updates** as a separate commit from the implementation.
+1. **Update the spec issue** to reflect what was actually built. Document deviations from the original spec: workarounds, changed approaches, discovered constraints.
+2. **Update other open spec issues** that reference changed interfaces. Specs are used as implementation guides, so they must reference the correct current APIs.
+3. **Update `docs/ARCHITECTURE.md`** with any new architectural patterns, data flows, or constraints discovered during implementation.
 
-The goal is that specs always reflect the current state of the code, not the original plan. Future phases build on what was actually implemented, not what was originally specified.
+The goal is that specs always reflect the current state of the code, not the original plan.
 
-## Implementation Phases
+## Specs
 
-| Phase | Spec | Status |
-|-------|------|--------|
-| 1 | `docs/specs/01-mvp-single-agent.md` | Complete |
-| 2 | `docs/specs/02-multi-agent-supervisor.md` | Complete |
-| 3 | `docs/specs/03-user-editable-config.md` | Complete |
-| 4 | `docs/specs/04-sandbox-execution.md` | Complete |
-| 5 | `docs/specs/05-vector-store.md` | Complete |
-| 6 | `docs/specs/06-streaming.md` | Complete |
-| 7 | `docs/specs/07-production-deploy.md` | Complete |
-| 8 | `docs/specs/08-context-management.md` | Complete (now uses SummarizationMiddleware) |
-| 9 | `docs/specs/09-file-viewer-and-execution-approval.md` | Complete |
-| 10 | `docs/specs/10-extended-thinking.md` | Complete |
-| 11 | `docs/specs/11-lumino-panel-layout.md` | Complete |
-| 12 | `docs/specs/12-user-mcp-servers.md` | Complete |
-| 13 | `docs/specs/13-main-py-refactor.md` | Complete |
+Specs live as GitHub issues with the `spec` label. Use `gh issue list --label spec` to see all specs. Use the `/spec` skill to propose, approve, implement, and update specs.
+
+### Completed
+
+| Issue | Title |
+|-------|-------|
+| [#1](https://github.com/rhiza-research/rhiza-agents/issues/1) | MVP — Single Agent with MCP Tools |
+| [#4](https://github.com/rhiza-research/rhiza-agents/issues/4) | Multi-Agent with Supervisor |
+| [#8](https://github.com/rhiza-research/rhiza-agents/issues/8) | User-Editable Config |
+| [#12](https://github.com/rhiza-research/rhiza-agents/issues/12) | Sandboxed Code Execution |
+| [#14](https://github.com/rhiza-research/rhiza-agents/issues/14) | Vector Store Integration |
+| [#5](https://github.com/rhiza-research/rhiza-agents/issues/5) | Streaming |
+| [#9](https://github.com/rhiza-research/rhiza-agents/issues/9) | Production Deployment |
+| [#11](https://github.com/rhiza-research/rhiza-agents/issues/11) | Context Management |
+| [#13](https://github.com/rhiza-research/rhiza-agents/issues/13) | File Viewer and Code Execution Approval |
+| [#2](https://github.com/rhiza-research/rhiza-agents/issues/2) | Extended Thinking |
+| [#6](https://github.com/rhiza-research/rhiza-agents/issues/6) | Lumino Panel Layout |
+| [#7](https://github.com/rhiza-research/rhiza-agents/issues/7) | User-Configurable MCP Servers |
+| [#10](https://github.com/rhiza-research/rhiza-agents/issues/10) | Refactor main.py |
+
+### Proposals
+
+| Issue | Title |
+|-------|-------|
+| [#3](https://github.com/rhiza-research/rhiza-agents/issues/3) | Agent Skills |
+| [#15](https://github.com/rhiza-research/rhiza-agents/issues/15) | Live Dashboards via MCP Apps |
+| [#16](https://github.com/rhiza-research/rhiza-agents/issues/16) | MCP Apps — Interactive UI from MCP Servers |
+| [#17](https://github.com/rhiza-research/rhiza-agents/issues/17) | Workflow Editor via MCP App |
+| [#18](https://github.com/rhiza-research/rhiza-agents/issues/18) | MCP Server Authentication |
+| [#19](https://github.com/rhiza-research/rhiza-agents/issues/19) | Scheduled Tasks |
 
 ## Key Principles
 
