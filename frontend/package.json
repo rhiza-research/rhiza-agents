@@ -11,6 +11,7 @@
     "@lumino/widgets": "^2.7.5",
     "font-awesome": "^4.7.0",
     "highlight.js": "^11.0.0",
+    "hyparquet": "^1.25.1",
     "marked": "^17.0.0",
     "marked-highlight": "^2.0.0"
   },

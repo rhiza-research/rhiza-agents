@@ -182,13 +182,21 @@ async def list_conversation_files(request: Request, conversation_id: str, user: 
     file_list = []
     for path, file_data in files.items():
         content_lines = file_data.get("content", [])
-        content_str = "\n".join(content_lines)
+        encoding = file_data.get("encoding")
+        if encoding == "base64":
+            # Base64 files store raw size differently
+            b64_str = content_lines[0] if content_lines else ""
+            size = len(b64_str) * 3 // 4  # Approximate decoded size
+        else:
+            content_str = "\n".join(content_lines)
+            size = len(content_str.encode("utf-8"))
         file_list.append(
             {
                 "path": path,
-                "size": len(content_str.encode("utf-8")),
+                "size": size,
                 "source": file_data.get("source", "agent"),
                 "modified_at": file_data.get("modified_at", ""),
+                "encoding": encoding,
             }
         )
     return file_list
@@ -235,10 +243,12 @@ async def get_conversation_file(
         raise HTTPException(status_code=404, detail="File not found")
 
     content_lines = file_data.get("content", [])
+    encoding = file_data.get("encoding")
     content_str = "\n".join(content_lines)
 
     return {
         "path": lookup_path,
         "content": content_str,
+        "encoding": encoding,
         "modified_at": file_data.get("modified_at", ""),
     }

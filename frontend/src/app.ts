@@ -32,7 +32,7 @@ const filesWidget: FilesWidget = new FilesWidget({
     getConversationId: () => chatWidget.conversationId,
     getReviewMode: () => chatWidget.reviewMode,
     onRunFile: (path: string) => chatWidget.sendMessage(`Run the file ${path}`),
-    onOpenFile: (path: string, content: string, source: string) => {
+    onOpenFile: (path: string, content: string, source: string, encoding?: string) => {
         const existingId = 'file-' + path.replace(/[^a-zA-Z0-9]/g, '_');
         for (const w of dock.widgets()) {
             if (w.id === existingId) {
@@ -40,7 +40,7 @@ const filesWidget: FilesWidget = new FilesWidget({
                 return;
             }
         }
-        const viewer = new FileViewerWidget(path, content, source);
+        const viewer = new FileViewerWidget(path, content, source, encoding);
         dock.addWidget(viewer, { mode: 'split-bottom', ref: chatWidget });
         dock.activateWidget(viewer);
     },

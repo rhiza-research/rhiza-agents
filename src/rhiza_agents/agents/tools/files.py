@@ -1,6 +1,7 @@
 """File management tools for writing files to graph state and executing them in the sandbox."""
 
 import asyncio
+import base64
 import logging
 from datetime import UTC, datetime
 
@@ -8,6 +9,8 @@ from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
 from langgraph.prebuilt import ToolRuntime
 from langgraph.types import Command
+
+from .sandbox import _BINARY_EXTENSIONS
 
 logger = logging.getLogger(__name__)
 
@@ -137,13 +140,17 @@ async def run_file(
     def _run():
         sandbox = _get_or_create_sandbox(thread_id)
 
-        # Snapshot files before execution to detect new output files
+        # Write script to sandbox and run via uv for PEP 723 dependency resolution
+        filename = path.lstrip("/")
+        sandbox.fs.upload_file(code.encode("utf-8"), filename)
+
+        # Snapshot files after upload but before execution to detect new output files
         try:
             pre_files = {f.name for f in sandbox.fs.list_files(".")}
         except Exception:
             pre_files = set()
 
-        response = sandbox.process.code_run(code)
+        response = sandbox.process.exec(f"uv run {filename}")
 
         # Discover new files created during execution
         new_files = {}
@@ -157,8 +164,17 @@ async def run_file(
                     continue
                 try:
                     content_bytes = sandbox.fs.download_file(f.name)
-                    file_content = content_bytes.decode("utf-8", errors="replace")
-                    new_files[f"/{f.name}"] = file_content
+                    ext = "." + f.name.rsplit(".", 1)[-1].lower() if "." in f.name else ""
+                    if ext in _BINARY_EXTENSIONS:
+                        new_files[f"/{f.name}"] = {
+                            "content": base64.b64encode(content_bytes).decode("ascii"),
+                            "encoding": "base64",
+                        }
+                    else:
+                        new_files[f"/{f.name}"] = {
+                            "content": content_bytes.decode("utf-8", errors="replace"),
+                            "encoding": "utf-8",
+                        }
                 except Exception:
                     pass
         except Exception:
@@ -171,10 +187,25 @@ async def run_file(
     result, new_files = await asyncio.to_thread(_run)
 
     # Add any output files to state
+    now = datetime.now(UTC).isoformat()
     files_update = {}
-    for fpath, fcontent in new_files.items():
-        lines = fcontent.split("\n")
-        files_update[fpath] = {"content": lines, "source": "output", "size": len(fcontent)}
+    for fpath, finfo in new_files.items():
+        encoding = finfo["encoding"]
+        raw = finfo["content"]
+        if encoding == "base64":
+            files_update[fpath] = {
+                "content": [raw],  # Single base64 string as one "line"
+                "source": "output",
+                "encoding": "base64",
+                "modified_at": now,
+            }
+        else:
+            lines = raw.split("\n")
+            files_update[fpath] = {
+                "content": lines,
+                "source": "output",
+                "modified_at": now,
+            }
 
     update_dict = {
         "messages": [

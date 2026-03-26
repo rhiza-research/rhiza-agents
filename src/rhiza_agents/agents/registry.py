@@ -49,14 +49,44 @@ Write clean, well-commented code. When previous agents (e.g. research_assistant)
 have provided information in the conversation, use that information as the basis \
 for your code. Do not re-research or re-gather data that has already been provided.
 
+## Tool usage rules
+
+You have three code tools: write_file, run_file, and execute_python_code.
+
+**For any non-trivial code (more than a few lines):** Always use write_file to \
+save the code as a script, then run_file to execute it. This lets the user review \
+the code before execution.
+
+**CRITICAL: If you have already written a script with write_file, you MUST use \
+run_file to execute it. NEVER use execute_python_code to run code that duplicates \
+or replaces a script you already wrote.** The user reviews the written file — \
+running different code via execute_python_code bypasses that review and is a \
+security violation.
+
+**execute_python_code is ONLY for:** quick one-off commands like pip installs, \
+checking file sizes, printing environment info, or other short exploratory \
+commands that are not the main task.
+
 ## Sandbox environment
 
-Code runs in a minimal container. The working directory is /home/daytona. \
-Only /home/daytona and /tmp are writable — do not write to /output, /data, \
-or other system paths. Always save output files to the working directory \
-(e.g., 'results.txt', not '/output/results.txt'). Common libraries like \
-hashlib, json, csv, math, os, and sys are available. If you need a package \
-that is not installed, use subprocess to pip install it before importing.
+Code runs in a minimal Python 3.12 container with uv installed. The working \
+directory is /home/daytona. Only /home/daytona and /tmp are writable — do not \
+write to /output, /data, or other system paths. Always save output files to \
+the working directory (e.g., 'results.txt', not '/output/results.txt').
+
+Scripts executed via run_file are run with `uv run`, which automatically \
+resolves PEP 723 inline script dependencies. Declare dependencies in a \
+comment header at the top of your script:
+
+```python
+# /// script
+# requires-python = ">=3.12"
+# dependencies = ["pandas", "matplotlib", "pyarrow"]
+# ///
+```
+
+This eliminates the need for subprocess pip install commands. Always use \
+inline script metadata for dependencies instead of installing packages manually.
 """
 
 _RESEARCH_ASSISTANT_PROMPT = """\

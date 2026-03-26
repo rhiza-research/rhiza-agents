@@ -10,7 +10,7 @@ interface FilesWidgetOptions {
     getConversationId: () => string;
     getReviewMode: () => boolean;
     onRunFile: (path: string) => void;
-    onOpenFile: (path: string, content: string, source: string) => void;
+    onOpenFile: (path: string, content: string, source: string, encoding?: string) => void;
 }
 
 /**
@@ -20,10 +20,11 @@ export class FilesWidget extends Widget {
     private _getConversationId: () => string;
     private _getReviewMode: () => boolean;
     private _onRunFile: (path: string) => void;
-    private _onOpenFile: (path: string, content: string, source: string) => void;
+    private _onOpenFile: (path: string, content: string, source: string, encoding?: string) => void;
 
     private _streamedFiles: Record<string, string> = {};
     private _fileSources: Record<string, string> = {};
+    private _fileEncodings: Record<string, string> = {};
     private _filesList!: HTMLDivElement;
 
     constructor(options: FilesWidgetOptions) {
@@ -79,6 +80,7 @@ export class FilesWidget extends Widget {
             for (const file of files) {
                 const source = file.source || 'agent';
                 this._fileSources[file.path] = source;
+                if (file.encoding) this._fileEncodings[file.path] = file.encoding;
                 this._addFileEntry(file.path, file.size, source);
             }
         } catch (e) {
@@ -140,7 +142,7 @@ export class FilesWidget extends Widget {
         // Check streamed cache first
         const cached = this._streamedFiles[path];
         if (cached !== undefined) {
-            this._onOpenFile(path, cached, this._fileSources[path] || 'agent');
+            this._onOpenFile(path, cached, this._fileSources[path] || 'agent', this._fileEncodings[path]);
             return;
         }
 
@@ -155,7 +157,7 @@ export class FilesWidget extends Widget {
                 return;
             }
             const data = await response.json();
-            this._onOpenFile(data.path, data.content, this._fileSources[path] || data.source || 'agent');
+            this._onOpenFile(data.path, data.content, this._fileSources[path] || data.source || 'agent', data.encoding);
         } catch (e) {
             console.error('Failed to open file:', e);
         }
