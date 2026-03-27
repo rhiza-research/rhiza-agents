@@ -41,7 +41,7 @@ const filesWidget: FilesWidget = new FilesWidget({
             }
         }
         const viewer = new FileViewerWidget(path, content, source, encoding);
-        dock.addWidget(viewer, { mode: 'split-bottom', ref: chatWidget });
+        dock.addWidget(viewer, { mode: 'tab-after', ref: chatWidget });
         dock.activateWidget(viewer);
     },
 });
