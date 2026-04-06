@@ -28,6 +28,14 @@ Create each via **Settings → Scores → New score config** in the Langfuse UI.
 These are the manual rubric the domain experts apply to traces, plus the
 score configs the LLM judges below write into.
 
+For CATEGORICAL configs, Langfuse requires an integer **value** alongside
+each category label (the form will fail validation with "expected number,
+received string" otherwise). The values are arbitrary but must be unique
+per config; the suggested convention is to assign descending integers in
+order of "best to worst" (e.g. `walked_through=2`, `partial=1`,
+`short_circuited=0`) so numeric aggregations and threshold filters behave
+sensibly.
+
 ### Workflow structure
 
 #### `workflow_decomposition`
@@ -162,18 +170,87 @@ score configs the LLM judges below write into.
 
 These run automatically on production traces and pre-populate the score
 configs above so the experts have a starting point when they review.
-Configure each via the Langfuse evaluator UI. Use a cheap fast model for
-all of them (e.g. `claude-haiku-4-5`) since they fire on every matching
-trace.
+Each judge is two pieces in Langfuse: an **evaluator template** (a prompt
++ score-type definition, lives at **LLM-as-a-Judge → Custom Evaluator**)
+and a **running evaluator** that points at a template, configures the
+filter / sample rate / variable mapping / target score config, and
+actually fires on incoming data (created via **LLM-as-a-Judge → Set up
+evaluator**).
 
 For the local instance, set sample rate to 100% so every test trace gets
 pre-scored. Drop to 10–25% in any future production instance once the
 judge prompts are stable.
 
+### Choosing a judge model
+
+Default to **Sonnet** (currently `claude-sonnet-4-5`) for all four judges
+until you have measured agreement with the experts. The judges only fire
+once per trace (see "Filter to the root span" below), so per-call cost is
+not worth optimizing before calibration. Haiku is the right *eventual*
+target for `tool_grounding` because that judge is essentially a
+substring/entailment check, but it tends to be unreliable on the more
+nuanced rubric items (`lineage_completeness`, `re_runnability`,
+`workflow_decomposition`) where it either settles into the middle of the
+scale or over-calls the most permissive category.
+
+The only objective way to pick a judge model is to score ~20
+representative traces yourself, then check inter-rater agreement (Cohen's
+kappa or just % agreement) between you and the judge. ≥80% agreement is
+the usual bar for "good enough"; below that, upgrade the model or sharpen
+the prompt.
+
+### Targeting: observation mode + root-span filter
+
+Langfuse's current evaluator API targets **observations**, not traces.
+The legacy "Traces" target still exists but is marked deprecated and the
+UI will warn you off it. To get **one judgment per conversation** under
+the observation-targeted API, filter every running evaluator to the root
+span of the LangGraph trace:
+
+- `type` **any of** `SPAN`
+- `name` **any of** `LangGraph`
+- `environment` **none of** `langfuse-llm-as-a-judge`,
+  `langfuse-prompt-experiment`, `langfuse-evaluation`, `sdk-experiment`
+  (this is Langfuse's default exclusion list — keeps the judges from
+  evaluating their own output)
+
+The LangGraph root span's `input` and `output` fields contain the entire
+conversation as the messages array, so a single observation has all the
+context the rubric needs.
+
+### Variable mapping
+
+Because everything has to come from the root span's `input` or `output`,
+the rubric variables don't map cleanly one-to-one. The mapping table
+below is what we landed on — it's an approximation, and the judge LLMs
+have to extract the relevant slice (final assistant message, tool result
+content, etc.) out of the messages JSON themselves. The prompt templates
+below are written to expect this and instruct the judge accordingly.
+
+| Evaluator | Template variable | Object Field |
+|---|---|---|
+| `workflow_decomposition` | `user_intent` | Input |
+| `workflow_decomposition` | `trace_summary` | Output |
+| `lineage_completeness` | `final_response` | Output |
+| `lineage_completeness` | `tool_outputs` | Input |
+| `tool_grounding` | `final_response` | Output |
+| `tool_grounding` | `tool_outputs` | Input |
+| `re_runnability` | `user_intent` | Input |
+| `re_runnability` | `trace_summary` | Output |
+| `re_runnability` | `final_response` | Output |
+
+The semantic mismatch — `tool_outputs` and `final_response` aren't
+actually different observation fields — is a known limitation of running
+trace-level rubrics through the observation-targeted API. If Langfuse
+ever ships per-variable JSONPath extraction we should revisit this and
+pull the messages array apart properly.
+
+All four judges below use the same filter (`type=SPAN`, `name=LangGraph`,
+default environment exclusions) — see "Targeting" above.
+
 ### Judge 1: Workflow decomposition
 
 - **Writes to:** `workflow_decomposition`
-- **Filter:** all traces with at least one assistant turn
 - **Variables:** `user_intent` (the user's first message), `trace_summary`
   (a structured summary of the trace's tool calls and assistant turns in
   order)
@@ -201,7 +278,6 @@ judge prompts are stable.
 ### Judge 2: Lineage completeness
 
 - **Writes to:** `lineage_completeness`
-- **Filter:** all traces with a final assistant response
 - **Variables:** `final_response` (last assistant message), `tool_outputs`
   (concatenated content of all tool result observations in the trace)
 - **Prompt template:**
@@ -223,8 +299,6 @@ judge prompts are stable.
 ### Judge 3: Tool grounding
 
 - **Writes to:** `tool_grounding`
-- **Filter:** all traces with a final assistant response and at least one
-  tool call
 - **Variables:** `final_response`, `tool_outputs`
 - **Prompt template:**
   > You are checking whether an AI system fabricated any facts not
@@ -244,7 +318,6 @@ judge prompts are stable.
 ### Judge 4: Re-runnability
 
 - **Writes to:** `re_runnability`
-- **Filter:** all traces with a final assistant response
 - **Variables:** `user_intent`, `trace_summary`, `final_response`
 - **Prompt template:**
   > You are evaluating whether an AI conversation could be reproduced by

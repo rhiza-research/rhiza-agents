@@ -92,6 +92,7 @@ Panels are dockable — users can drag tabs to rearrange, resize splits, and clo
 | Auth | `authlib` | Keycloak OIDC |
 | App database | `databases[aiosqlite]` | User configs, conversation metadata, MCP servers |
 | Structured logging | `python-json-logger` | JSON chat event logs |
+| Observability | `langfuse` | LLM tracing, prompt registration, score collection, dataset experiments |
 | Frontend layout | `@lumino/widgets` | Dockable panel layout (from JupyterLab) |
 | Frontend bundler | `esbuild` | TypeScript → JS bundle |
 | Markdown | `marked` + `highlight.js` | Rendering with syntax highlighting |
@@ -228,6 +229,57 @@ When enabled, every chat event is logged as structured JSON to stdout via `chat_
 
 Each event includes `conversation_id` and `user_id` for filtering. Logging is configurable globally (`CHAT_EVENT_LOGGING` env var) and per-user (opt-in/opt-out setting).
 
+## Observability and Evaluation
+
+The app integrates with [Langfuse](https://langfuse.com) for LLM tracing, prompt versioning, score collection, and dataset experiments. The integration is **opt-in via environment variables**: when `LANGFUSE_PUBLIC_KEY` is unset, every Langfuse code path becomes a no-op and the app behaves identically to a non-observed deployment. All Langfuse glue lives in a single module, `src/rhiza_agents/observability.py`.
+
+### Tracing
+
+Every chat invocation creates a Langfuse trace with:
+- A server-generated 32-char hex `trace_id` (so the frontend can correlate scores back to it)
+- `langfuse_user_id` = the Keycloak `sub`
+- `langfuse_session_id` = the conversation id
+- `LANGFUSE_TRACING_ENVIRONMENT` (e.g. `development` or `production`) — set per deployment so a single Langfuse project can host traces from multiple environments
+
+The trace covers the full supervisor → worker → tool call tree as a single tree of spans. The handler is constructed per request in `make_langfuse_handler(trace_id, prompt_objects)`, which uses `langfuse.langchain.CallbackHandler` with a custom `trace_context` to bind the predetermined trace id (the only way to inject a custom trace id in the v4 SDK).
+
+### Per-message user feedback
+
+The chat UI renders thumbs up / thumbs down buttons under every freshly streamed agent message. Clicking either button posts to a new `POST /api/chat/feedback` endpoint, which records a `user_feedback` numeric score (+1 / -1) against the trace via `client.create_score()`. The trace id is plumbed from the SSE stream (`event: trace_id`) into a `data-trace-id` attribute on the message div.
+
+Historical messages loaded from the conversation API do not currently get feedback buttons because the trace id is not persisted on the rhiza-agents side — only freshly streamed messages have it.
+
+### Per-user prompt registration and trace linking
+
+Default agent prompts are mirrored to Langfuse at app startup under `agent/<id>` and tagged with the `production` label. This is idempotent: a new prompt version is only created when the in-code text differs from what's already on the Langfuse server.
+
+User-customised prompts (i.e. prompt overrides via the config UI) are synced **lazily on every chat invocation** under `agent/<id>/<username>`. An in-memory content-hash cache keyed by `(username, agent_id)` makes the steady state zero Langfuse API calls per invocation; a hash mismatch triggers a re-sync, so any prompt edit is detected on the next chat without explicit cache invalidation.
+
+Each chat trace then **links each LLM generation to the prompt version that produced it**. The mechanism is non-obvious enough to be worth documenting:
+
+1. The natural approach — `runnable.with_config(metadata={"langfuse_prompt": ...})` on the compiled agent — does **not** work. LangGraph's Pregel executor builds chain runs from its own internal state and only propagates the run-config metadata at node boundaries; metadata bound to inner Runnables via `with_config` is silently dropped.
+2. Instead, every `chain_start` event LangGraph fires already carries a `langgraph_node` field in its metadata, which happens to match the agent id (because workers are created with `create_agent(..., name=wc.id)` and the supervisor node is named `supervisor`).
+3. So `make_langfuse_handler` wraps the underlying handler's `on_chain_start`. When the wrapped callback fires, it looks up `langgraph_node` against the per-user `prompt_objects` dict and **injects `langfuse_prompt` into the metadata** before delegating to the real handler. The Langfuse SDK then registers the prompt for that run id, and the child LLM generation walks up the parent chain in `_prompt_to_parent_run_map` to find it and render a clickable link in the trace UI.
+
+Future maintainers reaching for `with_config` should be saved by the comment in `observability.py`.
+
+### Evaluation framework
+
+The eval runner at `src/rhiza_agents/eval/runner.py` is a CLI module that runs a Langfuse dataset against the supervisor graph using Langfuse's first-class `dataset.run_experiment` API. Each item runs on a fresh `InMemorySaver` checkpointer so items don't share state, and the graph is built from default agent configs (no per-user overrides) so eval results stay reproducible.
+
+Concurrency defaults to `1` (sequential) because the downstream MCP servers and Anthropic rate limits both behave poorly when many agent sessions run concurrently. Bump `--concurrency` for larger datasets if downstream services can take it.
+
+The runner ships with a placeholder `has_output` evaluator. The real evaluation is done by **online LLM-as-judge evaluators configured in the Langfuse UI** — these fire on every trace including dataset run traces, so the runner doesn't need to call them. The recommended set is documented in `docs/langfuse-rubric.md`. Score configs and judges are UI-only in the current Langfuse public API (no terraform / migration script).
+
+### Configuration
+
+Three environment variables drive the integration. All are optional:
+- `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` — credential pair from the Langfuse project; when unset, the integration is disabled and every code path no-ops
+- `LANGFUSE_BASE_URL` — Langfuse server URL (e.g. `https://cloud.langfuse.com`, `https://us.cloud.langfuse.com`, or an internal self-hosted URL); the SDK actually reads `LANGFUSE_BASE_URL`, with `LANGFUSE_HOST` accepted as a deprecated alias
+- `LANGFUSE_TRACING_ENVIRONMENT` — environment tag attached to every trace (e.g. `development`, `staging`, `production`); lets a single Langfuse project separate traffic from multiple environments without needing multiple projects
+
+Local dev can either run a self-hosted Langfuse stack via the `langfuse` compose profile (`podman compose --profile langfuse up -d`) or point at cloud Langfuse by setting `LANGFUSE_BASE_URL` in `.envrc`. Production uses cloud Langfuse with credentials sourced from Google Secret Manager via Terraform.
+
 ## Persistence
 
 ### Two Storage Systems
@@ -248,8 +300,9 @@ app.py              # FastAPI app creation, lifespan, shared state on app.state
 deps.py             # Dependency injection: get_db(), require_auth(), get_mcp_tools_for_user()
 messages.py         # resolve_agent_name(), process_messages(), extract_content_blocks()
 logging_config.py   # setup_logging(), chat_event_logger
+observability.py    # Langfuse glue: handler factory, prompt sync cache, score client
 routes/
-    chat.py         # SSE streaming (largest module — event generators, tool resolution)
+    chat.py         # SSE streaming (largest module — event generators, tool resolution, /api/chat/feedback)
     agents.py       # Agent config CRUD + tool-types endpoint
     mcp_servers.py  # MCP server CRUD + test connectivity
     skills.py       # Skills CRUD + GitHub install
@@ -257,6 +310,8 @@ routes/
     conversations.py # List, delete, messages API, files API
     pages.py        # HTML page routes
     settings.py     # User settings API
+eval/
+    runner.py       # CLI module for running Langfuse dataset experiments against the graph
 ```
 
 Shared state (database, checkpointer, MCP tools, vectorstore manager) is initialized in the lifespan and stored on `app.state`. Route handlers access it via dependency injection from `deps.py`.

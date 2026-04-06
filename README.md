@@ -69,6 +69,27 @@ uv run rhiza-agents
 uv run pytest
 ```
 
+### Evaluation
+
+The eval runner runs a Langfuse dataset against the supervisor graph and
+records the results as a Langfuse dataset run with linked traces. Used as
+a regression test when you change a prompt, model, tool, or agent
+architecture.
+
+```bash
+podman exec rhiza-agents-rhiza-agents-1 \
+  uv run python -m rhiza_agents.eval.runner \
+  --dataset weather-workflow-bootstrap \
+  --label baseline-2026-04-06
+```
+
+Defaults to sequential execution (`--concurrency 1`) so downstream MCP
+servers and rate limits don't get overwhelmed. The score configs and
+LLM-as-judge templates that grade each run are documented in
+[`docs/langfuse-rubric.md`](docs/langfuse-rubric.md) — these have to be
+configured by hand in the Langfuse UI because the public API doesn't
+expose them.
+
 ### Langfuse MCP
 
 The local Langfuse stack exposes an MCP endpoint at
@@ -152,6 +173,7 @@ frontend/
 - **SQLite** — app database + LangGraph checkpointer
 - **ChromaDB** — vector store for RAG
 - **Daytona** — sandboxed code execution
+- **Langfuse** — LLM tracing, prompt registration, score collection, dataset experiments (opt-in via env vars)
 
 **Frontend:**
 - **Lumino** — dockable panel layout (from JupyterLab)
