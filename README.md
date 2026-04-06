@@ -69,6 +69,22 @@ uv run rhiza-agents
 uv run pytest
 ```
 
+### Langfuse MCP
+
+The local Langfuse stack exposes an MCP endpoint at
+`http://localhost:3000/api/public/mcp` for AI coding assistants to query
+traces, prompts, and scores. It uses HTTP Basic auth with your Langfuse keys
+— add this line to your `.envrc` once so any tool can pick up a base64-encoded
+auth header:
+
+```bash
+export LANGFUSE_BASIC_AUTH=$(echo -n "$LANGFUSE_PUBLIC_KEY:$LANGFUSE_SECRET_KEY" | base64)
+```
+
+Run `direnv allow`, then wire `${LANGFUSE_BASIC_AUTH}` into your editor or
+agent's MCP config under an `Authorization: Basic ${LANGFUSE_BASIC_AUTH}`
+header. The exact mechanism is tool-specific; project-scoped MCP config files
+
 ## Project Structure
 
 ```

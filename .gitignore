@@ -15,6 +15,7 @@ build/
 .pytest_cache/
 .mypy_cache/
 .claude
+.mcp.json
 node_modules/
 frontend/node_modules/
 data/
