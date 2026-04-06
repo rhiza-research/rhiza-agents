@@ -32,6 +32,7 @@ from ..messages import (
     extract_content_blocks_from_token,
     resolve_agent_name,
 )
+from ..observability import get_langfuse_handler
 
 logger = logging.getLogger(__name__)
 
@@ -146,9 +147,19 @@ async def stream_chat_message(
         try:
             while True:
                 auto_resume = False
+                stream_config = {
+                    "configurable": {"thread_id": conversation_id},
+                    "metadata": {
+                        "langfuse_user_id": user_id,
+                        "langfuse_session_id": conversation_id,
+                    },
+                }
+                lf_handler = get_langfuse_handler()
+                if lf_handler:
+                    stream_config["callbacks"] = [lf_handler]
                 async for chunk in graph.astream(
                     stream_input,
-                    config={"configurable": {"thread_id": conversation_id}},
+                    config=stream_config,
                     stream_mode=["messages", "updates", "custom"],
                     version="v2",
                     subgraphs=True,
@@ -424,9 +435,19 @@ async def resume_chat(
         _log_event("resume", decision=body.decision)
 
         try:
+            resume_config = {
+                "configurable": {"thread_id": body.conversation_id},
+                "metadata": {
+                    "langfuse_user_id": user_id,
+                    "langfuse_session_id": body.conversation_id,
+                },
+            }
+            lf_handler = get_langfuse_handler()
+            if lf_handler:
+                resume_config["callbacks"] = [lf_handler]
             async for chunk in graph.astream(
                 Command(resume={"decisions": [decision]}),
-                config={"configurable": {"thread_id": body.conversation_id}},
+                config=resume_config,
                 stream_mode=["messages", "updates", "custom"],
                 version="v2",
                 subgraphs=True,
