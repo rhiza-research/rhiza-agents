@@ -42,7 +42,7 @@ class Config:
     # Langfuse observability (optional — disabled if keys missing)
     langfuse_public_key: str
     langfuse_secret_key: str
-    langfuse_host: str
+    langfuse_base_url: str
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -68,5 +68,5 @@ class Config:
             chat_event_logging=os.environ.get("CHAT_EVENT_LOGGING", "false"),
             langfuse_public_key=os.environ.get("LANGFUSE_PUBLIC_KEY", ""),
             langfuse_secret_key=os.environ.get("LANGFUSE_SECRET_KEY", ""),
-            langfuse_host=os.environ.get("LANGFUSE_HOST", ""),
+            langfuse_base_url=os.environ.get("LANGFUSE_BASE_URL", ""),
         )
