@@ -92,7 +92,7 @@ def _has_output_evaluator(*, output, **kwargs):
     )
 
 
-async def _run(dataset_name: str, run_name: str | None) -> None:
+async def _run(dataset_name: str, run_name: str | None, max_concurrency: int) -> None:
     if not os.environ.get("LANGFUSE_PUBLIC_KEY"):
         raise SystemExit("LANGFUSE_PUBLIC_KEY is not set; cannot run experiment.")
 
@@ -110,11 +110,17 @@ async def _run(dataset_name: str, run_name: str | None) -> None:
         )
         return _extract_final_text(result.get("messages", []))
 
+    # Default to sequential execution. The downstream MCP servers (sheerwater
+    # in particular) and Anthropic rate limits both behave poorly when many
+    # agent sessions run concurrently against them, and small bootstrap
+    # datasets have no need for parallelism. Bump --concurrency for larger
+    # datasets if the downstream services can take it.
     experiment = dataset.run_experiment(
         name="rhiza-agents-supervisor",
         run_name=run_name,
         task=task,
         evaluators=[_has_output_evaluator],
+        max_concurrency=max_concurrency,
     )
 
     item_results = getattr(experiment, "item_results", None) or []
@@ -133,10 +139,19 @@ def main() -> None:
         "--label",
         help="Run label (e.g. 'opus-4.6-baseline'); shown in Langfuse for comparison across runs.",
     )
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=1,
+        help=(
+            "Max parallel item executions. Defaults to 1 (sequential) so "
+            "downstream MCP servers and rate limits don't get overwhelmed."
+        ),
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
-    asyncio.run(_run(args.dataset, args.label))
+    asyncio.run(_run(args.dataset, args.label, args.concurrency))
 
 
 if __name__ == "__main__":
