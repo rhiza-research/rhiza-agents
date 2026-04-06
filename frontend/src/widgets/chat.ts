@@ -238,8 +238,12 @@ export class ChatWidget extends Widget {
         const wrap = document.createElement('div');
         wrap.className = 'feedback-buttons';
         wrap.innerHTML = `
-            <button class="feedback-btn feedback-up" title="This response was helpful">&#x1F44D;</button>
-            <button class="feedback-btn feedback-down" title="This response was not helpful">&#x1F44E;</button>
+            <button class="feedback-btn feedback-up" title="This response was helpful" aria-label="Thumbs up">
+                <i class="fa fa-thumbs-o-up" aria-hidden="true"></i>
+            </button>
+            <button class="feedback-btn feedback-down" title="This response was not helpful" aria-label="Thumbs down">
+                <i class="fa fa-thumbs-o-down" aria-hidden="true"></i>
+            </button>
             <span class="feedback-status" aria-live="polite"></span>
         `;
         const status = wrap.querySelector('.feedback-status') as HTMLSpanElement;
