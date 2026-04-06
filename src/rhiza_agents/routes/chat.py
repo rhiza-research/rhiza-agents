@@ -32,7 +32,7 @@ from ..messages import (
     extract_content_blocks_from_token,
     resolve_agent_name,
 )
-from ..observability import get_langfuse_handler
+from ..observability import get_langfuse_client, make_langfuse_handler, new_trace_id
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +49,12 @@ class ResumeRequest(BaseModel):
     conversation_id: str
     decision: str = "approve"  # "approve" or "reject"
     message: str | None = None  # rejection reason
+
+
+class FeedbackRequest(BaseModel):
+    trace_id: str
+    value: int  # +1 for thumbs up, -1 for thumbs down
+    comment: str | None = None
 
 
 async def _get_effective_configs(request: Request, user_id: str) -> list[AgentConfig]:
@@ -147,6 +153,7 @@ async def stream_chat_message(
         try:
             while True:
                 auto_resume = False
+                trace_id = new_trace_id()
                 stream_config = {
                     "configurable": {"thread_id": conversation_id},
                     "metadata": {
@@ -154,9 +161,10 @@ async def stream_chat_message(
                         "langfuse_session_id": conversation_id,
                     },
                 }
-                lf_handler = get_langfuse_handler()
+                lf_handler = make_langfuse_handler(trace_id=trace_id)
                 if lf_handler:
                     stream_config["callbacks"] = [lf_handler]
+                    yield f"event: trace_id\ndata: {json.dumps({'trace_id': trace_id})}\n\n"
                 async for chunk in graph.astream(
                     stream_input,
                     config=stream_config,
@@ -435,6 +443,7 @@ async def resume_chat(
         _log_event("resume", decision=body.decision)
 
         try:
+            trace_id = new_trace_id()
             resume_config = {
                 "configurable": {"thread_id": body.conversation_id},
                 "metadata": {
@@ -442,9 +451,10 @@ async def resume_chat(
                     "langfuse_session_id": body.conversation_id,
                 },
             }
-            lf_handler = get_langfuse_handler()
+            lf_handler = make_langfuse_handler(trace_id=trace_id)
             if lf_handler:
                 resume_config["callbacks"] = [lf_handler]
+                yield f"event: trace_id\ndata: {json.dumps({'trace_id': trace_id})}\n\n"
             async for chunk in graph.astream(
                 Command(resume={"decisions": [decision]}),
                 config=resume_config,
@@ -597,3 +607,36 @@ async def resume_chat(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.post("/api/chat/feedback")
+async def submit_feedback(
+    body: FeedbackRequest,
+    user: dict = Depends(require_auth),
+):
+    """Attach a thumbs up/down score to a Langfuse trace.
+
+    The trace id was generated server-side at the start of the chat stream
+    that produced the message and surfaced to the client via the `trace_id`
+    SSE event. The client posts it back here when the user clicks the thumbs.
+    """
+    if body.value not in (1, -1):
+        raise HTTPException(status_code=400, detail="value must be 1 or -1")
+
+    client = get_langfuse_client()
+    if client is None:
+        raise HTTPException(status_code=503, detail="Langfuse not configured")
+
+    try:
+        client.create_score(
+            name="user_feedback",
+            value=body.value,
+            data_type="NUMERIC",
+            trace_id=body.trace_id,
+            comment=body.comment,
+        )
+    except Exception as e:
+        logger.exception("Failed to submit Langfuse feedback")
+        raise HTTPException(status_code=502, detail=f"Langfuse error: {e}") from e
+
+    return {"ok": True}

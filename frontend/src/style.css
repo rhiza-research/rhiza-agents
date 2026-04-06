@@ -87,6 +87,30 @@ body { height: 100vh; margin: 0; }
     background: rgba(33,150,243,0.15);
     padding: 0.15rem 0.5rem; border-radius: 3px; margin-bottom: 0.5rem; display: inline-block;
 }
+
+/* Per-message thumbs feedback (sent to Langfuse as scores) */
+.feedback-buttons {
+    display: flex; align-items: center; gap: 0.5rem;
+    margin-top: 0.75rem; padding-top: 0.5rem;
+    border-top: 1px solid var(--jp-border-color1);
+}
+.feedback-btn {
+    background: transparent; border: 1px solid var(--jp-border-color1);
+    border-radius: 4px; padding: 0.2rem 0.5rem;
+    font-size: 1rem; line-height: 1; cursor: pointer;
+    color: var(--jp-ui-font-color2); transition: background 0.15s, color 0.15s;
+}
+.feedback-btn:hover:not(:disabled) {
+    background: var(--jp-layout-color2);
+    color: var(--jp-ui-font-color1);
+}
+.feedback-btn:disabled { cursor: default; opacity: 0.6; }
+.feedback-btn.feedback-active {
+    background: var(--jp-brand-color1);
+    border-color: var(--jp-brand-color1);
+    color: white; opacity: 1;
+}
+.feedback-status { font-size: 0.75rem; color: var(--jp-ui-font-color3); }
 .agent-badge-container { margin-bottom: 0.25rem; }
 .message.streaming .message-content::after { content: "\25ca"; animation: blink 1s infinite; color: var(--jp-brand-color1); }
 @keyframes blink { 0%,50% { opacity:1; } 51%,100% { opacity:0; } }

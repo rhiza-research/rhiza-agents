@@ -1,39 +1,53 @@
 """Langfuse observability integration.
 
-Provides a singleton CallbackHandler for LangChain/LangGraph tracing.
-Disabled (returns None) when LANGFUSE_PUBLIC_KEY is not set.
+Disabled (every accessor returns None) when LANGFUSE_PUBLIC_KEY is not set.
 """
 
 import logging
 import os
+import secrets
 
 logger = logging.getLogger(__name__)
 
-_handler = None
-_initialized = False
+
+def langfuse_enabled() -> bool:
+    """True iff a Langfuse public key is configured."""
+    return bool(os.environ.get("LANGFUSE_PUBLIC_KEY"))
 
 
-def get_langfuse_handler():
-    """Return a Langfuse LangChain CallbackHandler, or None if not configured.
+def new_trace_id() -> str:
+    """Generate an OpenTelemetry-compatible 32-char hex trace id."""
+    return secrets.token_hex(16)
 
-    The handler is a singleton — subsequent calls return the same instance.
-    Per-trace metadata (user_id, session_id) is set on the run config, not here.
+
+def make_langfuse_handler(trace_id: str | None = None):
+    """Build a fresh Langfuse LangChain CallbackHandler bound to a trace id.
+
+    A new handler is constructed per call so that the trace id can be set via
+    `trace_context` (the only way to inject a custom trace id in the v4 SDK).
+    Returns None when Langfuse is disabled or fails to initialize.
     """
-    global _handler, _initialized
-    if _initialized:
-        return _handler
-    _initialized = True
-
-    if not os.environ.get("LANGFUSE_PUBLIC_KEY"):
-        logger.info("Langfuse disabled: LANGFUSE_PUBLIC_KEY not set")
+    if not langfuse_enabled():
         return None
-
     try:
         from langfuse.langchain import CallbackHandler
 
-        _handler = CallbackHandler()
-        logger.info("Langfuse callback handler initialized (host=%s)", os.environ.get("LANGFUSE_HOST", "default"))
+        if trace_id:
+            return CallbackHandler(trace_context={"trace_id": trace_id})
+        return CallbackHandler()
     except Exception as e:
-        logger.warning("Failed to initialize Langfuse handler: %s", e)
-        _handler = None
-    return _handler
+        logger.warning("Failed to construct Langfuse handler: %s", e)
+        return None
+
+
+def get_langfuse_client():
+    """Return the Langfuse SDK client, or None when disabled."""
+    if not langfuse_enabled():
+        return None
+    try:
+        from langfuse import get_client
+
+        return get_client()
+    except Exception as e:
+        logger.warning("Failed to get Langfuse client: %s", e)
+        return None
