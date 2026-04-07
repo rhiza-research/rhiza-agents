@@ -22,6 +22,7 @@ export class ChatWidget extends Widget {
     private _reviewMode = false;
     private _currentStreamingDiv: HTMLDivElement | null = null;
     private _currentAgent: string | null = null;
+    private _currentTraceId: string | null = null;
 
     private _messagesDiv!: HTMLDivElement;
     private _input!: HTMLTextAreaElement;
@@ -221,9 +222,59 @@ export class ChatWidget extends Widget {
             <div class="agent-badge-container"></div>
             <div class="message-content"></div>
         `;
+        if (this._currentTraceId) {
+            div.dataset.traceId = this._currentTraceId;
+        }
         this._messagesDiv.appendChild(div);
         this._messagesDiv.scrollTop = this._messagesDiv.scrollHeight;
         return div;
+    }
+
+    private _attachFeedbackButtons(msgDiv: HTMLDivElement): void {
+        const traceId = msgDiv.dataset.traceId;
+        if (!traceId) return;
+        if (msgDiv.querySelector('.feedback-buttons')) return;
+
+        const wrap = document.createElement('div');
+        wrap.className = 'feedback-buttons';
+        wrap.innerHTML = `
+            <button class="feedback-btn feedback-up" title="This response was helpful" aria-label="Thumbs up">
+                <i class="fa fa-thumbs-o-up" aria-hidden="true"></i>
+            </button>
+            <button class="feedback-btn feedback-down" title="This response was not helpful" aria-label="Thumbs down">
+                <i class="fa fa-thumbs-o-down" aria-hidden="true"></i>
+            </button>
+            <span class="feedback-status" aria-live="polite"></span>
+        `;
+        const status = wrap.querySelector('.feedback-status') as HTMLSpanElement;
+
+        const submit = async (value: 1 | -1, btn: HTMLButtonElement) => {
+            const buttons = wrap.querySelectorAll<HTMLButtonElement>('.feedback-btn');
+            buttons.forEach((b) => (b.disabled = true));
+            try {
+                const res = await fetch('/api/chat/feedback', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ trace_id: traceId, value }),
+                });
+                if (!res.ok) {
+                    throw new Error(`HTTP ${res.status}`);
+                }
+                btn.classList.add('feedback-active');
+                status.textContent = 'Thanks!';
+            } catch (err: any) {
+                buttons.forEach((b) => (b.disabled = false));
+                status.textContent = `Failed: ${err.message}`;
+            }
+        };
+
+        wrap.querySelector('.feedback-up')!.addEventListener('click', (e) =>
+            submit(1, e.currentTarget as HTMLButtonElement),
+        );
+        wrap.querySelector('.feedback-down')!.addEventListener('click', (e) =>
+            submit(-1, e.currentTarget as HTMLButtonElement),
+        );
+        msgDiv.appendChild(wrap);
     }
 
     private _appendToken(msgDiv: HTMLDivElement, token: string): void {
@@ -254,6 +305,7 @@ export class ChatWidget extends Widget {
     private _finalizeMessage(msgDiv: HTMLDivElement): void {
         msgDiv.classList.remove('streaming');
         this._streamedContent = '';
+        this._attachFeedbackButtons(msgDiv);
     }
 
     private _setMessageError(msgDiv: HTMLDivElement, error: string): void {
@@ -270,6 +322,12 @@ export class ChatWidget extends Widget {
                 if (!this._conversationId) {
                     this._conversationId = event.data.conversation_id;
                     history.pushState({}, '', `/c/${event.data.conversation_id}`);
+                }
+                break;
+            case 'trace_id':
+                this._currentTraceId = event.data.trace_id;
+                if (this._currentStreamingDiv) {
+                    this._currentStreamingDiv.dataset.traceId = event.data.trace_id;
                 }
                 break;
             case 'agent_start': {
@@ -366,6 +424,7 @@ export class ChatWidget extends Widget {
     private async _resumeExecution(decision: string, message: string | null): Promise<void> {
         if (!this._conversationId) return;
 
+        this._currentTraceId = null;
         this._currentStreamingDiv = this._addStreamingMessage();
         this._currentAgent = null;
 
@@ -430,6 +489,7 @@ export class ChatWidget extends Widget {
         this._input.value = '';
         this._input.style.height = 'auto';
 
+        this._currentTraceId = null;
         this._currentStreamingDiv = this._addStreamingMessage();
         this._currentAgent = null;
 

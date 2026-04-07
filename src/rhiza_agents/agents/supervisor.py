@@ -21,17 +21,19 @@ async def get_agent_graph(
 ):
     """Get the compiled agent graph.
 
+    If user_configs is provided directly, uses those (callers that have
+    already computed the merged effective configs should prefer this path
+    to avoid re-fetching them from the database).
     If user_id and db are provided, loads overrides from the database.
-    If user_configs is provided directly, uses those.
     Otherwise uses defaults.
     """
-    if user_id and db:
+    if user_configs is not None:
+        configs = user_configs
+    elif user_id and db:
         defaults = get_default_configs()
         override_rows = await db.get_user_agent_configs(user_id)
         overrides = [json.loads(row["config_json"]) for row in override_rows]
         configs = merge_configs(defaults, overrides)
-    elif user_configs:
-        configs = user_configs
     else:
         configs = get_default_configs()
     return await get_or_build_graph(

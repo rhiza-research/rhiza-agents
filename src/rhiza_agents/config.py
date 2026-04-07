@@ -39,6 +39,11 @@ class Config:
     log_level: str
     chat_event_logging: str  # "false", "true", or "opt-in"
 
+    # Langfuse observability (optional — disabled if keys missing)
+    langfuse_public_key: str
+    langfuse_secret_key: str
+    langfuse_base_url: str
+
     @classmethod
     def from_env(cls) -> "Config":
         """Load configuration from environment variables."""
@@ -61,4 +66,7 @@ class Config:
             base_url=os.environ.get("BASE_URL", "http://localhost:8080"),
             log_level=os.environ.get("LOG_LEVEL", "INFO"),
             chat_event_logging=os.environ.get("CHAT_EVENT_LOGGING", "false"),
+            langfuse_public_key=os.environ.get("LANGFUSE_PUBLIC_KEY", ""),
+            langfuse_secret_key=os.environ.get("LANGFUSE_SECRET_KEY", ""),
+            langfuse_base_url=os.environ.get("LANGFUSE_BASE_URL", ""),
         )

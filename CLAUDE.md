@@ -52,6 +52,7 @@ uv run pytest
 - **Graphs are built dynamically** per-user based on their agent config (defaults + overrides).
 - **MCP tools** are loaded via `langchain-mcp-adapters` at startup and cached.
 - **Agent configs** are Pydantic models. Defaults in code, user overrides in DB as JSON.
+- **Langfuse observability** is opt-in via env vars (`LANGFUSE_PUBLIC_KEY` etc.) and contained in `src/rhiza_agents/observability.py`. When the env vars are unset every observability code path no-ops. Per-user prompts are mirrored to Langfuse lazily on each chat invocation under `agent/<id>/<username>` with an in-memory content-hash cache. **Important quirk**: linking each LLM generation to its prompt cannot be done via `Runnable.with_config(metadata={"langfuse_prompt": ...})` because LangGraph's Pregel executor drops Runnable-bound metadata at node boundaries. Instead, `make_langfuse_handler` wraps `on_chain_start` and injects `langfuse_prompt` based on the `langgraph_node` field LangGraph adds to chain_start metadata. The observability docstring spells this out — read it before reaching for `with_config`.
 
 ## File Structure
 

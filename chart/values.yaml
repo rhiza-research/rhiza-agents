@@ -41,7 +41,8 @@ persistence:
 
 # Name of the Kubernetes secret containing sensitive env vars.
 # This secret is created by Terraform, NOT by this chart.
-# Keys: KEYCLOAK_CLIENT_SECRET, ANTHROPIC_API_KEY, DAYTONA_API_KEY, SECRET_KEY
+# Keys: KEYCLOAK_CLIENT_SECRET, ANTHROPIC_API_KEY, DAYTONA_API_KEY, DAYTONA_API_URL,
+#       SECRET_KEY, LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY
 secretName: rhiza-agents-secrets
 
 # Non-secret environment variables
@@ -52,6 +53,11 @@ env:
   KEYCLOAK_CLIENT_ID: ""
   MCP_SERVER_URL: ""
   BASE_URL: ""
+  # Langfuse observability — base URL and the environment tag the SDK
+  # attaches to every trace so a single Langfuse project can separate
+  # dev and prod traffic via the environment filter.
+  LANGFUSE_BASE_URL: ""
+  LANGFUSE_TRACING_ENVIRONMENT: ""
   # DATABASE_URL is set automatically to point at the PVC-mounted SQLite file
   # CHECKPOINT_DB_PATH is set automatically to point at the PVC-mounted checkpoints file
   # CHROMA_PERSIST_DIR is set automatically to point at the PVC-mounted chroma directory

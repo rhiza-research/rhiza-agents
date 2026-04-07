@@ -126,6 +126,12 @@ async def lifespan(app: FastAPI):
     # Load system skills from bundled directory
     await _load_system_skills(db)
 
+    # Mirror default agent prompts into Langfuse (no-op if Langfuse disabled
+    # or if the prompts are already up to date)
+    from .observability import register_default_prompts
+
+    register_default_prompts()
+
     # Build initial agent name mappings for logging
     configs_by_id = get_default_configs_by_id()
     app.state.agent_names = {agent_id: c.name for agent_id, c in configs_by_id.items()}

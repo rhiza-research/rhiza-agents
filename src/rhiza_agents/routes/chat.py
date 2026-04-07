@@ -20,6 +20,7 @@ from ..deps import (
     get_mcp_tools_for_user,
     get_skill_tools_for_user,
     get_user_id,
+    get_user_name,
     get_vectorstore_manager,
     is_chat_logging_enabled,
     require_auth,
@@ -31,6 +32,12 @@ from ..messages import (
     extract_content_blocks,
     extract_content_blocks_from_token,
     resolve_agent_name,
+)
+from ..observability import (
+    get_langfuse_client,
+    make_langfuse_handler,
+    new_trace_id,
+    sync_user_prompts,
 )
 
 logger = logging.getLogger(__name__)
@@ -48,6 +55,12 @@ class ResumeRequest(BaseModel):
     conversation_id: str
     decision: str = "approve"  # "approve" or "reject"
     message: str | None = None  # rejection reason
+
+
+class FeedbackRequest(BaseModel):
+    trace_id: str
+    value: int  # +1 for thumbs up, -1 for thumbs down
+    comment: str | None = None
 
 
 async def _get_effective_configs(request: Request, user_id: str) -> list[AgentConfig]:
@@ -92,17 +105,20 @@ async def stream_chat_message(
     _log_event("graph_build", status="start")
     user_mcp, mcp_names = await get_mcp_tools_for_user(request)
     user_skills = await get_skill_tools_for_user(request)
+    # Compute effective configs first so we can sync prompts before the graph
+    # is built and bind each agent's prompt object to its model in build_graph.
+    effective = await _get_effective_configs(request, user_id)
+    prompt_refs, prompt_objects = sync_user_prompts(get_user_name(request), effective)
     graph = await get_agent_graph(
         mcp_tools,
         checkpointer,
-        user_id=user_id,
+        user_configs=effective,
         db=db,
         vectorstore_manager=vectorstore_manager,
         mcp_tools_by_server=user_mcp,
         mcp_server_names=mcp_names,
         skill_tools=user_skills,
     )
-    effective = await _get_effective_configs(request, user_id)
     agent_names, tool_to_agent = build_name_mappings(effective, mcp_tools)
     # Map the langgraph default node name "agent" to the supervisor's display name
     supervisor_name = next((c.name for c in effective if c.type == "supervisor"), "Supervisor")
@@ -146,9 +162,22 @@ async def stream_chat_message(
         try:
             while True:
                 auto_resume = False
+                trace_id = new_trace_id()
+                stream_config = {
+                    "configurable": {"thread_id": conversation_id},
+                    "metadata": {
+                        "langfuse_user_id": user_id,
+                        "langfuse_session_id": conversation_id,
+                        "rhiza_prompts": prompt_refs,
+                    },
+                }
+                lf_handler = make_langfuse_handler(trace_id=trace_id, prompt_objects=prompt_objects)
+                if lf_handler:
+                    stream_config["callbacks"] = [lf_handler]
+                    yield f"event: trace_id\ndata: {json.dumps({'trace_id': trace_id})}\n\n"
                 async for chunk in graph.astream(
                     stream_input,
-                    config={"configurable": {"thread_id": conversation_id}},
+                    config=stream_config,
                     stream_mode=["messages", "updates", "custom"],
                     version="v2",
                     subgraphs=True,
@@ -352,17 +381,18 @@ async def resume_chat(
 
     user_mcp, mcp_names = await get_mcp_tools_for_user(request)
     user_skills = await get_skill_tools_for_user(request)
+    effective = await _get_effective_configs(request, user_id)
+    prompt_refs, prompt_objects = sync_user_prompts(get_user_name(request), effective)
     graph = await get_agent_graph(
         mcp_tools,
         checkpointer,
-        user_id=user_id,
+        user_configs=effective,
         db=db,
         vectorstore_manager=vectorstore_manager,
         mcp_tools_by_server=user_mcp,
         mcp_server_names=mcp_names,
         skill_tools=user_skills,
     )
-    effective = await _get_effective_configs(request, user_id)
     agent_names, tool_to_agent = build_name_mappings(effective, mcp_tools)
     supervisor_name = next((c.name for c in effective if c.type == "supervisor"), "Supervisor")
     agent_names["agent"] = supervisor_name
@@ -424,9 +454,22 @@ async def resume_chat(
         _log_event("resume", decision=body.decision)
 
         try:
+            trace_id = new_trace_id()
+            resume_config = {
+                "configurable": {"thread_id": body.conversation_id},
+                "metadata": {
+                    "langfuse_user_id": user_id,
+                    "langfuse_session_id": body.conversation_id,
+                    "rhiza_prompts": prompt_refs,
+                },
+            }
+            lf_handler = make_langfuse_handler(trace_id=trace_id, prompt_objects=prompt_objects)
+            if lf_handler:
+                resume_config["callbacks"] = [lf_handler]
+                yield f"event: trace_id\ndata: {json.dumps({'trace_id': trace_id})}\n\n"
             async for chunk in graph.astream(
                 Command(resume={"decisions": [decision]}),
-                config={"configurable": {"thread_id": body.conversation_id}},
+                config=resume_config,
                 stream_mode=["messages", "updates", "custom"],
                 version="v2",
                 subgraphs=True,
@@ -576,3 +619,36 @@ async def resume_chat(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.post("/api/chat/feedback")
+async def submit_feedback(
+    body: FeedbackRequest,
+    user: dict = Depends(require_auth),
+):
+    """Attach a thumbs up/down score to a Langfuse trace.
+
+    The trace id was generated server-side at the start of the chat stream
+    that produced the message and surfaced to the client via the `trace_id`
+    SSE event. The client posts it back here when the user clicks the thumbs.
+    """
+    if body.value not in (1, -1):
+        raise HTTPException(status_code=400, detail="value must be 1 or -1")
+
+    client = get_langfuse_client()
+    if client is None:
+        raise HTTPException(status_code=503, detail="Langfuse not configured")
+
+    try:
+        client.create_score(
+            name="user_feedback",
+            value=body.value,
+            data_type="NUMERIC",
+            trace_id=body.trace_id,
+            comment=body.comment,
+        )
+    except Exception as e:
+        logger.exception("Failed to submit Langfuse feedback")
+        raise HTTPException(status_code=502, detail=f"Langfuse error: {e}") from e
+
+    return {"ok": True}
