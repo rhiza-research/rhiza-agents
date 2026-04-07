@@ -181,6 +181,17 @@ For the local instance, set sample rate to 100% so every test trace gets
 pre-scored. Drop to 10–25% in any future production instance once the
 judge prompts are stable.
 
+Always set **time scope** to both `New traces` **and** `Existing traces`
+when creating a running evaluator. New-only is the default and will skip
+every trace that predates the evaluator. The "Existing traces" backfill
+batch is only triggered at evaluator creation time — toggling it on
+later via the API has no effect, so if you forgot it the only fix is to
+delete and recreate the evaluator. Backfill of all matching historical
+traces typically completes within ~10–15 minutes on Langfuse Cloud; if
+no judge scores have appeared on an existing trace after 20 minutes,
+something else is wrong (most likely the filter doesn't actually match
+that trace's root observation — see "Targeting" below).
+
 ### Choosing a judge model
 
 Default to **Sonnet** (currently `claude-sonnet-4-5`) for all four judges
@@ -199,33 +210,51 @@ kappa or just % agreement) between you and the judge. ≥80% agreement is
 the usual bar for "good enough"; below that, upgrade the model or sharpen
 the prompt.
 
-### Targeting: observation mode + root-span filter
+### Targeting: observation mode + root-observation filter
 
 Langfuse's current evaluator API targets **observations**, not traces.
 The legacy "Traces" target still exists but is marked deprecated and the
 UI will warn you off it. To get **one judgment per conversation** under
 the observation-targeted API, filter every running evaluator to the root
-span of the LangGraph trace:
+observation of each trace shape we care about:
 
-- `type` **any of** `SPAN`
-- `name` **any of** `LangGraph`
+- `type` **any of** `CHAIN`, `SPAN`
+- `name` **any of** `LangGraph`, `experiment-item-run`
 - `environment` **none of** `langfuse-llm-as-a-judge`,
-  `langfuse-prompt-experiment`, `langfuse-evaluation`, `sdk-experiment`
-  (this is Langfuse's default exclusion list — keeps the judges from
-  evaluating their own output)
+  `langfuse-prompt-experiment`, `langfuse-evaluation`
+  (Langfuse's default exclusion list also includes `sdk-experiment`,
+  but **drop that one** — `sdk-experiment` is exactly the environment
+  that `dataset.run_experiment` runs in, so excluding it would hide
+  every offline dataset run from the judges)
 
-The LangGraph root span's `input` and `output` fields contain the entire
-conversation as the messages array, so a single observation has all the
+Why those two name/type pairs:
+
+- **Live chats** (the rhiza-agents app) emit a root observation of
+  `type=CHAIN, name=LangGraph` whose `input` is the user's first message
+  and `output` is the entire messages array of the final state. This is
+  the LangGraph executor's own root chain — there is no `SPAN` named
+  `LangGraph` despite the trace itself being named that.
+- **Dataset experiments** (`dataset.run_experiment` from
+  `src/rhiza_agents/eval/runner.py`) emit a root observation of
+  `type=SPAN, name=experiment-item-run` whose `input` is the dataset
+  item's input string and `output` is whatever the task function
+  returned. The Langfuse SDK populates these fields automatically via
+  `span.update(input=..., output=...)` in `_process_experiment_item`,
+  so the runner does **not** need to attach its own callback handler.
+
+In both cases the single root observation has all the conversation
 context the rubric needs.
 
 ### Variable mapping
 
-Because everything has to come from the root span's `input` or `output`,
-the rubric variables don't map cleanly one-to-one. The mapping table
-below is what we landed on — it's an approximation, and the judge LLMs
-have to extract the relevant slice (final assistant message, tool result
-content, etc.) out of the messages JSON themselves. The prompt templates
-below are written to expect this and instruct the judge accordingly.
+Because everything has to come from the root observation's `input` or
+`output`, the rubric variables don't map cleanly one-to-one. The mapping
+table below is what we landed on — it's an approximation, and the judge
+LLMs have to extract the relevant slice (final assistant message, tool
+result content, etc.) out of whatever the field contains. For live
+LangGraph chats that's a JSON messages array; for dataset experiments
+it's a plain string. The prompt templates below are written to expect
+either shape and instruct the judge accordingly.
 
 | Evaluator | Template variable | Object Field |
 |---|---|---|
@@ -245,8 +274,10 @@ trace-level rubrics through the observation-targeted API. If Langfuse
 ever ships per-variable JSONPath extraction we should revisit this and
 pull the messages array apart properly.
 
-All four judges below use the same filter (`type=SPAN`, `name=LangGraph`,
-default environment exclusions) — see "Targeting" above.
+All four judges below use the same filter
+(`type any of [CHAIN, SPAN]`, `name any of [LangGraph, experiment-item-run]`,
+environment none of `[langfuse-llm-as-a-judge, langfuse-prompt-experiment, langfuse-evaluation]`)
+— see "Targeting" above.
 
 ### Judge 1: Workflow decomposition
 
