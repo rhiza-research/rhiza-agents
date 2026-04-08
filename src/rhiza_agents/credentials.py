@@ -1,10 +1,17 @@
 """User-scoped credentials: encryption at rest + output redaction.
 
-The credentials feature is opt-in: the encryption key comes from the
-``CREDENTIAL_ENCRYPTION_KEY`` env var (a 32-byte urlsafe-base64 Fernet key).
-When the var is unset, ``credentials_enabled()`` returns False and all
-encrypt/decrypt calls raise — the API layer must short-circuit to a 503
-in that case so the feature fails closed.
+The credentials feature is opt-in. ``CREDENTIAL_ENCRYPTION_KEY`` is a
+high-entropy random seed string. At startup it is hashed with SHA-256
+and the digest is urlsafe-base64-encoded to produce the actual Fernet
+key, so the operator can supply any random string without needing a
+Fernet-specific generator.
+
+When the env var is unset, ``credentials_enabled()`` returns False and
+all encrypt/decrypt calls raise — the API layer must short-circuit to a
+503 in that case so the feature fails closed.
+
+The seed must be stable across deployments. If it changes, every
+previously-stored encrypted credential becomes unreadable.
 
 Stored credentials are flat name/value pairs. The LLM never sees values;
 it only sees the available *names* via the system prompt and approval
@@ -13,6 +20,7 @@ materialization plan the LLM provides in its tool call.
 """
 
 import base64
+import hashlib
 import logging
 import os
 import re
@@ -26,6 +34,17 @@ _fernet: Fernet | None = None
 _fernet_initialized = False
 
 
+def _derive_fernet_key(seed: str) -> bytes:
+    """Derive a Fernet key (44-char urlsafe-base64 of 32 bytes) from a seed.
+
+    SHA-256 always produces 32 bytes, and ``urlsafe_b64encode`` of 32 bytes
+    is always the 44-character padded urlsafe-base64 string Fernet expects.
+    Any non-empty seed string is therefore valid input.
+    """
+    digest = hashlib.sha256(seed.encode("utf-8")).digest()
+    return base64.urlsafe_b64encode(digest)
+
+
 def _get_fernet() -> Fernet | None:
     """Lazily build the Fernet instance from CREDENTIAL_ENCRYPTION_KEY.
 
@@ -36,22 +55,11 @@ def _get_fernet() -> Fernet | None:
     if _fernet_initialized:
         return _fernet
     _fernet_initialized = True
-    raw = os.environ.get("CREDENTIAL_ENCRYPTION_KEY", "").strip()
-    if not raw:
+    seed = os.environ.get("CREDENTIAL_ENCRYPTION_KEY", "").strip()
+    if not seed:
         logger.warning("CREDENTIAL_ENCRYPTION_KEY not set — credentials feature disabled")
         return None
-    try:
-        # Fernet keys are urlsafe-base64-encoded 32-byte strings.
-        _fernet = Fernet(raw.encode())
-    except Exception:
-        try:
-            decoded = base64.urlsafe_b64decode(raw)
-            if len(decoded) != 32:
-                raise ValueError(f"key must decode to 32 bytes, got {len(decoded)}")
-            _fernet = Fernet(base64.urlsafe_b64encode(decoded))
-        except Exception as e:
-            logger.error("CREDENTIAL_ENCRYPTION_KEY is invalid: %s", e)
-            return None
+    _fernet = Fernet(_derive_fernet_key(seed))
     return _fernet
 
 

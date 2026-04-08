@@ -34,6 +34,41 @@ def test_credentials_disabled_when_key_unset(monkeypatch):
         credentials.decrypt_value(b"anything")
 
 
+def test_seed_can_be_arbitrary_string(monkeypatch):
+    """Any non-empty seed must produce a working Fernet instance.
+
+    This is the property that lets the terraform random_password module
+    feed CREDENTIAL_ENCRYPTION_KEY directly without us needing a
+    Fernet-specific generator.
+    """
+    monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", "any-old-string-from-random-password")
+    credentials._fernet = None
+    credentials._fernet_initialized = False
+    assert credentials.credentials_enabled() is True
+    ct = credentials.encrypt_value("hello")
+    assert credentials.decrypt_value(ct) == "hello"
+
+
+def test_different_seeds_produce_different_keys(monkeypatch):
+    """Two distinct seeds derive to two distinct Fernet keys.
+
+    Verifies the derivation isn't accidentally collapsing to a single key.
+    """
+    monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", "seed-one")
+    credentials._fernet = None
+    credentials._fernet_initialized = False
+    ct = credentials.encrypt_value("payload")
+
+    monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", "seed-two")
+    credentials._fernet = None
+    credentials._fernet_initialized = False
+    # Decrypting with the wrong seed must fail.
+    from cryptography.fernet import InvalidToken
+
+    with pytest.raises(InvalidToken):
+        credentials.decrypt_value(ct)
+
+
 def test_encrypt_decrypt_roundtrip():
     plaintext = "hunter2"
     ct = credentials.encrypt_value(plaintext)
