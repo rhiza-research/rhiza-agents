@@ -7,8 +7,31 @@ async db: validation, name collection, and the env-vars/file build step.
 from rhiza_agents.agents.tools.sandbox import (
     _build_runtime_injection,
     _collect_referenced_names,
+    _normalize_sandbox_upload_path,
     _validate_materializations,
 )
+
+
+def test_normalize_sandbox_upload_path_strips_tilde():
+    """Daytona's fs.upload_file does not expand ``~``; we have to strip it."""
+    assert _normalize_sandbox_upload_path("~/.netrc") == ".netrc"
+
+
+def test_normalize_sandbox_upload_path_strips_home_prefix():
+    """An absolute path under the sandbox home should land at the same place."""
+    assert _normalize_sandbox_upload_path("/root/.netrc") == ".netrc"
+    assert _normalize_sandbox_upload_path("/root/code/foo.py") == "code/foo.py"
+
+
+def test_normalize_sandbox_upload_path_strips_leading_slash():
+    """Absolute paths outside the sandbox home are made relative to it."""
+    assert _normalize_sandbox_upload_path("/home/daytona/foo.py") == "home/daytona/foo.py"
+    assert _normalize_sandbox_upload_path("/.netrc") == ".netrc"
+
+
+def test_normalize_sandbox_upload_path_passes_relative_through():
+    assert _normalize_sandbox_upload_path("code/foo.py") == "code/foo.py"
+    assert _normalize_sandbox_upload_path(".netrc") == ".netrc"
 
 
 def test_validate_rejects_non_list():

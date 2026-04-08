@@ -38,6 +38,30 @@ from ...credentials import (
 logger = logging.getLogger(__name__)
 
 # File extensions that should be stored as base64-encoded binary
+# Daytona's filesystem API (``sandbox.fs.upload_file``) treats paths as
+# relative to the sandbox's home directory. Passing ``~/.netrc`` literally
+# creates a directory named ``~`` instead of expanding the tilde, and
+# passing absolute paths like ``/root/.netrc`` ends up under
+# ``<home>/root/.netrc``. Normalize all credential file paths through this
+# helper so they land where the script expects to find them.
+#
+# Shell commands like ``chmod`` and ``rm`` go through ``sandbox.process.exec``
+# which runs in a shell that expands ``~`` correctly, so they keep using the
+# original logical path.
+_SANDBOX_HOME = "/root"
+
+
+def _normalize_sandbox_upload_path(path: str) -> str:
+    """Convert a logical sandbox path to the form Daytona's fs.upload_file expects."""
+    if path.startswith("~/"):
+        return path[2:]
+    if path.startswith(_SANDBOX_HOME + "/"):
+        return path[len(_SANDBOX_HOME) + 1 :]
+    if path.startswith("/"):
+        return path[1:]
+    return path
+
+
 _BINARY_EXTENSIONS = {
     ".png",
     ".jpg",
@@ -501,13 +525,21 @@ def make_execute_python_code(db=None):
             # the lifetime of the sandbox; future runs that don't request
             # them will still see them in the filesystem until the sandbox
             # is recycled. Best-effort cleanup happens after the run.
+            #
+            # Daytona's upload_file signature is (content_bytes, remote_path),
+            # NOT (remote_path, content_bytes). And remote_path is resolved
+            # against the sandbox's working directory and does NOT expand
+            # ``~``, so the path is normalized first.
             for path, content in file_uploads.items():
+                upload_path = _normalize_sandbox_upload_path(path)
                 try:
-                    sandbox.fs.upload_file(path, content.encode("utf-8"))
+                    sandbox.fs.upload_file(content.encode("utf-8"), upload_path)
                 except Exception:
                     logger.warning("Failed to upload credential file %s", path, exc_info=True)
                 # netrc and similar credential files conventionally need
-                # restrictive permissions; default everything to 0600.
+                # restrictive permissions; default everything to 0600. Use
+                # the original logical path here — chmod runs in a shell
+                # that expands ``~`` correctly.
                 try:
                     sandbox.process.exec(f"chmod 600 {path}")
                 except Exception:

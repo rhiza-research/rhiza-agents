@@ -11,7 +11,11 @@ from langgraph.prebuilt import ToolRuntime
 from langgraph.types import Command
 
 from ...credentials import redact_output
-from .sandbox import _BINARY_EXTENSIONS, resolve_credentials_or_error
+from .sandbox import (
+    _BINARY_EXTENSIONS,
+    _normalize_sandbox_upload_path,
+    resolve_credentials_or_error,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -185,10 +189,16 @@ def make_run_file(db=None):
             sandbox = _get_or_create_sandbox(thread_id)
 
             # Apply file materializations (e.g. ~/.netrc) before running.
-            # Always 0600 — these are credential files.
+            # Always 0600 — these are credential files. Daytona's
+            # ``fs.upload_file`` signature is (content_bytes, remote_path),
+            # and remote_path is resolved against the sandbox's working
+            # directory and does NOT expand ``~``, so the path is
+            # normalized first; the chmod still uses the original logical
+            # path because it runs in a shell that expands ``~``.
             for cred_path, content in file_uploads.items():
+                upload_path = _normalize_sandbox_upload_path(cred_path)
                 try:
-                    sandbox.fs.upload_file(cred_path, content.encode("utf-8"))
+                    sandbox.fs.upload_file(content.encode("utf-8"), upload_path)
                 except Exception:
                     logger.warning("Failed to upload credential file %s", cred_path, exc_info=True)
                 try:
@@ -197,7 +207,7 @@ def make_run_file(db=None):
                     pass
 
             # Write the script itself to the sandbox.
-            filename = path.lstrip("/")
+            filename = _normalize_sandbox_upload_path(path)
             sandbox.fs.upload_file(code.encode("utf-8"), filename)
 
             # Snapshot files after upload but before execution to detect new output files
