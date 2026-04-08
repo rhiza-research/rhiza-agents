@@ -383,6 +383,30 @@ export class ChatWidget extends Widget {
         }
     }
 
+    private _escapeHtml(str: string): string {
+        const div = document.createElement('div');
+        div.textContent = str;
+        return div.innerHTML;
+    }
+
+    /** Pull the flat list of secret names referenced by a credentials
+     *  argument (a list of materialization plans). Mirrors the server-side
+     *  `_collect_referenced_names`: both `env_vars` and `file` kinds carry
+     *  an explicit `names` list, so this is just the deduplicated union. */
+    private _collectCredentialNames(credentials: any): string[] {
+        if (!Array.isArray(credentials)) return [];
+        const out = new Set<string>();
+        for (const m of credentials) {
+            if (!m || typeof m !== 'object') continue;
+            if (Array.isArray(m.names)) {
+                for (const n of m.names) {
+                    if (typeof n === 'string' && n) out.add(n);
+                }
+            }
+        }
+        return Array.from(out);
+    }
+
     private _renderInterruptCard(interruptData: any): void {
         const card = document.createElement('div');
         card.className = 'interrupt-card';
@@ -395,9 +419,21 @@ export class ChatWidget extends Widget {
             ? (actionRequests[0].args || actionRequests[0].action?.args || {})
             : {};
 
+        // Walk the credentials materialization plans (if any) and collect
+        // every secret name they reference, so the user can see exactly
+        // which credentials this run will access before approving.
+        const accessedNames = this._collectCredentialNames(toolArgs.credentials);
+        const credentialsBlock = accessedNames.length > 0
+            ? `<div class="interrupt-credentials">
+                   <div class="interrupt-credentials-header">This run will access:</div>
+                   <ul>${accessedNames.map(n => `<li><code>${this._escapeHtml(n)}</code></li>`).join('')}</ul>
+               </div>`
+            : '';
+
         card.innerHTML = `
             <div class="interrupt-header">Approval Required</div>
             <div class="interrupt-tool">${toolName}</div>
+            ${credentialsBlock}
             <details class="interrupt-args">
                 <summary>arguments</summary>
                 <pre>${JSON.stringify(toolArgs, null, 2)}</pre>

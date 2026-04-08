@@ -173,7 +173,17 @@ def create_app() -> FastAPI:
     app.mount("/static", StaticFiles(directory=base_dir / "static"), name="static")
 
     # Register route modules
-    from .routes import agents, chat, conversations, mcp_servers, pages, settings, skills, vectorstores
+    from .routes import (
+        agents,
+        chat,
+        conversations,
+        credentials,
+        mcp_servers,
+        pages,
+        settings,
+        skills,
+        vectorstores,
+    )
 
     app.include_router(pages.router)
     app.include_router(chat.router)
@@ -183,6 +193,7 @@ def create_app() -> FastAPI:
     app.include_router(vectorstores.router)
     app.include_router(conversations.router)
     app.include_router(settings.router)
+    app.include_router(credentials.router)
 
     return app
 

@@ -33,6 +33,7 @@ dependencies = [
     # YAML parsing (SKILL.md frontmatter)
     "pyyaml>=6.0",
     "langfuse>=4.0.6",
+    "cryptography>=46.0.5",
 ]
 
 [project.optional-dependencies]

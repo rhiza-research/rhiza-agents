@@ -104,6 +104,29 @@ class Database:
         """)
         await self.database.execute("CREATE INDEX IF NOT EXISTS idx_skills_user_id ON skills(user_id)")
 
+        # Per-user encrypted credentials. Each row is one named secret value.
+        # The value column is the only place secret material lives — name is
+        # plain so the API/UI can list and reference it. The encryption key
+        # comes from CREDENTIAL_ENCRYPTION_KEY; without it the credentials
+        # routes refuse to operate (fail-closed).
+        #
+        # (user_id, name) is unique so a name can be referenced unambiguously
+        # in tool calls.
+        await self.database.execute("""
+            CREATE TABLE IF NOT EXISTS user_credentials (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                value_ciphertext BLOB NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (user_id, name)
+            )
+        """)
+        await self.database.execute(
+            "CREATE INDEX IF NOT EXISTS idx_user_credentials_user_id ON user_credentials(user_id)"
+        )
+
     async def create_conversation(self, conversation_id: str, user_id: str, title: str | None = None) -> dict:
         """Create a new conversation."""
         await self.database.execute(
@@ -475,3 +498,104 @@ class Database:
                 "updated_at": datetime.now(UTC),
             },
         )
+
+    # --- Credentials ---
+
+    async def list_credentials(self, user_id: str) -> list[dict]:
+        """List a user's stored credentials. NEVER includes value_ciphertext."""
+        rows = await self.database.fetch_all(
+            """SELECT id, user_id, name, created_at, updated_at
+               FROM user_credentials WHERE user_id = :user_id ORDER BY name""",
+            {"user_id": user_id},
+        )
+        return [dict(row._mapping) for row in rows]
+
+    async def list_credential_names(self, user_id: str) -> list[str]:
+        """Return just the secret names for a user, sorted. Used by the
+        sandbox tool's resolver and by the system prompt augmentation.
+        """
+        rows = await self.database.fetch_all(
+            "SELECT name FROM user_credentials WHERE user_id = :user_id ORDER BY name",
+            {"user_id": user_id},
+        )
+        return [row._mapping["name"] for row in rows]
+
+    async def get_credential_meta(self, credential_id: str, user_id: str) -> dict | None:
+        """Fetch credential metadata only (no ciphertext). Safe for API responses."""
+        row = await self.database.fetch_one(
+            """SELECT id, user_id, name, created_at, updated_at
+               FROM user_credentials WHERE id = :id AND user_id = :user_id""",
+            {"id": credential_id, "user_id": user_id},
+        )
+        return dict(row._mapping) if row else None
+
+    async def get_credential_ciphertext_by_name(self, user_id: str, name: str) -> bytes | None:
+        """Fetch a single credential's encrypted value by name.
+
+        Used by the sandbox tool when resolving references at execution time.
+        Treat the returned bytes as sensitive — do not log, do not return
+        from API routes, do not pass to the LLM.
+        """
+        row = await self.database.fetch_one(
+            "SELECT value_ciphertext FROM user_credentials WHERE user_id = :user_id AND name = :name",
+            {"user_id": user_id, "name": name},
+        )
+        if not row:
+            return None
+        ct = row._mapping["value_ciphertext"]
+        if isinstance(ct, memoryview):
+            ct = bytes(ct)
+        return ct
+
+    async def create_credential(
+        self,
+        credential_id: str,
+        user_id: str,
+        name: str,
+        value_ciphertext: bytes,
+    ) -> dict:
+        """Create an encrypted credential record."""
+        await self.database.execute(
+            """INSERT INTO user_credentials (id, user_id, name, value_ciphertext)
+               VALUES (:id, :user_id, :name, :value_ciphertext)""",
+            {
+                "id": credential_id,
+                "user_id": user_id,
+                "name": name,
+                "value_ciphertext": value_ciphertext,
+            },
+        )
+        return {"id": credential_id, "user_id": user_id, "name": name}
+
+    async def update_credential(
+        self,
+        credential_id: str,
+        user_id: str,
+        name: str | None = None,
+        value_ciphertext: bytes | None = None,
+    ) -> bool:
+        """Update a credential. Only the owning user may update."""
+        sets: list[str] = []
+        params: dict = {"id": credential_id, "user_id": user_id, "updated_at": datetime.now(UTC)}
+        if name is not None:
+            sets.append("name = :name")
+            params["name"] = name
+        if value_ciphertext is not None:
+            sets.append("value_ciphertext = :value_ciphertext")
+            params["value_ciphertext"] = value_ciphertext
+        if not sets:
+            return False
+        sets.append("updated_at = :updated_at")
+        result = await self.database.execute(
+            f"UPDATE user_credentials SET {', '.join(sets)} WHERE id = :id AND user_id = :user_id",
+            params,
+        )
+        return result > 0 if result else True
+
+    async def delete_credential(self, credential_id: str, user_id: str) -> bool:
+        """Delete a credential."""
+        result = await self.database.execute(
+            "DELETE FROM user_credentials WHERE id = :id AND user_id = :user_id",
+            {"id": credential_id, "user_id": user_id},
+        )
+        return result > 0 if result else True

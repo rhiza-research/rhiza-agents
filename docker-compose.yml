@@ -78,6 +78,12 @@ services:
       # to point local dev at cloud Langfuse instead.
       LANGFUSE_BASE_URL: ${LANGFUSE_BASE_URL:-http://langfuse-web:3000}
       LANGFUSE_TRACING_ENVIRONMENT: ${LANGFUSE_TRACING_ENVIRONMENT:-development}
+      # Fernet key (32-byte urlsafe base64) for encrypting user credentials
+      # at rest. Generate with:
+      #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+      # When unset the credentials feature is disabled and credential API
+      # routes return 503.
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:-}
     depends_on:
       - keycloak
       - sheerwater-mcp

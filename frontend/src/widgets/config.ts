@@ -27,6 +27,9 @@ export class ConfigWidget extends Widget {
     private _skills: any[] = [];
     private _mcpList!: HTMLDivElement;
     private _mcpServers: any[] = [];
+    private _credentialList!: HTMLDivElement;
+    private _credentials: any[] = [];
+    private _credentialsDisabled = false;
 
     constructor() {
         super();
@@ -115,6 +118,22 @@ export class ConfigWidget extends Widget {
         addMcpBtn.addEventListener('click', () => this._showNewMcpModal());
         sidebar.appendChild(addMcpBtn);
 
+        const credentialsTitle = document.createElement('h3');
+        credentialsTitle.className = 'config-sidebar-title';
+        credentialsTitle.style.marginTop = '1.5rem';
+        credentialsTitle.textContent = 'Credentials';
+        sidebar.appendChild(credentialsTitle);
+
+        this._credentialList = document.createElement('div');
+        this._credentialList.className = 'vectorstore-list';
+        sidebar.appendChild(this._credentialList);
+
+        const addCredentialBtn = document.createElement('button');
+        addCredentialBtn.className = 'config-btn';
+        addCredentialBtn.textContent = '+ Add Credential';
+        addCredentialBtn.addEventListener('click', () => this._showNewCredentialForm());
+        sidebar.appendChild(addCredentialBtn);
+
         const settingsTitle = document.createElement('h3');
         settingsTitle.className = 'config-sidebar-title';
         settingsTitle.style.marginTop = '1.5rem';
@@ -165,7 +184,13 @@ export class ConfigWidget extends Widget {
     }
 
     private async _loadAgents(): Promise<void> {
-        await Promise.all([this._loadToolTypes(), this._loadVectorStores(), this._loadSkills(), this._loadMcpServers()]);
+        await Promise.all([
+            this._loadToolTypes(),
+            this._loadVectorStores(),
+            this._loadSkills(),
+            this._loadMcpServers(),
+            this._loadCredentials(),
+        ]);
         const res = await fetch('/api/agents');
         if (!res.ok) return;
         this._agents = await res.json();
@@ -801,5 +826,165 @@ export class ConfigWidget extends Widget {
         await this._loadMcpServers();
         await this._loadToolTypes();
         if (this._selectedAgentId) this._selectAgent(this._selectedAgentId);
+    }
+
+    // --- Credentials ---
+
+    private async _loadCredentials(): Promise<void> {
+        const res = await fetch('/api/credentials');
+        if (res.status === 503) {
+            this._credentials = [];
+            this._credentialsDisabled = true;
+            this._renderCredentialList();
+            return;
+        }
+        if (!res.ok) return;
+        this._credentials = await res.json();
+        this._credentialsDisabled = false;
+        this._renderCredentialList();
+    }
+
+    private _renderCredentialList(): void {
+        this._credentialList.innerHTML = '';
+        if (this._credentialsDisabled) {
+            const note = document.createElement('div');
+            note.className = 'vs-list-info';
+            note.style.color = 'var(--text-secondary)';
+            note.style.fontSize = '0.8rem';
+            note.style.padding = '0.25rem';
+            note.textContent = 'Disabled — set CREDENTIAL_ENCRYPTION_KEY to enable';
+            this._credentialList.appendChild(note);
+            return;
+        }
+        for (const cred of this._credentials) {
+            const item = document.createElement('div');
+            item.className = 'vs-list-item';
+
+            const info = document.createElement('div');
+            info.className = 'vs-list-info';
+            const name = document.createElement('span');
+            name.className = 'vs-list-name';
+            name.textContent = cred.name;
+            info.appendChild(name);
+            item.appendChild(info);
+
+            const actions = document.createElement('div');
+            actions.className = 'vs-list-actions';
+
+            const editBtn = document.createElement('button');
+            editBtn.className = 'config-btn-sm';
+            editBtn.textContent = 'Edit';
+            editBtn.addEventListener('click', () => this._showEditCredentialForm(cred));
+            actions.appendChild(editBtn);
+
+            const delBtn = document.createElement('button');
+            delBtn.className = 'config-btn-sm config-btn-danger';
+            delBtn.textContent = '\u00d7';
+            delBtn.title = 'Delete';
+            delBtn.addEventListener('click', () => this._deleteCredential(cred));
+            actions.appendChild(delBtn);
+
+            item.appendChild(actions);
+            this._credentialList.appendChild(item);
+        }
+    }
+
+    private _showNewCredentialForm(): void {
+        if (this._credentialsDisabled) {
+            alert('Credentials feature is disabled. Set CREDENTIAL_ENCRYPTION_KEY to enable.');
+            return;
+        }
+        this._detail.innerHTML = `
+            <div class="config-form">
+                <h2>Add Credential</h2>
+                <p style="color: var(--text-secondary); font-size: 0.85rem; margin-top: -0.5rem;">
+                    Stored encrypted. The value is never displayed back to you and never visible to the language model.
+                </p>
+                <div class="form-group">
+                    <label for="cred-name">Name</label>
+                    <input type="text" id="cred-name" placeholder="e.g. NASA_USERNAME">
+                </div>
+                <div class="form-group">
+                    <label for="cred-value">Value</label>
+                    <input type="password" id="cred-value">
+                </div>
+                <div class="config-form-actions">
+                    <button id="cancel-cred-btn" class="config-btn">Cancel</button>
+                    <button id="save-cred-btn" class="config-btn config-btn-primary">Save</button>
+                </div>
+            </div>
+        `;
+        this._detail.querySelector('#cancel-cred-btn')!.addEventListener('click', () => this._renderPlaceholder());
+        this._detail.querySelector('#save-cred-btn')!.addEventListener('click', async () => {
+            const name = (this._detail.querySelector('#cred-name') as HTMLInputElement).value.trim();
+            const value = (this._detail.querySelector('#cred-value') as HTMLInputElement).value;
+            if (!name || !value) return;
+            const res = await fetch('/api/credentials', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name, value }),
+            });
+            if (!res.ok) {
+                const err = await res.json();
+                alert(err.detail || 'Save failed');
+                return;
+            }
+            await this._loadCredentials();
+            this._renderPlaceholder();
+        });
+    }
+
+    private _showEditCredentialForm(cred: any): void {
+        this._detail.innerHTML = `
+            <div class="config-form">
+                <h2>Edit Credential</h2>
+                <p style="color: var(--text-secondary); font-size: 0.85rem; margin-top: -0.5rem;">
+                    Stored values are not displayed. Leave the value blank to keep it, or type a new one to replace it.
+                </p>
+                <div class="form-group">
+                    <label for="cred-name">Name</label>
+                    <input type="text" id="cred-name" value="${escapeAttr(cred.name)}">
+                </div>
+                <div class="form-group">
+                    <label for="cred-value">Value</label>
+                    <input type="password" id="cred-value" placeholder="(unchanged)">
+                </div>
+                <div class="config-form-actions">
+                    <button id="cancel-cred-btn" class="config-btn">Cancel</button>
+                    <button id="save-cred-btn" class="config-btn config-btn-primary">Save</button>
+                </div>
+            </div>
+        `;
+        this._detail.querySelector('#cancel-cred-btn')!.addEventListener('click', () => this._renderPlaceholder());
+        this._detail.querySelector('#save-cred-btn')!.addEventListener('click', async () => {
+            const name = (this._detail.querySelector('#cred-name') as HTMLInputElement).value.trim();
+            const value = (this._detail.querySelector('#cred-value') as HTMLInputElement).value;
+            const body: any = {};
+            if (name && name !== cred.name) body.name = name;
+            if (value) body.value = value;
+            if (Object.keys(body).length === 0) {
+                this._renderPlaceholder();
+                return;
+            }
+            const res = await fetch(`/api/credentials/${cred.id}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            if (!res.ok) {
+                const err = await res.json();
+                alert(err.detail || 'Save failed');
+                return;
+            }
+            await this._loadCredentials();
+            this._renderPlaceholder();
+        });
+    }
+
+    private async _deleteCredential(cred: any): Promise<void> {
+        if (!confirm(`Delete credential "${cred.name}"?`)) return;
+        const res = await fetch(`/api/credentials/${cred.id}`, { method: 'DELETE' });
+        if (!res.ok) return;
+        await this._loadCredentials();
     }
 }
