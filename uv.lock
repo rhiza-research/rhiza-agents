@@ -2933,6 +2933,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "authlib" },
+    { name = "cryptography" },
     { name = "databases", extra = ["aiosqlite"] },
     { name = "fastapi" },
     { name = "httpx" },
@@ -2979,6 +2980,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "authlib" },
+    { name = "cryptography", specifier = ">=46.0.5" },
     { name = "databases", extras = ["aiosqlite"] },
     { name = "databases", extras = ["asyncpg"], marker = "extra == 'postgres'" },
     { name = "daytona-sdk", marker = "extra == 'sandbox'", specifier = ">=0.149.0" },

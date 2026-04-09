@@ -106,12 +106,16 @@ def _config_hash(
     configs: list[AgentConfig],
     mcp_server_ids: list[str] | None = None,
     skill_ids: list[str] | None = None,
+    user_id: str | None = None,
+    credential_names: list[str] | None = None,
 ) -> str:
     data = json.dumps(
         {
             "configs": [c.model_dump() for c in configs],
             "mcp_servers": sorted(mcp_server_ids or []),
             "skills": sorted(skill_ids or []),
+            "user_id": user_id,
+            "credentials": sorted(credential_names or []),
         },
         sort_keys=True,
     )
@@ -151,14 +155,14 @@ async def _resolve_tools(
             else:
                 logger.info("Skill %s not loaded, skipping", skill_id)
         elif tool_id == "sandbox:daytona":
-            from .tools.files import run_file, write_file
-            from .tools.sandbox import execute_python_code, is_sandbox_available
+            from .tools.files import make_run_file, write_file
+            from .tools.sandbox import is_sandbox_available, make_execute_python_code
 
             # File tools are always available (write to state, not sandbox)
             tools.append(write_file)
             if is_sandbox_available():
-                tools.append(execute_python_code)
-                tools.append(run_file)
+                tools.append(make_execute_python_code(db=db))
+                tools.append(make_run_file(db=db))
             # If no API key, silently skip sandbox tools -- agent works without them
         else:
             logger.info("Tool type %s not yet implemented, skipping", tool_id)
@@ -191,6 +195,7 @@ async def build_graph(
     mcp_tools_by_server: dict[str, list] | None = None,
     mcp_server_names: dict[str, str] | None = None,
     skill_tools: dict | None = None,
+    user_id: str | None = None,
 ):
     """Build a compiled LangGraph StateGraph from AgentConfig objects."""
     supervisor_config = None
@@ -217,6 +222,18 @@ async def build_graph(
         vectorstore_manager is not None,
     )
 
+    # Load the user's available credential names so each worker that has
+    # the sandbox tool can be told what's available. Names only — never
+    # values. The list is captured at graph build time; the graph cache
+    # already invalidates when configs change, and the credentials route
+    # invalidates when secrets are added/removed.
+    credential_names: list[str] = []
+    if user_id and db is not None:
+        try:
+            credential_names = await db.list_credential_names(user_id)
+        except Exception:  # pragma: no cover - DB errors logged elsewhere
+            logger.warning("Failed to load credential names for user %s", user_id, exc_info=True)
+
     worker_agents = []
     agent_tool_descriptions = []
     for wc in worker_configs:
@@ -227,10 +244,25 @@ async def build_graph(
             max_tokens=16000,
             thinking={"type": "enabled", "budget_tokens": 10000},
         )
+
+        # Augment the worker's system prompt with available credential
+        # names if it has the sandbox tool. The LLM uses these names to
+        # populate the `credentials` argument of execute_python_code.
+        worker_prompt = wc.system_prompt
+        has_sandbox_tool = any(getattr(t, "name", None) == "execute_python_code" for t in tools)
+        if has_sandbox_tool and credential_names:
+            worker_prompt += (
+                "\n\nAvailable credential names (values are never visible to you):\n"
+                + "\n".join(f"  - {n}" for n in credential_names)
+                + "\n\nWhen calling execute_python_code, reference these names in the"
+                " `credentials` argument to make values available to the script. Never"
+                " print, log, echo, or otherwise expose credential values."
+            )
+
         worker = create_agent(
             model,
             tools,
-            system_prompt=wc.system_prompt,
+            system_prompt=worker_prompt,
             middleware=middleware,
             name=wc.id,
             state_schema=AgentGraphState,
@@ -308,9 +340,29 @@ async def get_or_build_graph(
     mcp_tools_by_server: dict[str, list] | None = None,
     mcp_server_names: dict[str, str] | None = None,
     skill_tools: dict | None = None,
+    user_id: str | None = None,
 ):
-    """Get a cached graph or build a new one."""
-    h = _config_hash(configs, list((mcp_tools_by_server or {}).keys()), list((skill_tools or {}).keys()))
+    """Get a cached graph or build a new one.
+
+    The cache key includes the user_id and the user's current set of
+    credential names so that adding/removing a credential transparently
+    rebuilds the affected user's graph (the new credential name needs to
+    appear in the worker system prompt).
+    """
+    credential_names: list[str] = []
+    if user_id and db is not None:
+        try:
+            credential_names = await db.list_credential_names(user_id)
+        except Exception:  # pragma: no cover
+            credential_names = []
+
+    h = _config_hash(
+        configs,
+        list((mcp_tools_by_server or {}).keys()),
+        list((skill_tools or {}).keys()),
+        user_id=user_id,
+        credential_names=credential_names,
+    )
     if h not in _graph_cache:
         _graph_cache[h] = await build_graph(
             configs,
@@ -321,6 +373,7 @@ async def get_or_build_graph(
             mcp_tools_by_server,
             mcp_server_names,
             skill_tools,
+            user_id=user_id,
         )
     return _graph_cache[h]
 

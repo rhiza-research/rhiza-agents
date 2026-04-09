@@ -45,4 +45,5 @@ async def get_agent_graph(
         mcp_tools_by_server,
         mcp_server_names,
         skill_tools,
+        user_id=user_id,
     )

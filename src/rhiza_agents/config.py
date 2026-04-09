@@ -44,6 +44,9 @@ class Config:
     langfuse_secret_key: str
     langfuse_base_url: str
 
+    # Credential encryption (feature is disabled if unset)
+    credential_encryption_key: str
+
     @classmethod
     def from_env(cls) -> "Config":
         """Load configuration from environment variables."""
@@ -69,4 +72,5 @@ class Config:
             langfuse_public_key=os.environ.get("LANGFUSE_PUBLIC_KEY", ""),
             langfuse_secret_key=os.environ.get("LANGFUSE_SECRET_KEY", ""),
             langfuse_base_url=os.environ.get("LANGFUSE_BASE_URL", ""),
+            credential_encryption_key=os.environ.get("CREDENTIAL_ENCRYPTION_KEY", ""),
         )
