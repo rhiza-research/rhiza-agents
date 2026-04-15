@@ -42,7 +42,7 @@ persistence:
 # Name of the Kubernetes secret containing sensitive env vars.
 # This secret is created by Terraform, NOT by this chart.
 # Keys: KEYCLOAK_CLIENT_SECRET, ANTHROPIC_API_KEY, DAYTONA_API_KEY, DAYTONA_API_URL,
-#       SECRET_KEY, LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY
+#       DAYTONA_SANDBOX_DISK_GIB (optional), SECRET_KEY, LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY
 secretName: rhiza-agents-secrets
 
 # Non-secret environment variables
