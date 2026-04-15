@@ -146,23 +146,67 @@ def _patch_proxy_url(sandbox):
         logger.info("Patched sandbox proxy URL to %s", proxy_url)
 
 
+def _daytona_sandbox_resources_from_env():
+    """Return ``Resources`` for sandbox creation, or ``None`` for Daytona defaults.
+
+    ``DAYTONA_SANDBOX_DISK_GIB`` sets root disk size in gibibytes (SDK field
+    ``Resources.disk``). Disk is fixed at sandbox creation; there is no
+    in-place grow in the API—raise this value and new sandboxes (new
+    conversations or after idle cleanup) pick it up.
+
+    Invalid or empty values are ignored with a warning.
+    """
+    raw = os.environ.get("DAYTONA_SANDBOX_DISK_GIB", "").strip()
+    if not raw:
+        return None
+    try:
+        gib = int(raw, 10)
+    except ValueError:
+        logger.warning("Invalid DAYTONA_SANDBOX_DISK_GIB %r — using Daytona defaults", raw)
+        return None
+    if gib < 1:
+        logger.warning("DAYTONA_SANDBOX_DISK_GIB must be >= 1 — using Daytona defaults")
+        return None
+    from daytona_sdk import Resources
+
+    return Resources(disk=gib)
+
+
 def _get_or_create_sandbox(thread_id: str):
     """Get an existing sandbox for a thread or create a new one.
 
     Uses a declarative image with uv pre-installed so that scripts with
     PEP 723 inline metadata (# /// script) can declare their own dependencies
-    and have them resolved automatically via `uv run`.
+    and have them resolved automatically via `uv run`. Git is installed so
+    ``pip install`` / ``uv pip install`` can fetch VCS dependencies (e.g.
+    ``git+https://...``).
+
+    Optional env ``DAYTONA_SANDBOX_DISK_GIB`` sets sandbox disk size (GiB);
+    see `_daytona_sandbox_resources_from_env`.
     """
     from daytona_sdk import CreateSandboxFromImageParams, Image
 
     _cleanup_idle_sandboxes()
 
     if thread_id not in _sandboxes:
-        image = Image.debian_slim("3.12").pip_install(["uv"])
-        sandbox = _get_daytona().create(CreateSandboxFromImageParams(image=image))
+        image = (
+            Image.debian_slim("3.12")
+            .run_commands(
+                "apt-get update && apt-get install -y --no-install-recommends git "
+                "&& rm -rf /var/lib/apt/lists/*"
+            )
+            .pip_install(["uv"])
+        )
+        resources = _daytona_sandbox_resources_from_env()
+        sandbox = _get_daytona().create(
+            CreateSandboxFromImageParams(image=image, resources=resources)
+        )
         _patch_proxy_url(sandbox)
         _sandboxes[thread_id] = sandbox
-        logger.info("Created sandbox for thread %s (with uv)", thread_id)
+        if resources is not None:
+            logger.info("Created sandbox for thread %s (with uv, git, %r)", thread_id, resources)
+        else:
+            logger.info("Created sandbox for thread %s (with uv, git)", thread_id)
 
     _last_used[thread_id] = datetime.now(UTC)
     return _sandboxes[thread_id]

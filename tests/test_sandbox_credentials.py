@@ -4,9 +4,12 @@ These cover the pure functions that don't touch the Daytona SDK or the
 async db: validation, name collection, and the env-vars/file build step.
 """
 
+import pytest
+
 from rhiza_agents.agents.tools.sandbox import (
     _build_runtime_injection,
     _collect_referenced_names,
+    _daytona_sandbox_resources_from_env,
     _normalize_sandbox_upload_path,
     _validate_materializations,
 )
@@ -171,3 +174,31 @@ def test_build_runtime_injection_concatenates_same_path():
     )
     assert env == {}
     assert files == {"~/.netrc": "machine a login alice password p1\nmachine b login bob password p2\n"}
+
+
+def test_daytona_sandbox_resources_unset(monkeypatch):
+    monkeypatch.delenv("DAYTONA_SANDBOX_DISK_GIB", raising=False)
+    assert _daytona_sandbox_resources_from_env() is None
+
+
+def test_daytona_sandbox_resources_empty(monkeypatch):
+    monkeypatch.setenv("DAYTONA_SANDBOX_DISK_GIB", "")
+    assert _daytona_sandbox_resources_from_env() is None
+
+
+def test_daytona_sandbox_resources_invalid(monkeypatch):
+    monkeypatch.setenv("DAYTONA_SANDBOX_DISK_GIB", "twenty")
+    assert _daytona_sandbox_resources_from_env() is None
+
+
+def test_daytona_sandbox_resources_non_positive(monkeypatch):
+    monkeypatch.setenv("DAYTONA_SANDBOX_DISK_GIB", "0")
+    assert _daytona_sandbox_resources_from_env() is None
+
+
+def test_daytona_sandbox_resources_disk_gib(monkeypatch):
+    pytest.importorskip("daytona_sdk")
+    from daytona_sdk import Resources
+
+    monkeypatch.setenv("DAYTONA_SANDBOX_DISK_GIB", "32")
+    assert _daytona_sandbox_resources_from_env() == Resources(disk=32)
