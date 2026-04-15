@@ -13,9 +13,13 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 import yaml
+from langchain_core.messages import ToolMessage
 from langchain_core.tools import StructuredTool
+from langgraph.prebuilt import ToolRuntime
+from langgraph.types import Command
 
 logger = logging.getLogger(__name__)
 
@@ -76,11 +80,22 @@ def parse_skill_md(content: str) -> ParsedSkill:
     )
 
 
+def _parsed_scripts(skill_record: dict) -> dict[str, str]:
+    """Return the bundled-scripts dict (filename -> content) or empty dict."""
+    scripts_json = skill_record.get("scripts_json")
+    if not scripts_json:
+        return {}
+    if isinstance(scripts_json, str):
+        return json.loads(scripts_json)
+    return dict(scripts_json)
+
+
 def _build_activation_response(skill_record: dict) -> str:
     """Build the full activation response for a skill tool call.
 
-    Returns the full prompt + references content. Scripts are noted
-    but written to sandbox separately.
+    Returns the full prompt + references content. Bundled scripts are
+    loaded into the file state by the tool function itself; here we just
+    note where to find them so the agent can call ``run_file``.
     """
     parsed = parse_skill_md(skill_record["skill_md"])
     parts = [parsed.prompt]
@@ -92,13 +107,16 @@ def _build_activation_response(skill_record: dict) -> str:
         for filename, content in refs.items():
             parts.append(f"\n\n---\n## Reference: {filename}\n\n{content}")
 
-    # Note available scripts
-    scripts_json = skill_record.get("scripts_json")
-    if scripts_json:
-        scripts = json.loads(scripts_json) if isinstance(scripts_json, str) else scripts_json
-        if scripts:
-            script_list = ", ".join(f"`scripts/{name}`" for name in scripts)
-            parts.append(f"\n\n---\nAvailable scripts (already written to sandbox): {script_list}")
+    scripts = _parsed_scripts(skill_record)
+    if scripts:
+        prefix = f"/skills/{parsed.name}/scripts"
+        paths = ", ".join(f"`{prefix}/{name}`" for name in scripts)
+        parts.append(
+            "\n\n---\nBundled scripts are loaded into the conversation filesystem "
+            f"at: {paths}. Execute them with the `run_file` tool (e.g. "
+            f"`run_file('{prefix}/{next(iter(scripts))}')`). The scripts use "
+            "PEP 723 inline metadata so `uv run` resolves their dependencies."
+        )
 
     return "\n".join(parts)
 
@@ -167,18 +185,47 @@ def create_skill_tool(skill_record: dict) -> StructuredTool:
     """Create a LangChain tool for a skill.
 
     Tool description = skill's short description (loaded at graph build time).
-    Tool return value = full prompt + references + script info (progressive disclosure).
+    On activation the tool returns a Command that:
+    - Emits the full prompt + reference contents as a ToolMessage.
+    - Loads every bundled script from ``scripts_json`` into the graph's
+      ``files`` state under ``/skills/<skill-name>/scripts/<filename>`` so
+      the agent can call ``run_file`` on them immediately. ``run_file`` then
+      uploads the file content to the Daytona sandbox and executes via
+      ``uv run``. Namespacing by skill name prevents filename collisions
+      across skills (e.g. multiple fetchers each shipping a ``fetch.py``).
     """
     parsed = parse_skill_md(skill_record["skill_md"])
     skill_id = skill_record["id"]
     record = skill_record  # Capture for closure
+    scripts = _parsed_scripts(record)
+    script_path_prefix = f"/skills/{parsed.name}/scripts"
 
-    def _activate() -> str:
-        """Activate this skill and get detailed instructions."""
-        return _build_activation_response(record)
+    async def _activate(*, runtime: ToolRuntime) -> Command:
+        """Activate this skill and load any bundled scripts into file state."""
+        prompt = _build_activation_response(record)
+        update: dict = {"messages": [ToolMessage(content=prompt, tool_call_id=runtime.tool_call_id)]}
+        if scripts:
+            now = datetime.now(UTC).isoformat()
+            files_update: dict = {}
+            for filename, content in scripts.items():
+                # Content is stored as a single string; split into lines to
+                # match the shape used by write_file.
+                if isinstance(content, list):
+                    lines = content
+                else:
+                    lines = str(content).split("\n")
+                files_update[f"{script_path_prefix}/{filename}"] = {
+                    "content": lines,
+                    "source": "skill",
+                    "skill_id": skill_id,
+                    "created_at": now,
+                    "modified_at": now,
+                }
+            update["files"] = files_update
+        return Command(update=update)
 
     tool = StructuredTool.from_function(
-        func=_activate,
+        coroutine=_activate,
         name=f"skill_{parsed.name.replace('-', '_')}",
         description=f"Skill: {parsed.description}",
     )
