@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import logging
+import shlex
 from datetime import UTC, datetime
 
 from langchain_core.messages import ToolMessage
@@ -21,6 +22,18 @@ logger = logging.getLogger(__name__)
 
 # Maximum file size in bytes (1MB)
 _MAX_FILE_SIZE = 1_000_000
+
+
+def _build_uv_run_cmd(filename: str, script_args: list[str] | None) -> str:
+    """Build the ``uv run ...`` shell command with each arg shell-quoted.
+
+    Pure helper — extracted so the command-building logic can be tested
+    independently of the Daytona sandbox.
+    """
+    if not script_args:
+        return f"uv run {filename}"
+    suffix = " ".join(shlex.quote(a) for a in script_args)
+    return f"uv run {filename} {suffix}"
 
 
 @tool
@@ -92,6 +105,7 @@ def make_run_file(db=None):
     @tool
     async def run_file(
         path: str,
+        script_args: list[str] | None = None,
         credentials: list[dict] | None = None,
         *,
         runtime: ToolRuntime,
@@ -100,7 +114,8 @@ def make_run_file(db=None):
 
         Reads the file content from state and runs it in the code sandbox
         via ``uv run`` (which honors PEP 723 inline script dependencies).
-        The file must already exist (written via ``write_file``).
+        The file must already exist (written via ``write_file`` or loaded
+        into state by a skill activation).
 
         This is the preferred way to run any non-trivial code that the user
         should be able to review. Always go through ``write_file`` →
@@ -109,6 +124,11 @@ def make_run_file(db=None):
 
         Args:
             path: Path of the file to execute (e.g., '/code/analysis.py').
+            script_args: Optional list of CLI arguments passed after the
+                script path, e.g. ``["--date", "2026-02-15", "--region",
+                "africa", "--output", "/tmp/out.zarr"]``. Each element is
+                passed as a single token; no shell interpretation. Omit or
+                pass ``None`` to run with no arguments.
             credentials: Optional list of materialization plans describing
                 which stored secrets to make available to this run. Same
                 shape as ``execute_python_code``'s ``credentials`` argument:
@@ -216,13 +236,15 @@ def make_run_file(db=None):
             except Exception:
                 pre_files = set()
 
+            cmd = _build_uv_run_cmd(filename, script_args)
+
             # sandbox.process.exec accepts an env dict that's merged into
             # the process environment for this single command, which is
             # exactly the per-execution scoping we want for credentials.
             if env_vars:
-                response = sandbox.process.exec(f"uv run {filename}", env=dict(env_vars))
+                response = sandbox.process.exec(cmd, env=dict(env_vars))
             else:
-                response = sandbox.process.exec(f"uv run {filename}")
+                response = sandbox.process.exec(cmd)
 
             # Discover new files created during execution
             new_files = {}
