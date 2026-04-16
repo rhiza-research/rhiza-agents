@@ -171,21 +171,25 @@ def _build_activation_response(skill_record: dict) -> str:
             "PEP 723 inline metadata so `uv run` resolves their dependencies."
         )
 
-    # Declared credential requirements (from metadata.openclaw.requires.env).
-    # Passing them explicitly to the agent makes the contract structural
-    # instead of something the LLM has to infer from prose in the skill body.
-    # The approval UI also flags missing names, but this tells the model
-    # which credentials to REQUEST in the first place.
+    # Declared credential names (from metadata.openclaw.requires.env). These
+    # are credentials the skill's scripts MAY use. The runtime treats them as
+    # optional: if the user has the credential stored, it gets injected into
+    # the sandbox; if not, it's silently skipped and the script/CLI is
+    # responsible for surfacing a clear error if it actually needed the
+    # credential. Always pass the full list so the runtime knows which names
+    # to plumb when available.
     if parsed.required_env:
         bullets = "\n".join(f"  - {n}" for n in parsed.required_env)
         parts.append(
             "\n\n---\n"
-            "This skill requires these credential names to run its scripts:\n"
+            "This skill MAY use these credentials (injected when set, "
+            "skipped when not):\n"
             f"{bullets}\n"
-            "Pass them to run_file's `credentials` argument as "
-            '`[{"kind": "env_vars", "names": [...]}]` when executing the bundled '
-            "scripts. If any are not available, stop and tell the user to add "
-            "them in settings; do not invent values."
+            "Pass the full list to run_file's `credentials` argument as "
+            '`[{"kind": "env_vars", "names": [...]}]` when executing the '
+            "bundled scripts. The script will fail with a clear message if it "
+            "needed a credential that wasn't injected — surface that message "
+            "to the user; do not invent values."
         )
 
     return "\n".join(parts)

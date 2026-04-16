@@ -85,10 +85,12 @@ async def _enrich_interrupt_payload(intr_data, db, user_id: str) -> dict:
     attached so the frontend can render a single warning without re-walking.
 
     Returns a plain dict (the normalized shape — the original ``intr_data``
-    may be a Pydantic model or langgraph ``Interrupt``). On any DB error we
-    degrade to returning the payload with empty ``missing_credentials``;
-    the existing post-approval ``_resolve_secrets`` check is the real gate,
-    this UI enrichment is purely informational.
+    may be a Pydantic model or langgraph ``Interrupt``). The frontend uses
+    this purely as a warning ("these names won't be injected because you
+    haven't set them") and does not gate the Approve button on it. Missing
+    names are silently dropped from the materialization at execution time,
+    and the underlying CLI/script is responsible for surfacing a clear error
+    if it actually needed a credential that wasn't injected.
     """
     # Normalize to a plain dict. HumanInTheLoopMiddleware passes us a dict
     # already but subclasses might not.
