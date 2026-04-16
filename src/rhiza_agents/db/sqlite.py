@@ -123,6 +123,7 @@ class Database:
         #
         # (user_id, name) is unique so a name can be referenced unambiguously
         # in tool calls.
+        await self._migrate_user_credentials_if_stale()
         await self.database.execute("""
             CREATE TABLE IF NOT EXISTS user_credentials (
                 id TEXT PRIMARY KEY,
@@ -137,6 +138,47 @@ class Database:
         await self.database.execute(
             "CREATE INDEX IF NOT EXISTS idx_user_credentials_user_id ON user_credentials(user_id)"
         )
+
+    async def _migrate_user_credentials_if_stale(self) -> None:
+        """Drop a stale prototype ``user_credentials`` table if it exists empty.
+
+        The credentials feature went through an early prototype with a
+        different schema (``type`` / ``fields_json`` / ``payload_ciphertext``
+        / ``key_version``). On any DB that ran the prototype, the
+        ``CREATE TABLE IF NOT EXISTS`` below short-circuits because the
+        table already exists, leaving INSERTs broken until manually fixed.
+
+        This migration is idempotent and safe by construction:
+          * No table → no-op (the CREATE below builds the right one).
+          * Current schema (has ``value_ciphertext``) → no-op.
+          * Stale schema, **empty table** → drop, the CREATE below recreates
+            with the right shape.
+          * Stale schema, **non-empty table** → raise. We will not silently
+            drop encrypted secrets the operator has stored. Manual migration
+            is required (the ciphertext is encryption-version-specific so
+            there's no automatic remap).
+        """
+        existing = await self.database.fetch_one(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='user_credentials'"
+        )
+        if not existing:
+            return
+        cols = await self.database.fetch_all("PRAGMA table_info(user_credentials)")
+        col_names = {row._mapping["name"] for row in cols}
+        if "value_ciphertext" in col_names:
+            return  # current schema, nothing to do
+        # Stale prototype schema. Refuse to drop if it has any data.
+        count_row = await self.database.fetch_one("SELECT COUNT(*) AS n FROM user_credentials")
+        count = count_row._mapping["n"] if count_row else 0
+        if count > 0:
+            raise RuntimeError(
+                f"user_credentials has {count} row(s) in a stale prototype "
+                "schema (columns: " + ", ".join(sorted(col_names)) + "). "
+                "Cannot auto-migrate encrypted credential values. Operator "
+                "must back up the table, drop it manually, and re-enter the "
+                "credentials in the new shape."
+            )
+        await self.database.execute("DROP TABLE user_credentials")
 
     async def create_conversation(self, conversation_id: str, user_id: str, title: str | None = None) -> dict:
         """Create a new conversation."""
