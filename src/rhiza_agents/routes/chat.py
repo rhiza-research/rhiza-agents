@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 from ..agents.registry import get_default_configs, merge_configs
 from ..agents.supervisor import get_agent_graph
+from ..agents.tools.sandbox import _collect_referenced_names
 from ..db.models import AgentConfig
 from ..deps import (
     get_checkpointer,
@@ -72,6 +73,57 @@ async def _get_effective_configs(request: Request, user_id: str) -> list[AgentCo
         return defaults
     overrides = [json.loads(row["config_json"]) for row in override_rows]
     return merge_configs(defaults, overrides)
+
+
+async def _enrich_interrupt_payload(intr_data, db, user_id: str) -> dict:
+    """Add ``missing_credentials`` to an interrupt payload before streaming it.
+
+    Walks every ``action_requests[*].args.credentials`` materialization plan
+    (via the canonical flattener in sandbox) and compares the referenced
+    secret names against the user's credential store. Each action_request
+    gets its own ``missing_credentials`` list, and a top-level aggregate is
+    attached so the frontend can render a single warning without re-walking.
+
+    Returns a plain dict (the normalized shape — the original ``intr_data``
+    may be a Pydantic model or langgraph ``Interrupt``). On any DB error we
+    degrade to returning the payload with empty ``missing_credentials``;
+    the existing post-approval ``_resolve_secrets`` check is the real gate,
+    this UI enrichment is purely informational.
+    """
+    # Normalize to a plain dict. HumanInTheLoopMiddleware passes us a dict
+    # already but subclasses might not.
+    if hasattr(intr_data, "model_dump"):
+        payload = intr_data.model_dump()
+    elif isinstance(intr_data, dict):
+        payload = dict(intr_data)
+    else:
+        # Fall back to whatever json.dumps(default=str) would have produced —
+        # no credential checks possible in that case.
+        return {"value": str(intr_data), "missing_credentials": []}
+
+    try:
+        stored_names = set(await db.list_credential_names(user_id))
+    except Exception:
+        logger.warning("Failed to load credential names for interrupt enrichment", exc_info=True)
+        stored_names = set()
+
+    all_missing: list[str] = []
+    seen_missing: set[str] = set()
+    for ar in payload.get("action_requests") or []:
+        if not isinstance(ar, dict):
+            continue
+        args = ar.get("args") if isinstance(ar.get("args"), dict) else {}
+        creds = args.get("credentials") if isinstance(args.get("credentials"), list) else []
+        referenced = _collect_referenced_names(creds) if creds else []
+        ar_missing = [n for n in referenced if n not in stored_names]
+        ar["missing_credentials"] = ar_missing
+        for n in ar_missing:
+            if n not in seen_missing:
+                seen_missing.add(n)
+                all_missing.append(n)
+
+    payload["missing_credentials"] = all_missing
+    return payload
 
 
 @router.post("/api/chat/stream")
@@ -236,8 +288,9 @@ async def stream_chat_message(
                             else:
                                 for intr in update_data["__interrupt__"]:
                                     intr_data = getattr(intr, "value", intr)
-                                    yield f"event: interrupt\ndata: {json.dumps(intr_data, default=str)}\n\n"
-                                    _log_event("interrupt", data=str(intr_data)[:500])
+                                    enriched = await _enrich_interrupt_payload(intr_data, db, user_id)
+                                    yield f"event: interrupt\ndata: {json.dumps(enriched, default=str)}\n\n"
+                                    _log_event("interrupt", data=str(enriched)[:500])
                                 continue
 
                         # Extract tool call/result info from node updates.
@@ -512,8 +565,9 @@ async def resume_chat(
                             continue
                         for intr in update_data["__interrupt__"]:
                             intr_data = getattr(intr, "value", intr)
-                            yield f"event: interrupt\ndata: {json.dumps(intr_data, default=str)}\n\n"
-                            _log_event("interrupt", data=str(intr_data)[:500])
+                            enriched = await _enrich_interrupt_payload(intr_data, db, user_id)
+                            yield f"event: interrupt\ndata: {json.dumps(enriched, default=str)}\n\n"
+                            _log_event("interrupt", data=str(enriched)[:500])
                         continue
 
                     # Extract tool call/result info from node updates.

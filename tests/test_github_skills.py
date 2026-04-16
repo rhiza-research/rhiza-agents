@@ -294,6 +294,49 @@ def test_discover_directory_of_skills():
     assert ("skills/noskill", "no SKILL.md") in skipped
 
 
+def test_discover_surfaces_required_env_from_openclaw_block():
+    """``metadata.openclaw.requires.env`` in a discovered SKILL.md flows
+    through the SkillManifest so the install preview UI can warn when the
+    user is missing credentials."""
+    sha = "abc"
+    md = (
+        "---\n"
+        "name: x\n"
+        "description: A demo skill that needs creds.\n"
+        "metadata:\n"
+        "  openclaw:\n"
+        "    requires:\n"
+        "      env:\n"
+        "        - MATON_API_KEY\n"
+        "        - TAHMO_USERNAME\n"
+        "    primaryEnv: MATON_API_KEY\n"
+        "---\nbody"
+    )
+    client = _StubClient(
+        {
+            f"https://raw.githubusercontent.com/o/r/{sha}/skills/x/SKILL.md": _Resp(200, text=md),
+        }
+    )
+    manifests, _ = _run(discover_skills(client, "o", "r", sha, "skills/x"))
+    assert len(manifests) == 1
+    assert manifests[0].required_env == ["MATON_API_KEY", "TAHMO_USERNAME"]
+
+
+def test_discover_required_env_empty_when_block_absent():
+    """Skills without the block get an empty list, not None — keeps the
+    JSON shape predictable for the frontend."""
+    sha = "abc"
+    client = _StubClient(
+        {
+            f"https://raw.githubusercontent.com/o/r/{sha}/skills/x/SKILL.md": _Resp(
+                200, text="---\nname: x\ndescription: No creds.\n---\nbody"
+            ),
+        }
+    )
+    manifests, _ = _run(discover_skills(client, "o", "r", sha, "skills/x"))
+    assert manifests[0].required_env == []
+
+
 def test_discover_skips_invalid_skill_md():
     sha = "abc"
     contents_url = f"https://api.github.com/repos/o/r/contents/skills?ref={sha}"

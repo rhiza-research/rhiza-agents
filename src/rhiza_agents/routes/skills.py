@@ -25,9 +25,28 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["skills"])
 
 
-def _skill_summary(skill: dict) -> dict:
-    """Shared shape for list/get/install/refresh responses."""
-    return {
+def _required_env_for(skill: dict) -> list[str]:
+    """Read the ``metadata.openclaw.requires.env`` declarations off a skill row.
+
+    Returns ``[]`` for skills without the block, malformed YAML, or any other
+    parsing problem — never raises. Used by ``list_skills`` to compute the
+    per-skill missing-credentials set.
+    """
+    skill_md = skill.get("skill_md") or ""
+    try:
+        return list(parse_skill_md(skill_md).required_env)
+    except ValueError:
+        return []
+
+
+def _skill_summary(skill: dict, *, missing_credentials: list[str] | None = None) -> dict:
+    """Shared shape for list/get/install/refresh responses.
+
+    ``missing_credentials`` is set only by the list endpoint; everywhere else
+    the field is omitted so callers don't trip over a stale snapshot from a
+    transient install/refresh response.
+    """
+    out = {
         "id": skill["id"],
         "name": skill["name"],
         "description": skill["description"],
@@ -39,15 +58,38 @@ def _skill_summary(skill: dict) -> dict:
         "system": skill.get("user_id") is None,
         "requires_sandbox": requires_sandbox(skill),
     }
+    if missing_credentials is not None:
+        out["missing_credentials"] = missing_credentials
+    return out
 
 
 @router.get("/api/skills")
 async def list_skills(request: Request, user: dict = Depends(require_auth)):
-    """List all skills visible to the user (system + user-owned)."""
+    """List all skills visible to the user (system + user-owned).
+
+    Each entry includes ``missing_credentials``: the declared
+    ``required_env`` names from the skill's openclaw block that are NOT
+    present in this user's encrypted credential store. The UI uses this to
+    show a ⚠ chip on the skill row and let the user resolve the gap up
+    front instead of discovering it at run time on the HITL approval card.
+    """
     db = get_db(request)
     user_id = get_user_id(request)
     skills = await db.list_skills(user_id)
-    return [_skill_summary(s) for s in skills]
+    # One DB hit for the user's stored names, then a pure compute per skill.
+    try:
+        stored = set(await db.list_credential_names(user_id))
+    except Exception:
+        # Credentials feature disabled or DB error — treat every required
+        # name as missing so the UI surfaces the gap rather than silently
+        # claiming everything is configured.
+        stored = set()
+    summaries = []
+    for s in skills:
+        required = _required_env_for(s)
+        missing = [n for n in required if n not in stored]
+        summaries.append(_skill_summary(s, missing_credentials=missing))
+    return summaries
 
 
 @router.get("/api/skills/{skill_id}")
@@ -180,6 +222,7 @@ async def discover_skills_route(request: Request, body: SkillDiscoverBody, user:
                 "license": m.license,
                 "compatibility": m.compatibility,
                 "has_scripts": m.has_scripts,
+                "required_env": list(m.required_env),
                 "already_installed": already,
             }
         )

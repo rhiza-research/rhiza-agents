@@ -192,15 +192,12 @@ def _get_or_create_sandbox(thread_id: str):
         image = (
             Image.debian_slim("3.12")
             .run_commands(
-                "apt-get update && apt-get install -y --no-install-recommends git "
-                "&& rm -rf /var/lib/apt/lists/*"
+                "apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*"
             )
             .pip_install(["uv"])
         )
         resources = _daytona_sandbox_resources_from_env()
-        sandbox = _get_daytona().create(
-            CreateSandboxFromImageParams(image=image, resources=resources)
-        )
+        sandbox = _get_daytona().create(CreateSandboxFromImageParams(image=image, resources=resources))
         _patch_proxy_url(sandbox)
         _sandboxes[thread_id] = sandbox
         if resources is not None:
@@ -461,12 +458,10 @@ def make_execute_python_code(db=None):
         Args:
             code: Python code to execute.
             credentials: Optional list of materialization plans describing
-                which stored secrets to make available to this run. When an
-                MCP tool returns a skill document with a ``requires_credentials``
-                frontmatter block, copy the relevant entries from that block
-                verbatim into this argument. The entries have the same shape
-                in the frontmatter and in this tool argument so no
-                interpretation is needed.
+                which stored secrets to make available to this run. When a
+                skill activation lists required credential names (from a
+                ``metadata.openclaw.requires.env`` block in its SKILL.md),
+                use those names here — wrap them in an ``env_vars`` plan.
 
                 Each entry has a ``kind`` of either ``env_vars`` or ``file``,
                 and an explicit ``names`` list enumerating the stored secrets

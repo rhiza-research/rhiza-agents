@@ -8,6 +8,11 @@ interface ChatWidgetOptions {
     conversationId: string;
     activityWidget: ActivityWidget;
     filesWidget: FilesWidget;
+    /** Open the config panel and surface a new-credential form with the given
+     *  name pre-filled. Wired from app.ts to ConfigWidget.focusCredentials.
+     *  Called when the user clicks "Set credentials" on an approval card that
+     *  is blocked by missing credentials. */
+    onOpenCredentialForm?: (name: string) => void;
 }
 
 /**
@@ -17,6 +22,7 @@ export class ChatWidget extends Widget {
     private _conversationId: string;
     private _activity: ActivityWidget;
     private _files: FilesWidget;
+    private _onOpenCredentialForm?: (name: string) => void;
     private _streamedContent = '';
     private _activeAbortController: AbortController | null = null;
     private _reviewMode = false;
@@ -28,6 +34,10 @@ export class ChatWidget extends Widget {
     private _input!: HTMLTextAreaElement;
     private _sendBtn!: HTMLButtonElement;
     private _execToggle!: HTMLInputElement;
+    /** Handler for the global ``credential-added`` DOM event. Kept as a
+     *  field so we can detach it in `dispose()` if the widget is ever torn
+     *  down (defensive — the ChatWidget lives for the whole session today). */
+    private _credentialAddedHandler: (e: Event) => void;
 
     constructor(options: ChatWidgetOptions) {
         super();
@@ -39,6 +49,7 @@ export class ChatWidget extends Widget {
         this._conversationId = options.conversationId;
         this._activity = options.activityWidget;
         this._files = options.filesWidget;
+        this._onOpenCredentialForm = options.onOpenCredentialForm;
 
         if (localStorage.getItem('execReviewMode') === 'true') {
             this._reviewMode = true;
@@ -46,6 +57,18 @@ export class ChatWidget extends Widget {
 
         this._buildDOM();
         this._loadMessages();
+
+        // When the user saves a new credential elsewhere in the app, the
+        // config widget emits ``credential-added`` on ``document``. Any
+        // currently-rendered approval card that was blocked on that name
+        // can then un-block itself in-place — no stream round-trip needed
+        // because ``_enrich_interrupt_payload`` re-runs on the next resume.
+        this._credentialAddedHandler = (e: Event) => {
+            const detail = (e as CustomEvent).detail;
+            if (!detail || typeof detail.name !== 'string') return;
+            this._onCredentialAdded(detail.name);
+        };
+        document.addEventListener('credential-added', this._credentialAddedHandler);
     }
 
     get conversationId(): string { return this._conversationId; }
@@ -423,10 +446,32 @@ export class ChatWidget extends Widget {
         // every secret name they reference, so the user can see exactly
         // which credentials this run will access before approving.
         const accessedNames = this._collectCredentialNames(toolArgs.credentials);
+        // Server-enriched list of referenced names that are NOT currently in
+        // the user's credential store. Populated by
+        // ``_enrich_interrupt_payload`` on the backend. Empty (or absent on
+        // older sessions) means nothing is blocking.
+        const missingSet = new Set<string>(
+            Array.isArray(interruptData.missing_credentials) ? interruptData.missing_credentials : []
+        );
+
+        const credentialsListHtml = accessedNames
+            .map(n => {
+                const cls = missingSet.has(n) ? 'interrupt-cred-missing' : '';
+                const marker = missingSet.has(n) ? '⚠ ' : '';
+                return `<li data-cred-name="${this._escapeHtml(n)}"><code class="${cls}">${marker}${this._escapeHtml(n)}</code></li>`;
+            })
+            .join('');
         const credentialsBlock = accessedNames.length > 0
             ? `<div class="interrupt-credentials">
                    <div class="interrupt-credentials-header">This run will access:</div>
-                   <ul>${accessedNames.map(n => `<li><code>${this._escapeHtml(n)}</code></li>`).join('')}</ul>
+                   <ul>${credentialsListHtml}</ul>
+               </div>`
+            : '';
+
+        const missingBanner = missingSet.size > 0
+            ? `<div class="interrupt-missing-banner">
+                   <span>${missingSet.size === 1 ? 'This credential is not set' : 'These credentials are not set'} — approve is disabled until they are added.</span>
+                   <button class="interrupt-set-creds">Set credentials</button>
                </div>`
             : '';
 
@@ -434,17 +479,24 @@ export class ChatWidget extends Widget {
             <div class="interrupt-header">Approval Required</div>
             <div class="interrupt-tool">${toolName}</div>
             ${credentialsBlock}
+            ${missingBanner}
             <details class="interrupt-args">
                 <summary>arguments</summary>
                 <pre>${JSON.stringify(toolArgs, null, 2)}</pre>
             </details>
             <div class="interrupt-actions">
-                <button class="interrupt-approve">Approve</button>
+                <button class="interrupt-approve"${missingSet.size > 0 ? ' disabled' : ''}>Approve</button>
                 <button class="interrupt-reject">Reject</button>
             </div>
         `;
 
-        card.querySelector('.interrupt-approve')!.addEventListener('click', () => {
+        // Stash the missing set on the card so the credential-added event
+        // handler can find it and mutate the card in place.
+        (card as any)._missingCredentials = new Set(missingSet);
+
+        const approveBtn = card.querySelector<HTMLButtonElement>('.interrupt-approve')!;
+        approveBtn.addEventListener('click', () => {
+            if (approveBtn.disabled) return;
             card.remove();
             this._resumeExecution('approve', null);
         });
@@ -453,8 +505,50 @@ export class ChatWidget extends Widget {
             this._resumeExecution('reject', 'Rejected by user');
         });
 
+        const setCredsBtn = card.querySelector<HTMLButtonElement>('.interrupt-set-creds');
+        if (setCredsBtn) {
+            setCredsBtn.addEventListener('click', () => {
+                // Open the config panel to the first missing credential.
+                // Each subsequent add (via the credential-added event) walks
+                // the card's missing set down until approve re-enables.
+                const first = Array.from(missingSet)[0];
+                if (first && this._onOpenCredentialForm) {
+                    this._onOpenCredentialForm(first);
+                }
+            });
+        }
+
         this._messagesDiv.appendChild(card);
         this._messagesDiv.scrollTop = this._messagesDiv.scrollHeight;
+    }
+
+    /** Called when ``credential-added`` fires. Walks every interrupt card
+     *  currently in the message area and, for each one that was gated on
+     *  ``name``, removes the pill's missing marker. When the card's missing
+     *  set empties, the Approve button re-enables and the banner hides.
+     *
+     *  The actual DB state is already up to date (the POST happens in the
+     *  config widget's save handler), so re-approving goes through the
+     *  existing ``_resolve_secrets`` check without any new state to sync.
+     */
+    private _onCredentialAdded(name: string): void {
+        const cards = this._messagesDiv.querySelectorAll<HTMLElement>('.interrupt-card');
+        cards.forEach(card => {
+            const missingSet: Set<string> | undefined = (card as any)._missingCredentials;
+            if (!missingSet || !missingSet.has(name)) return;
+            missingSet.delete(name);
+            const pill = card.querySelector<HTMLElement>(`li[data-cred-name="${CSS.escape(name)}"] code`);
+            if (pill) {
+                pill.classList.remove('interrupt-cred-missing');
+                pill.textContent = name;  // drop the ⚠ prefix
+            }
+            if (missingSet.size === 0) {
+                const banner = card.querySelector<HTMLElement>('.interrupt-missing-banner');
+                if (banner) banner.remove();
+                const approve = card.querySelector<HTMLButtonElement>('.interrupt-approve');
+                if (approve) approve.disabled = false;
+            }
+        });
     }
 
     private async _resumeExecution(decision: string, message: string | null): Promise<void> {

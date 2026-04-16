@@ -46,10 +46,35 @@ const filesWidget: FilesWidget = new FilesWidget({
     },
 });
 
+const configWidget = new ConfigWidget();
+
 const chatWidget: ChatWidget = new ChatWidget({
     conversationId: appData.conversationId || '',
     activityWidget,
     filesWidget,
+    // Approval cards that are gated on missing credentials use this hook
+    // to pop the Config panel and pre-fill the new-credential form.
+    // Replicates the "view:config" command's re-add logic so the tab shows
+    // up whether or not the user had previously closed it.
+    onOpenCredentialForm: (name: string) => {
+        if (!configWidget.parent) {
+            // Restore the initial layout so configWidget lands back in its
+            // home tab area, then re-hide anything the user had closed
+            // except configWidget itself. Same pattern as addViewCommand.
+            const wasHidden = new Set<Widget>();
+            for (const w of [conversationsWidget, chatWidget, activityWidget, filesWidget, configWidget]) {
+                if (!w.parent && w !== configWidget) {
+                    wasHidden.add(w);
+                }
+            }
+            dock.restoreLayout(initialLayout);
+            for (const w of wasHidden) {
+                w.parent = null;
+            }
+        }
+        dock.activateWidget(configWidget);
+        configWidget.focusCredentials(name);
+    },
 });
 
 const conversationsWidget = new ConversationListWidget({
@@ -57,8 +82,6 @@ const conversationsWidget = new ConversationListWidget({
     currentConversationId: appData.conversationId || '',
     userName: appData.userName || '',
 });
-
-const configWidget = new ConfigWidget();
 
 
 // --- Status Bar ---

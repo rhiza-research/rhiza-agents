@@ -36,6 +36,51 @@ class ParsedSkill:
     compatibility: str | None = None
     allowed_tools: list[str] = field(default_factory=list)
     metadata: dict[str, str] = field(default_factory=dict)
+    # Declared runtime requirements read from ``metadata.openclaw`` (plus the
+    # ``clawdbot`` / ``clawdis`` aliases ClawHub publishes under). The block
+    # is the spec's ``metadata`` extension point, so skills authored this way
+    # remain valid on any Agent Skills runtime that only knows the official
+    # fields. See docs/reference on the Agent Skills spec and the ClawHub
+    # skill-format.
+    required_env: list[str] = field(default_factory=list)
+    primary_env: str | None = None
+    required_bins: list[str] = field(default_factory=list)
+
+
+# Keys under ``metadata`` we accept the openclaw block at, in priority order.
+# ``openclaw`` is the name we prefer for skills we author ourselves; the
+# other two are aliases ClawHub publishes under and we read transparently.
+_OPENCLAW_METADATA_KEYS = ("openclaw", "clawdbot", "clawdis")
+
+
+def _openclaw_block(frontmatter: dict) -> dict:
+    """Return the first ``metadata.<alias>`` dict that looks like an openclaw block.
+
+    Returns ``{}`` when the frontmatter has no metadata, no recognized alias,
+    or the alias value isn't a dict. Never raises on malformed input — callers
+    treat a missing block as "skill has no declared requirements".
+    """
+    metadata = frontmatter.get("metadata")
+    if not isinstance(metadata, dict):
+        return {}
+    for key in _OPENCLAW_METADATA_KEYS:
+        block = metadata.get(key)
+        if isinstance(block, dict):
+            return block
+    return {}
+
+
+def _string_list(value) -> list[str]:
+    """Coerce a YAML list-of-strings field into a clean ``list[str]``.
+
+    Tolerates: missing field, non-list, mixed types — anything that isn't a
+    non-empty string is dropped. This mirrors how the ClawHub schema is used
+    in practice: authors sometimes write ``env: FOO`` (scalar) or slip a
+    non-string in; we'd rather ignore the garbage than crash the parser.
+    """
+    if not isinstance(value, list):
+        return []
+    return [v for v in value if isinstance(v, str) and v]
 
 
 def parse_skill_md(content: str) -> ParsedSkill:
@@ -68,6 +113,11 @@ def parse_skill_md(content: str) -> ParsedSkill:
     if raw_tools:
         allowed_tools = raw_tools.split() if isinstance(raw_tools, str) else list(raw_tools)
 
+    openclaw = _openclaw_block(frontmatter)
+    requires = openclaw.get("requires") if isinstance(openclaw.get("requires"), dict) else {}
+    primary = openclaw.get("primaryEnv")
+    primary_env = primary if isinstance(primary, str) and primary else None
+
     return ParsedSkill(
         name=name,
         description=description[:1024],
@@ -77,6 +127,9 @@ def parse_skill_md(content: str) -> ParsedSkill:
         compatibility=frontmatter.get("compatibility"),
         allowed_tools=allowed_tools,
         metadata={k: str(v) for k, v in frontmatter.get("metadata", {}).items()},
+        required_env=_string_list(requires.get("env")),
+        primary_env=primary_env,
+        required_bins=_string_list(requires.get("bins")),
     )
 
 
@@ -116,6 +169,23 @@ def _build_activation_response(skill_record: dict) -> str:
             f"at: {paths}. Execute them with the `run_file` tool (e.g. "
             f"`run_file('{prefix}/{next(iter(scripts))}')`). The scripts use "
             "PEP 723 inline metadata so `uv run` resolves their dependencies."
+        )
+
+    # Declared credential requirements (from metadata.openclaw.requires.env).
+    # Passing them explicitly to the agent makes the contract structural
+    # instead of something the LLM has to infer from prose in the skill body.
+    # The approval UI also flags missing names, but this tells the model
+    # which credentials to REQUEST in the first place.
+    if parsed.required_env:
+        bullets = "\n".join(f"  - {n}" for n in parsed.required_env)
+        parts.append(
+            "\n\n---\n"
+            "This skill requires these credential names to run its scripts:\n"
+            f"{bullets}\n"
+            "Pass them to run_file's `credentials` argument as "
+            '`[{"kind": "env_vars", "names": [...]}]` when executing the bundled '
+            "scripts. If any are not available, stop and tell the user to add "
+            "them in settings; do not invent values."
         )
 
     return "\n".join(parts)
@@ -163,13 +233,10 @@ def requires_sandbox(skill_record: dict) -> bool:
         if base in _EXECUTION_TOOLS:
             return True
 
-    # Check openclaw-style metadata for binary requirements
-    raw_meta = yaml.safe_load(re.match(r"^---\s*\n(.*?)\n---", skill_md, re.DOTALL).group(1) or "") or {}
-    openclaw = raw_meta.get("metadata", {})
-    if isinstance(openclaw, dict):
-        openclaw = openclaw.get("openclaw", {})
-        if isinstance(openclaw, dict) and openclaw.get("requires", {}).get("bins"):
-            return True
+    # Openclaw-style binary requirements (parsed into ParsedSkill.required_bins
+    # by parse_skill_md, so no second YAML pass here).
+    if parsed.required_bins:
+        return True
 
     # Check for executable code blocks in the prompt body
     code_block_pattern = re.compile(r"```(\w+)")

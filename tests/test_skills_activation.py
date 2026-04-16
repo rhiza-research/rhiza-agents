@@ -14,6 +14,8 @@ from rhiza_agents.agents.tools.skills import (
     _build_activation_response,
     _parsed_scripts,
     create_skill_tool,
+    parse_skill_md,
+    requires_sandbox,
 )
 
 SKILL_MD_MINIMAL = """---
@@ -206,3 +208,131 @@ def test_activation_tool_message_names_every_script():
 def test_create_skill_tool_rejects_invalid_skill_md(bad_md):
     with pytest.raises(ValueError):
         create_skill_tool({"id": "x", "skill_md": bad_md})
+
+
+# -- metadata.openclaw.requires parsing ----------------------------------
+
+
+_OPENCLAW_MD = """---
+name: needs-creds
+description: A skill that declares its credential requirements.
+metadata:
+  openclaw:
+    requires:
+      env:
+        - MATON_API_KEY
+        - TAHMO_USERNAME
+      bins:
+        - git
+    primaryEnv: MATON_API_KEY
+---
+Body.
+"""
+
+
+def test_parse_skill_md_reads_openclaw_requires():
+    parsed = parse_skill_md(_OPENCLAW_MD)
+    assert parsed.required_env == ["MATON_API_KEY", "TAHMO_USERNAME"]
+    assert parsed.primary_env == "MATON_API_KEY"
+    assert parsed.required_bins == ["git"]
+
+
+@pytest.mark.parametrize("alias", ["openclaw", "clawdbot", "clawdis"])
+def test_parse_skill_md_accepts_metadata_aliases(alias):
+    md = f"""---
+name: aliased
+description: Skill using the {alias} alias for its requirements block.
+metadata:
+  {alias}:
+    requires:
+      env:
+        - ALPHA
+        - BETA
+---
+Body.
+"""
+    parsed = parse_skill_md(md)
+    assert parsed.required_env == ["ALPHA", "BETA"]
+
+
+def test_parse_skill_md_missing_metadata_block_is_empty():
+    parsed = parse_skill_md(SKILL_MD_MINIMAL)
+    assert parsed.required_env == []
+    assert parsed.primary_env is None
+    assert parsed.required_bins == []
+
+
+@pytest.mark.parametrize(
+    "mangled_md",
+    [
+        # requires is not a dict
+        "---\nname: x\ndescription: d\nmetadata:\n  openclaw:\n    requires: not-a-dict\n---\nB",
+        # env is a scalar instead of a list
+        "---\nname: x\ndescription: d\nmetadata:\n  openclaw:\n    requires:\n      env: FOO\n---\nB",
+        # primaryEnv is not a string
+        "---\nname: x\ndescription: d\nmetadata:\n  openclaw:\n    primaryEnv: [a, b]\n---\nB",
+        # openclaw block is a scalar
+        "---\nname: x\ndescription: d\nmetadata:\n  openclaw: garbage\n---\nB",
+    ],
+)
+def test_parse_skill_md_tolerates_mangled_openclaw(mangled_md):
+    # Should not raise — malformed extensions are treated as absent so a
+    # ClawHub-shaped typo doesn't brick the whole skill install.
+    parsed = parse_skill_md(mangled_md)
+    assert parsed.required_env == []
+    assert parsed.required_bins == []
+    assert parsed.primary_env is None
+
+
+def test_parse_skill_md_openclaw_does_not_corrupt_stringified_metadata():
+    """The stringified ``metadata`` dict is unchanged by our new parsing.
+
+    Other callers may rely on ``metadata`` being a flat ``dict[str, str]``
+    (e.g. version extraction). We preserve that even when a nested openclaw
+    block is present — its stringified form is fine, we don't need its
+    contents in ``metadata`` since we've surfaced them as structured fields.
+    """
+    parsed = parse_skill_md(_OPENCLAW_MD)
+    # Every value in metadata remains a string, not a dict/list.
+    for v in parsed.metadata.values():
+        assert isinstance(v, str)
+
+
+# -- Activation hint for declared credentials ----------------------------
+
+
+def test_activation_response_includes_required_env_hint():
+    resp = _build_activation_response({"id": "sk", "skill_md": _OPENCLAW_MD})
+    assert "This skill requires these credential names" in resp
+    assert "MATON_API_KEY" in resp
+    assert "TAHMO_USERNAME" in resp
+    # The instruction nudges the agent toward the right tool argument shape.
+    assert "env_vars" in resp
+
+
+def test_activation_response_omits_credential_hint_when_empty():
+    resp = _build_activation_response(_record())
+    assert "This skill requires these credential names" not in resp
+
+
+# -- requires_sandbox uses parsed.required_bins --------------------------
+
+
+def test_requires_sandbox_true_for_openclaw_requires_bins():
+    md = """---
+name: needs-bin
+description: A skill that declares a binary dep via the openclaw block.
+metadata:
+  openclaw:
+    requires:
+      bins:
+        - ffmpeg
+---
+Body without executable code blocks.
+"""
+    assert requires_sandbox({"id": "x", "skill_md": md, "scripts_json": None}) is True
+
+
+def test_requires_sandbox_false_for_inert_skill():
+    # No scripts, no execution tools, no binary deps, no exec code blocks.
+    assert requires_sandbox({"id": "x", "skill_md": SKILL_MD_MINIMAL, "scripts_json": None}) is False
