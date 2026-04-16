@@ -468,9 +468,15 @@ export class ChatWidget extends Widget {
                </div>`
             : '';
 
+        // Missing credentials are informational, not blocking. The backend
+        // silently drops absent names from the materialization plan and the
+        // underlying CLI/script is responsible for failing with a clear
+        // message if a credential it actually needed wasn't injected. We
+        // still surface which names won't be available so the user can add
+        // them up front if they want.
         const missingBanner = missingSet.size > 0
             ? `<div class="interrupt-missing-banner">
-                   <span>${missingSet.size === 1 ? 'This credential is not set' : 'These credentials are not set'} — approve is disabled until they are added.</span>
+                   <span>${missingSet.size === 1 ? 'This credential is not set' : 'These credentials are not set'} — it will not be injected unless you add it.</span>
                    <button class="interrupt-set-creds">Set credentials</button>
                </div>`
             : '';
@@ -485,7 +491,7 @@ export class ChatWidget extends Widget {
                 <pre>${JSON.stringify(toolArgs, null, 2)}</pre>
             </details>
             <div class="interrupt-actions">
-                <button class="interrupt-approve"${missingSet.size > 0 ? ' disabled' : ''}>Approve</button>
+                <button class="interrupt-approve">Approve</button>
                 <button class="interrupt-reject">Reject</button>
             </div>
         `;
@@ -496,7 +502,6 @@ export class ChatWidget extends Widget {
 
         const approveBtn = card.querySelector<HTMLButtonElement>('.interrupt-approve')!;
         approveBtn.addEventListener('click', () => {
-            if (approveBtn.disabled) return;
             card.remove();
             this._resumeExecution('approve', null);
         });
@@ -522,14 +527,11 @@ export class ChatWidget extends Widget {
         this._messagesDiv.scrollTop = this._messagesDiv.scrollHeight;
     }
 
-    /** Called when ``credential-added`` fires. Walks every interrupt card
-     *  currently in the message area and, for each one that was gated on
-     *  ``name``, removes the pill's missing marker. When the card's missing
-     *  set empties, the Approve button re-enables and the banner hides.
-     *
-     *  The actual DB state is already up to date (the POST happens in the
-     *  config widget's save handler), so re-approving goes through the
-     *  existing ``_resolve_secrets`` check without any new state to sync.
+    /** Called when ``credential-added`` fires. Walks every open interrupt
+     *  card and clears the warning markers for the just-added credential —
+     *  the warning banner and the pill's missing-class need to disappear
+     *  once the user resolves the gap. The Approve button is not gated on
+     *  credentials; it stays clickable regardless.
      */
     private _onCredentialAdded(name: string): void {
         const cards = this._messagesDiv.querySelectorAll<HTMLElement>('.interrupt-card');
@@ -545,8 +547,6 @@ export class ChatWidget extends Widget {
             if (missingSet.size === 0) {
                 const banner = card.querySelector<HTMLElement>('.interrupt-missing-banner');
                 if (banner) banner.remove();
-                const approve = card.querySelector<HTMLButtonElement>('.interrupt-approve');
-                if (approve) approve.disabled = false;
             }
         });
     }

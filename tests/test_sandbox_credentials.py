@@ -176,6 +176,57 @@ def test_build_runtime_injection_concatenates_same_path():
     assert files == {"~/.netrc": "machine a login alice password p1\nmachine b login bob password p2\n"}
 
 
+def test_build_runtime_injection_skips_missing_env_vars():
+    """Names absent from the secret store are silently dropped from the env
+    dict (not raised, not substituted with placeholders). Lets a single skill
+    list both required and optional credentials and have it Just Work for the
+    user who only configured the required ones."""
+    env, files = _build_runtime_injection(
+        [{"kind": "env_vars", "names": ["NASA_USER", "NASA_PASS", "OPTIONAL_KEY"]}],
+        {"NASA_USER": "alice", "NASA_PASS": "hunter2"},
+    )
+    assert env == {"NASA_USER": "alice", "NASA_PASS": "hunter2"}
+    assert "OPTIONAL_KEY" not in env
+    assert files == {}
+
+
+def test_build_runtime_injection_drops_partially_resolvable_file():
+    """A file materialization is dropped entirely if any of its referenced
+    names is missing — a partially-rendered netrc is worse than no netrc."""
+    env, files = _build_runtime_injection(
+        [
+            {
+                "kind": "file",
+                "path": "~/.netrc",
+                "names": ["U", "P"],
+                "content": "machine x login {U} password {P}\n",
+            }
+        ],
+        {"U": "alice"},  # P is missing
+    )
+    assert env == {}
+    assert files == {}
+
+
+def test_build_runtime_injection_keeps_other_materializations_when_one_drops():
+    """Dropping an unresolvable file does not affect other materializations."""
+    env, files = _build_runtime_injection(
+        [
+            {"kind": "env_vars", "names": ["A"]},
+            {
+                "kind": "file",
+                "path": "~/.netrc",
+                "names": ["U", "P"],
+                "content": "machine x login {U} password {P}\n",
+            },
+            {"kind": "env_vars", "names": ["B"]},
+        ],
+        {"A": "1", "B": "2"},  # U and P missing
+    )
+    assert env == {"A": "1", "B": "2"}
+    assert files == {}
+
+
 def test_daytona_sandbox_resources_unset(monkeypatch):
     monkeypatch.delenv("DAYTONA_SANDBOX_DISK_GIB", raising=False)
     assert _daytona_sandbox_resources_from_env() is None

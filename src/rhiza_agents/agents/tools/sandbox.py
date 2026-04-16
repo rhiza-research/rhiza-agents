@@ -297,23 +297,34 @@ def _validate_materializations(materializations: Any) -> str | None:
     return None
 
 
-async def _resolve_secrets(db, user_id: str, names: list[str]) -> tuple[dict[str, str] | None, str | None]:
-    """Decrypt every named secret for a user.
+async def _resolve_secrets(db, user_id: str, names: list[str]) -> tuple[dict[str, str], list[str], str | None]:
+    """Decrypt every named secret available in the user's store.
 
-    Returns ``(values, None)`` on success or ``(None, error_string)`` if any
-    name is missing from the user's store. Caller must have already
-    validated the materialization shape.
+    Missing names are treated as **optional**: they are returned in the
+    ``missing`` list and silently dropped from injection rather than
+    failing the call. The CLI/script is responsible for raising a clear
+    error if it actually requires a credential that wasn't injected. This
+    lets a single skill cover both public-anonymous and private-authenticated
+    workflows without splitting into two skills per source.
+
+    Returns ``(values, missing, error_string)``:
+      - ``values``: name -> decrypted value for every name that was present.
+      - ``missing``: names that were not in the user's store (can be empty).
+      - ``error_string``: only set when decryption itself fails for a
+        present-but-unreadable secret (a real error, not just absence).
     """
     values: dict[str, str] = {}
+    missing: list[str] = []
     for name in names:
         ct = await db.get_credential_ciphertext_by_name(user_id, name)
         if ct is None:
-            return None, f"credential {name!r} is not configured — add it in settings"
+            missing.append(name)
+            continue
         try:
             values[name] = decrypt_value(ct)
         except Exception as e:  # pragma: no cover - decrypt should not fail in practice
-            return None, f"failed to decrypt credential {name!r}: {e}"
-    return values, None
+            return values, missing, f"failed to decrypt credential {name!r}: {e}"
+    return values, missing, None
 
 
 def _build_runtime_injection(
@@ -321,6 +332,15 @@ def _build_runtime_injection(
     secret_values: dict[str, str],
 ) -> tuple[dict[str, str], dict[str, str]]:
     """Turn validated materializations + decrypted values into env vars and files.
+
+    Names that are absent from ``secret_values`` (because the user did not
+    have that credential stored) are silently skipped:
+
+      - ``env_vars`` plans only set entries for names that resolved.
+      - ``file`` plans are dropped entirely if any of their referenced names
+        are missing — a partially-rendered netrc/credential file is worse
+        than no file at all (callers expecting a complete file would pass
+        broken auth to the underlying tool).
 
     Returns ``(env_vars, files)`` where ``env_vars`` is a flat dict for
     ``CodeRunParams.env`` and ``files`` is a dict of ``path -> content`` ready
@@ -332,8 +352,13 @@ def _build_runtime_injection(
     for m in materializations:
         if m["kind"] == "env_vars":
             for name in m["names"]:
-                env[name] = secret_values[name]
+                if name in secret_values:
+                    env[name] = secret_values[name]
         elif m["kind"] == "file":
+            # Skip the entire file if any referenced name is unresolved —
+            # don't write a half-templated credential file to the sandbox.
+            if not all(n in secret_values for n in m["names"]):
+                continue
             path = m["path"]
             rendered = substitute_placeholders(m["content"], secret_values)
             if path in files:
@@ -411,7 +436,7 @@ async def resolve_credentials_or_error(
             }
         )
 
-    secret_values, err = await _resolve_secrets(db, convo["user_id"], referenced_names)
+    secret_values, missing, err = await _resolve_secrets(db, convo["user_id"], referenced_names)
     if err:
         return Command(
             update={
@@ -424,6 +449,11 @@ async def resolve_credentials_or_error(
                 ]
             }
         )
+    # Missing names are intentionally non-fatal — see _resolve_secrets docstring.
+    # The CLI/script is responsible for reporting if a credential it needed
+    # wasn't injected. Logging the missing set helps debug "why didn't auth work".
+    if missing:
+        logger.info("Credential names not configured (skipped): %s", ", ".join(missing))
 
     env_vars, file_uploads = _build_runtime_injection(materializations, secret_values)
     redaction_list = list(secret_values.values())
@@ -537,7 +567,9 @@ def make_execute_python_code(db=None):
                     }
                 )
             user_id = convo["user_id"]
-            secret_values, err = await _resolve_secrets(db, user_id, referenced_names)
+            secret_values, missing, err = await _resolve_secrets(db, user_id, referenced_names)
+            if missing:
+                logger.info("Credential names not configured (skipped): %s", ", ".join(missing))
             if err:
                 return Command(
                     update={

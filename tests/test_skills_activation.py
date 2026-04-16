@@ -301,18 +301,24 @@ def test_parse_skill_md_openclaw_does_not_corrupt_stringified_metadata():
 # -- Activation hint for declared credentials ----------------------------
 
 
-def test_activation_response_includes_required_env_hint():
+def test_activation_response_includes_optional_env_hint():
     resp = _build_activation_response({"id": "sk", "skill_md": _OPENCLAW_MD})
-    assert "This skill requires these credential names" in resp
+    # Declared credentials are optional at runtime; the script/CLI is
+    # responsible for deciding what's actually required for a given
+    # invocation. The activation hint must communicate this to the agent.
+    assert "MAY use these credentials" in resp
     assert "MATON_API_KEY" in resp
     assert "TAHMO_USERNAME" in resp
-    # The instruction nudges the agent toward the right tool argument shape.
+    # The instruction still nudges the agent toward the right tool argument shape.
     assert "env_vars" in resp
+    # And explains that downstream errors are the script's responsibility,
+    # not the agent's to pre-validate.
+    assert "credential that wasn't injected" in resp
 
 
 def test_activation_response_omits_credential_hint_when_empty():
     resp = _build_activation_response(_record())
-    assert "This skill requires these credential names" not in resp
+    assert "MAY use these credentials" not in resp
 
 
 # -- requires_sandbox uses parsed.required_bins --------------------------
