@@ -96,11 +96,22 @@ export class ConfigWidget extends Widget {
         this._skillList.className = 'vectorstore-list';
         sidebar.appendChild(this._skillList);
 
+        const skillBtnRow = document.createElement('div');
+        skillBtnRow.style.display = 'flex';
+        skillBtnRow.style.gap = '0.5rem';
         const addSkillBtn = document.createElement('button');
         addSkillBtn.className = 'config-btn';
         addSkillBtn.textContent = '+ Add Skill';
+        addSkillBtn.style.flex = '1';
         addSkillBtn.addEventListener('click', () => this._showNewSkillMenu());
-        sidebar.appendChild(addSkillBtn);
+        skillBtnRow.appendChild(addSkillBtn);
+        const refreshAllBtn = document.createElement('button');
+        refreshAllBtn.className = 'config-btn';
+        refreshAllBtn.textContent = '⟳ Refresh All';
+        refreshAllBtn.title = 'Re-pull all GitHub-installed skills from upstream';
+        refreshAllBtn.addEventListener('click', () => this._refreshAllSkills(refreshAllBtn));
+        skillBtnRow.appendChild(refreshAllBtn);
+        sidebar.appendChild(skillBtnRow);
 
         const mcpTitle = document.createElement('h3');
         mcpTitle.className = 'config-sidebar-title';
@@ -529,8 +540,10 @@ export class ConfigWidget extends Widget {
             info.appendChild(name);
             const meta = document.createElement('span');
             meta.className = 'vs-list-count';
-            const sourceLabel = skill.system ? 'system' : skill.source;
-            meta.textContent = sourceLabel + (skill.requires_sandbox ? ' · requires sandbox' : '');
+            const parts = [skill.system ? 'system' : skill.source];
+            if (skill.source_sha) parts.push(skill.source_sha.slice(0, 7));
+            if (skill.requires_sandbox) parts.push('requires sandbox');
+            meta.textContent = parts.join(' · ');
             info.appendChild(meta);
             item.appendChild(info);
 
@@ -543,6 +556,15 @@ export class ConfigWidget extends Widget {
             viewBtn.addEventListener('click', () => this._viewSkill(skill.id));
             actions.appendChild(viewBtn);
 
+            if (!skill.system && skill.source === 'github') {
+                const refreshBtn = document.createElement('button');
+                refreshBtn.className = 'config-btn-sm';
+                refreshBtn.textContent = '⟳';
+                refreshBtn.title = 'Refresh from upstream';
+                refreshBtn.addEventListener('click', () => this._refreshSkill(skill, refreshBtn));
+                actions.appendChild(refreshBtn);
+            }
+
             if (!skill.system) {
                 const delBtn = document.createElement('button');
                 delBtn.className = 'config-btn-sm config-btn-danger';
@@ -554,6 +576,61 @@ export class ConfigWidget extends Widget {
 
             item.appendChild(actions);
             this._skillList.appendChild(item);
+        }
+    }
+
+    private async _refreshSkill(skill: any, btn: HTMLButtonElement): Promise<void> {
+        const original = btn.textContent;
+        btn.textContent = '…';
+        btn.disabled = true;
+        try {
+            const res = await fetch(`/api/skills/${skill.id}/refresh`, { method: 'POST' });
+            const result = await res.json();
+            if (!res.ok) {
+                alert(result.detail || 'Refresh failed');
+                return;
+            }
+            if (result.status === 'updated') {
+                await this._loadSkills();
+            } else if (result.status === 'unchanged') {
+                btn.textContent = '✓';
+                setTimeout(() => { btn.textContent = original; btn.disabled = false; }, 1200);
+                return;
+            } else if (result.status === 'error') {
+                alert(`Refresh failed: ${result.error}`);
+            }
+        } catch (e) {
+            alert(`Refresh failed: ${e}`);
+        }
+        btn.textContent = original;
+        btn.disabled = false;
+    }
+
+    private async _refreshAllSkills(btn: HTMLButtonElement): Promise<void> {
+        const original = btn.textContent;
+        btn.textContent = 'Refreshing…';
+        btn.disabled = true;
+        try {
+            const res = await fetch('/api/skills/refresh', { method: 'POST' });
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                alert(err.detail || 'Refresh failed');
+                return;
+            }
+            const result = await res.json();
+            const lines = [
+                `Updated: ${result.updated.length}`,
+                `Unchanged: ${result.unchanged.length}`,
+            ];
+            if (result.errors.length) lines.push(`Errors: ${result.errors.length}`);
+            if (result.skipped.length) lines.push(`Skipped: ${result.skipped.length}`);
+            alert(lines.join('\n'));
+            if (result.updated.length) await this._loadSkills();
+        } catch (e) {
+            alert(`Refresh failed: ${e}`);
+        } finally {
+            btn.textContent = original;
+            btn.disabled = false;
         }
     }
 
@@ -604,54 +681,207 @@ export class ConfigWidget extends Widget {
     private _showInstallSkillForm(): void {
         this._detail.innerHTML = `
             <div class="config-form">
-                <h2>Install Skill from GitHub</h2>
+                <h2>Install Skills from GitHub</h2>
                 <div class="form-group">
                     <label for="skill-repo">Repository (owner/repo)</label>
-                    <input type="text" id="skill-repo" placeholder="anthropics/skills">
+                    <input type="text" id="skill-repo" placeholder="rhiza-research/forecasting-skills">
                 </div>
                 <div class="form-group">
-                    <label for="skill-path">Path (optional subdirectory)</label>
-                    <input type="text" id="skill-path" placeholder="skills/data-cleaning">
+                    <label for="skill-path">Path (single skill, or directory of skills)</label>
+                    <input type="text" id="skill-path" placeholder="skills">
+                </div>
+                <div class="form-group">
+                    <label for="skill-ref">Branch / tag / SHA (optional)</label>
+                    <input type="text" id="skill-ref" placeholder="main">
                 </div>
                 <div class="config-form-actions">
                     <button id="cancel-skill-btn" class="config-btn">Cancel</button>
-                    <button id="install-skill-btn" class="config-btn config-btn-primary">Install</button>
+                    <button id="search-skill-btn" class="config-btn config-btn-primary">Search</button>
                 </div>
+                <div id="skill-discover-results"></div>
             </div>
         `;
 
         this._detail.querySelector('#cancel-skill-btn')!.addEventListener('click', () => this._renderPlaceholder());
-        this._detail.querySelector('#install-skill-btn')!.addEventListener('click', async () => {
-            const repo = (this._detail.querySelector('#skill-repo') as HTMLInputElement).value.trim();
-            const path = (this._detail.querySelector('#skill-path') as HTMLInputElement).value.trim();
-            if (!repo) return;
+        this._detail.querySelector('#search-skill-btn')!.addEventListener('click', () => this._discoverSkills());
+    }
 
-            const btn = this._detail.querySelector('#install-skill-btn') as HTMLButtonElement;
-            btn.textContent = 'Installing...';
-            btn.disabled = true;
+    private async _discoverSkills(): Promise<void> {
+        const repo = (this._detail.querySelector('#skill-repo') as HTMLInputElement).value.trim();
+        const path = (this._detail.querySelector('#skill-path') as HTMLInputElement).value.trim();
+        const ref = (this._detail.querySelector('#skill-ref') as HTMLInputElement).value.trim();
+        if (!repo) return;
 
-            try {
-                const res = await fetch('/api/skills/install', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ repo, path: path || undefined }),
-                });
-                if (!res.ok) {
-                    const err = await res.json();
-                    alert(err.detail || 'Install failed');
-                    btn.textContent = 'Install';
-                    btn.disabled = false;
-                    return;
-                }
-                await this._loadSkills();
-                await this._loadToolTypes();
-                if (this._selectedAgentId) this._selectAgent(this._selectedAgentId);
-                this._renderPlaceholder();
-            } catch {
-                btn.textContent = 'Error';
-                setTimeout(() => { btn.textContent = 'Install'; btn.disabled = false; }, 2000);
+        const btn = this._detail.querySelector('#search-skill-btn') as HTMLButtonElement;
+        const results = this._detail.querySelector('#skill-discover-results') as HTMLDivElement;
+        btn.textContent = 'Searching…';
+        btn.disabled = true;
+        results.innerHTML = '';
+
+        try {
+            const res = await fetch('/api/skills/discover', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    repo,
+                    path: path || undefined,
+                    ref: ref || undefined,
+                }),
+            });
+            const data = await res.json();
+            if (!res.ok) {
+                results.innerHTML = `<p style="color: var(--error, #c33);">${escapeHtml(data.detail || 'Discover failed')}</p>`;
+                return;
             }
-        });
+            this._renderDiscoverResults(repo, ref, data, results);
+        } catch (e) {
+            results.innerHTML = `<p style="color: var(--error, #c33);">${escapeHtml(String(e))}</p>`;
+        } finally {
+            btn.textContent = 'Search';
+            btn.disabled = false;
+        }
+    }
+
+    private _renderDiscoverResults(
+        repo: string,
+        ref: string,
+        data: any,
+        container: HTMLDivElement,
+    ): void {
+        const sha = data.source_sha as string;
+        const branch = data.source_branch as string;
+        const available = data.available as any[];
+        const skipped = data.skipped as any[];
+
+        if (!available.length && !skipped.length) {
+            container.innerHTML = '<p style="color: var(--text-secondary);">No skills found at that path.</p>';
+            return;
+        }
+
+        let html = `
+            <p style="color: var(--text-secondary); margin-top: 1rem;">
+              Found ${available.length} skill${available.length === 1 ? '' : 's'} on
+              <code>${escapeHtml(branch)}</code> at <code>${escapeHtml(sha.slice(0, 7))}</code>.
+            </p>
+        `;
+
+        if (available.length) {
+            html += '<div style="display: flex; flex-direction: column; gap: 0.5rem; margin: 0.5rem 0;">';
+            for (const skill of available) {
+                const installed = skill.already_installed;
+                const isInstalled = !!installed;
+                const sameSha = isInstalled && installed.sha === sha;
+                const tag = isInstalled
+                    ? (sameSha
+                        ? `<span style="color: var(--text-secondary); font-size: 0.85em;">already installed at ${escapeHtml(sha.slice(0, 7))}</span>`
+                        : `<span style="color: var(--text-secondary); font-size: 0.85em;">installed at ${escapeHtml((installed.sha || '?').slice(0, 7))}, ${escapeHtml(sha.slice(0, 7))} available</span>`)
+                    : '';
+                html += `
+                    <label style="display: flex; gap: 0.5rem; align-items: flex-start; cursor: pointer;">
+                        <input type="checkbox"
+                               class="skill-discover-check"
+                               data-subpath="${escapeHtml(skill.subpath)}"
+                               data-installed="${isInstalled ? '1' : '0'}"
+                               ${isInstalled && sameSha ? '' : 'checked'}>
+                        <span>
+                            <strong>${escapeHtml(skill.name)}</strong>
+                            ${skill.has_scripts ? '<span style="color: var(--text-secondary); font-size: 0.85em;"> · has scripts</span>' : ''}
+                            ${tag}
+                            <br>
+                            <span style="color: var(--text-secondary); font-size: 0.9em;">${escapeHtml(skill.description)}</span>
+                        </span>
+                    </label>
+                `;
+            }
+            html += '</div>';
+        }
+
+        if (skipped.length) {
+            html += '<details style="margin-top: 0.75rem;"><summary style="color: var(--text-secondary); font-size: 0.9em;">Skipped ' + skipped.length + '</summary><ul style="font-size: 0.85em; color: var(--text-secondary);">';
+            for (const sk of skipped) {
+                html += `<li><code>${escapeHtml(sk.subpath)}</code> — ${escapeHtml(sk.reason)}</li>`;
+            }
+            html += '</ul></details>';
+        }
+
+        if (available.length) {
+            html += `
+                <div class="config-form-actions" style="margin-top: 1rem;">
+                    <label style="margin-right: auto; display: flex; align-items: center; gap: 0.4rem; color: var(--text-secondary); font-size: 0.9em;">
+                        <input type="checkbox" id="skill-install-force"> reinstall (overwrite if already installed)
+                    </label>
+                    <button id="install-selected-btn" class="config-btn config-btn-primary">Install selected (<span id="install-selected-count">0</span>)</button>
+                </div>
+            `;
+        }
+
+        container.innerHTML = html;
+
+        const checks = container.querySelectorAll<HTMLInputElement>('.skill-discover-check');
+        const countEl = container.querySelector('#install-selected-count');
+        const installBtn = container.querySelector('#install-selected-btn') as HTMLButtonElement | null;
+        const updateCount = () => {
+            if (!countEl) return;
+            countEl.textContent = String(
+                Array.from(checks).filter((c) => c.checked).length,
+            );
+        };
+        checks.forEach((c) => c.addEventListener('change', updateCount));
+        updateCount();
+
+        if (installBtn) {
+            installBtn.addEventListener('click', async () => {
+                const selected = Array.from(checks)
+                    .filter((c) => c.checked)
+                    .map((c) => c.dataset.subpath as string);
+                if (!selected.length) return;
+                const force = (container.querySelector('#skill-install-force') as HTMLInputElement | null)?.checked || false;
+                await this._installSelectedSkills(repo, ref, sha, selected, force, installBtn);
+            });
+        }
+    }
+
+    private async _installSelectedSkills(
+        repo: string,
+        ref: string,
+        sha: string,
+        paths: string[],
+        force: boolean,
+        btn: HTMLButtonElement,
+    ): Promise<void> {
+        btn.disabled = true;
+        btn.textContent = 'Installing…';
+        try {
+            const res = await fetch('/api/skills/install', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    repo,
+                    paths,
+                    // Pin to the same SHA the user just previewed.
+                    ref: sha || ref || undefined,
+                    force,
+                }),
+            });
+            const result = await res.json();
+            if (!res.ok) {
+                alert(result.detail || 'Install failed');
+                return;
+            }
+            const lines = [`Installed ${result.installed.length}`];
+            if (result.skipped.length) lines.push(`Skipped ${result.skipped.length}`);
+            if (result.errors.length) lines.push(`Errors ${result.errors.length}`);
+            alert(lines.join('\n'));
+            await this._loadSkills();
+            await this._loadToolTypes();
+            if (this._selectedAgentId) this._selectAgent(this._selectedAgentId);
+            this._renderPlaceholder();
+        } catch (e) {
+            alert(`Install failed: ${e}`);
+        } finally {
+            btn.disabled = false;
+            btn.textContent = 'Install selected';
+        }
     }
 
     private _showCreateSkillForm(): void {

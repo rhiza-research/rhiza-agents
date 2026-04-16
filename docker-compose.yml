@@ -86,6 +86,11 @@ services:
       # When unset the credentials feature is disabled and credential API
       # routes return 503.
       CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:-}
+      # Optional GitHub PAT used by the skill discover/install/refresh routes.
+      # Anonymous works (60/hr per IP); set this to raise the quota to 5000/hr
+      # — useful for bulk install or repeated refreshes. A read-only `public_repo`
+      # PAT is enough for public skill repos.
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
     depends_on:
       - keycloak
       - sheerwater-mcp
