@@ -93,6 +93,8 @@ class Database:
                 description TEXT NOT NULL,
                 source TEXT NOT NULL,
                 source_ref TEXT,
+                source_sha TEXT,
+                source_branch TEXT,
                 skill_md TEXT NOT NULL,
                 scripts_json TEXT,
                 references_json TEXT,
@@ -103,6 +105,15 @@ class Database:
             )
         """)
         await self.database.execute("CREATE INDEX IF NOT EXISTS idx_skills_user_id ON skills(user_id)")
+        # Idempotent migration for installs that predate the source_sha /
+        # source_branch columns. SQLite errors with "duplicate column" when
+        # the column already exists; swallow that one specifically.
+        for column, decl in (("source_sha", "TEXT"), ("source_branch", "TEXT")):
+            try:
+                await self.database.execute(f"ALTER TABLE skills ADD COLUMN {column} {decl}")
+            except Exception as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
 
         # Per-user encrypted credentials. Each row is one named secret value.
         # The value column is the only place secret material lives — name is
@@ -413,6 +424,8 @@ class Database:
         source: str,
         skill_md: str,
         source_ref: str | None = None,
+        source_sha: str | None = None,
+        source_branch: str | None = None,
         scripts_json: str | None = None,
         references_json: str | None = None,
         assets_json: str | None = None,
@@ -420,8 +433,10 @@ class Database:
         """Create a user skill."""
         await self.database.execute(
             """INSERT INTO skills (id, user_id, name, description, source, source_ref,
+                   source_sha, source_branch,
                    skill_md, scripts_json, references_json, assets_json)
                VALUES (:id, :user_id, :name, :description, :source, :source_ref,
+                   :source_sha, :source_branch,
                    :skill_md, :scripts_json, :references_json, :assets_json)""",
             {
                 "id": skill_id,
@@ -430,6 +445,8 @@ class Database:
                 "description": description,
                 "source": source,
                 "source_ref": source_ref,
+                "source_sha": source_sha,
+                "source_branch": source_branch,
                 "skill_md": skill_md,
                 "scripts_json": scripts_json,
                 "references_json": references_json,
@@ -443,8 +460,30 @@ class Database:
             "description": description,
             "source": source,
             "source_ref": source_ref,
+            "source_sha": source_sha,
+            "source_branch": source_branch,
             "enabled": True,
         }
+
+    async def find_user_skill_by_source_ref(self, user_id: str, source_ref: str) -> dict | None:
+        """Look up a user-owned skill that was installed from a specific source_ref.
+
+        Used by the discover endpoint to mark skills as already-installed and by
+        the install endpoint to reject duplicates without --force.
+        """
+        row = await self.database.fetch_one(
+            "SELECT * FROM skills WHERE user_id = :user_id AND source_ref = :source_ref",
+            {"user_id": user_id, "source_ref": source_ref},
+        )
+        return dict(row._mapping) if row else None
+
+    async def list_user_github_skills(self, user_id: str) -> list[dict]:
+        """List the user's skills that were installed from GitHub (refreshable)."""
+        rows = await self.database.fetch_all(
+            "SELECT * FROM skills WHERE user_id = :user_id AND source = 'github'",
+            {"user_id": user_id},
+        )
+        return [dict(row._mapping) for row in rows]
 
     async def update_skill(self, skill_id: str, **fields) -> bool:
         """Update fields on a skill. Returns True if found."""
