@@ -252,6 +252,13 @@ body { height: 100vh; margin: 0; }
 .config-btn-primary { background: var(--jp-brand-color1); color: white; border: none; }
 .config-btn-danger { color: var(--jp-ui-font-color3); }
 .config-btn-danger:hover { border-color: var(--jp-error-color1); color: var(--jp-error-color1); }
+.config-btn-warning {
+    color: var(--jp-warn-color1, #d4900a);
+    border-color: var(--jp-warn-color1, #d4900a);
+}
+.config-btn-warning:hover {
+    background: var(--jp-warn-color1, #d4900a); color: white;
+}
 .config-btn-sm { padding: 0.2rem 0.5rem; border: 1px solid var(--jp-border-color1); border-radius: 3px; background: none; cursor: pointer; font-size: 0.75rem; color: var(--jp-ui-font-color2); }
 .config-btn-sm:hover { border-color: var(--jp-brand-color1); color: var(--jp-brand-color1); }
 .form-group { margin-bottom: 1rem; }

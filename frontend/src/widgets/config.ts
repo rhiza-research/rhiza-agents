@@ -550,6 +550,22 @@ export class ConfigWidget extends Widget {
             const actions = document.createElement('div');
             actions.className = 'vs-list-actions';
 
+            // ⚠ surfaces declared-but-not-configured credentials so the user
+            // resolves them BEFORE invoking the skill, not after a HITL card
+            // blocks them. Click opens the config panel pre-filled with all
+            // missing names so the user fills them in one form.
+            const missing: string[] = Array.isArray(skill.missing_credentials)
+                ? skill.missing_credentials
+                : [];
+            if (missing.length > 0) {
+                const warnBtn = document.createElement('button');
+                warnBtn.className = 'config-btn-sm config-btn-warning';
+                warnBtn.textContent = '⚠';
+                warnBtn.title = `Missing credential${missing.length === 1 ? '' : 's'}: ${missing.join(', ')}`;
+                warnBtn.addEventListener('click', () => this.focusCredentials(missing));
+                actions.appendChild(warnBtn);
+            }
+
             const viewBtn = document.createElement('button');
             viewBtn.className = 'config-btn-sm';
             viewBtn.textContent = 'View';
@@ -1192,17 +1208,157 @@ export class ConfigWidget extends Widget {
         });
     }
 
-    /** Bring the credentials section into focus and optionally open the
-     *  new-credential form pre-filled with ``name``.
+    /** Bring the credentials section into focus and open the right add-form.
+     *
+     *  Accepts:
+     *  - nothing: opens an empty new-credential form (used by the "+ Add"
+     *    button).
+     *  - a string: opens the single-input form pre-filled with that name
+     *    (used by the HITL approval card's per-name "Set credentials" button).
+     *  - a string[]: opens a multi-input form with one row per name, all
+     *    saved together (used by the skill-row ⚠ chip).
      *
      *  app.ts handles the dock-level "activate the Config tab" step via the
      *  view:config command; this method just renders the correct form. The
      *  two concerns are kept separate so ConfigWidget doesn't need to know
      *  about the DockPanel or command registry.
      */
-    focusCredentials(name?: string): void {
+    focusCredentials(name?: string | string[]): void {
         this._credentialList.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-        this._showNewCredentialForm(name);
+        if (Array.isArray(name)) {
+            const cleaned = name.filter((n) => typeof n === 'string' && n);
+            if (cleaned.length === 0) {
+                this._showNewCredentialForm();
+            } else if (cleaned.length === 1) {
+                this._showNewCredentialForm(cleaned[0]);
+            } else {
+                this._showMissingCredentialsForm(cleaned);
+            }
+        } else {
+            this._showNewCredentialForm(name);
+        }
+    }
+
+    /** Render a multi-input form for entering several missing credentials at once.
+     *
+     *  One row per requested name, each with a value input. "Save all" issues
+     *  parallel POSTs to ``/api/credentials`` and reports per-name results
+     *  inline. Successful saves emit ``credential-added`` events so any open
+     *  HITL approval card un-gates in place. Names that already exist in the
+     *  store are still saved (treated as updates) — easier than fetching
+     *  current state to filter, and matches the user intent of "I just want
+     *  these set".
+     */
+    private _showMissingCredentialsForm(names: string[]): void {
+        if (this._credentialsDisabled) {
+            alert('Credentials feature is disabled. Set CREDENTIAL_ENCRYPTION_KEY to enable.');
+            return;
+        }
+        const rows = names
+            .map(
+                (n) => `
+            <div class="form-group" data-cred-name="${escapeAttr(n)}">
+                <label>${escapeHtml(n)}</label>
+                <input type="password" class="missing-cred-value" data-name="${escapeAttr(n)}">
+                <span class="missing-cred-status" style="font-size: 0.85em; color: var(--text-secondary);"></span>
+            </div>`,
+            )
+            .join('');
+        this._detail.innerHTML = `
+            <div class="config-form">
+                <h2>Add ${names.length} missing credential${names.length === 1 ? '' : 's'}</h2>
+                <p style="color: var(--text-secondary); font-size: 0.85rem; margin-top: -0.5rem;">
+                    These names were declared by a skill but aren't in your store yet.
+                    Each value is stored encrypted; the value is never displayed back to you and never visible to the language model.
+                </p>
+                ${rows}
+                <div class="config-form-actions">
+                    <button id="cancel-missing-cred-btn" class="config-btn">Cancel</button>
+                    <button id="save-missing-cred-btn" class="config-btn config-btn-primary">Save all</button>
+                </div>
+            </div>
+        `;
+        // Land focus on the first value input so the user can start typing
+        // immediately instead of clicking through.
+        const firstValue = this._detail.querySelector('.missing-cred-value') as HTMLInputElement | null;
+        if (firstValue) firstValue.focus();
+        this._detail.querySelector('#cancel-missing-cred-btn')!.addEventListener('click', () => this._renderPlaceholder());
+        this._detail.querySelector('#save-missing-cred-btn')!.addEventListener('click', async () => {
+            const inputs = Array.from(
+                this._detail.querySelectorAll<HTMLInputElement>('.missing-cred-value'),
+            );
+            const filled = inputs.filter((i) => i.value !== '');
+            if (filled.length === 0) return;
+
+            const saveBtn = this._detail.querySelector('#save-missing-cred-btn') as HTMLButtonElement;
+            saveBtn.disabled = true;
+            saveBtn.textContent = 'Saving…';
+
+            // Per-name parallel POSTs. We accept partial success: a failed
+            // entry stays on the form with an inline error, successful ones
+            // disappear after the next reload. Keeps the user in the form
+            // when only one entry was malformed.
+            const results = await Promise.allSettled(
+                filled.map(async (input) => {
+                    const name = input.dataset.name as string;
+                    const value = input.value;
+                    const res = await fetch('/api/credentials', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ name, value }),
+                    });
+                    if (!res.ok) {
+                        const err = await res.json().catch(() => ({}));
+                        throw new Error(err.detail || `HTTP ${res.status}`);
+                    }
+                    return name;
+                }),
+            );
+
+            const succeeded: string[] = [];
+            const failed: { name: string; error: string }[] = [];
+            results.forEach((r, i) => {
+                const name = filled[i].dataset.name as string;
+                if (r.status === 'fulfilled') {
+                    succeeded.push(name);
+                } else {
+                    failed.push({ name, error: r.reason?.message || 'failed' });
+                }
+            });
+
+            // Notify any open approval card per success — the chat widget
+            // listens for this event and unblocks in place.
+            for (const name of succeeded) {
+                document.dispatchEvent(new CustomEvent('credential-added', { detail: { name } }));
+            }
+
+            await this._loadCredentials();
+            await this._loadSkills();
+
+            if (failed.length === 0) {
+                this._renderPlaceholder();
+                return;
+            }
+
+            // Re-render only the failed rows with their error messages so
+            // the user can fix them without retyping the successful ones.
+            saveBtn.disabled = false;
+            saveBtn.textContent = `Save all (${failed.length} remaining)`;
+            for (const input of inputs) {
+                const name = input.dataset.name as string;
+                const ok = succeeded.includes(name);
+                const fail = failed.find((f) => f.name === name);
+                const row = input.closest('[data-cred-name]') as HTMLElement | null;
+                const status = row?.querySelector('.missing-cred-status') as HTMLSpanElement | null;
+                if (ok) {
+                    if (row) row.style.display = 'none';
+                } else if (fail && status) {
+                    status.textContent = `Error: ${fail.error}`;
+                    status.style.color = 'var(--error, #c33)';
+                    input.value = '';
+                }
+            }
+        });
     }
 
     private _showEditCredentialForm(cred: any): void {
