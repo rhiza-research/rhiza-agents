@@ -139,9 +139,10 @@ def make_run_file(db=None):
                      "names": ["NASA_USERNAME", "NASA_PASSWORD"],
                      "content": "machine x login {NASA_USERNAME} password {NASA_PASSWORD}\\n"}
 
-                When an MCP tool returns a skill document with a
-                ``requires_credentials`` frontmatter block, copy the relevant
-                entries from that block verbatim into this argument.
+                When a skill's activation response lists required
+                credential names (declared via a
+                ``metadata.openclaw.requires.env`` block in its SKILL.md),
+                wrap those names in an ``env_vars`` plan here.
 
                 The user must approve the run before any credential is
                 injected. Do not print, log, or echo credential values from

@@ -766,6 +766,11 @@ export class ConfigWidget extends Widget {
         `;
 
         if (available.length) {
+            // Snapshot the user's current credential names so we can flag
+            // missing ones on each discovered skill. Uses the list already
+            // loaded on startup; if the user added a credential in this
+            // session the next _loadCredentials call would refresh it.
+            const haveCreds = new Set(this._credentials.map(c => c.name));
             html += '<div style="display: flex; flex-direction: column; gap: 0.5rem; margin: 0.5rem 0;">';
             for (const skill of available) {
                 const installed = skill.already_installed;
@@ -775,6 +780,16 @@ export class ConfigWidget extends Widget {
                     ? (sameSha
                         ? `<span style="color: var(--text-secondary); font-size: 0.85em;">already installed at ${escapeHtml(sha.slice(0, 7))}</span>`
                         : `<span style="color: var(--text-secondary); font-size: 0.85em;">installed at ${escapeHtml((installed.sha || '?').slice(0, 7))}, ${escapeHtml(sha.slice(0, 7))} available</span>`)
+                    : '';
+                // Openclaw-style env requirements. Highlight names the user
+                // hasn't set yet so the warning is visible before install
+                // rather than only at first run.
+                const requiredEnv: string[] = Array.isArray(skill.required_env) ? skill.required_env : [];
+                const missingEnv = requiredEnv.filter(n => !haveCreds.has(n));
+                const envChip = requiredEnv.length
+                    ? (missingEnv.length
+                        ? `<span class="skill-required-env skill-required-env-missing" title="Missing credentials: ${escapeAttr(missingEnv.join(', '))}"> · ⚠ requires: ${escapeHtml(requiredEnv.join(', '))}</span>`
+                        : `<span class="skill-required-env"> · requires: ${escapeHtml(requiredEnv.join(', '))}</span>`)
                     : '';
                 html += `
                     <label style="display: flex; gap: 0.5rem; align-items: flex-start; cursor: pointer;">
@@ -786,6 +801,7 @@ export class ConfigWidget extends Widget {
                         <span>
                             <strong>${escapeHtml(skill.name)}</strong>
                             ${skill.has_scripts ? '<span style="color: var(--text-secondary); font-size: 0.85em;"> · has scripts</span>' : ''}
+                            ${envChip}
                             ${tag}
                             <br>
                             <span style="color: var(--text-secondary); font-size: 0.9em;">${escapeHtml(skill.description)}</span>
@@ -1119,11 +1135,12 @@ export class ConfigWidget extends Widget {
         }
     }
 
-    private _showNewCredentialForm(): void {
+    private _showNewCredentialForm(prefillName?: string): void {
         if (this._credentialsDisabled) {
             alert('Credentials feature is disabled. Set CREDENTIAL_ENCRYPTION_KEY to enable.');
             return;
         }
+        const nameValueAttr = prefillName ? ` value="${escapeAttr(prefillName)}"` : '';
         this._detail.innerHTML = `
             <div class="config-form">
                 <h2>Add Credential</h2>
@@ -1132,7 +1149,7 @@ export class ConfigWidget extends Widget {
                 </p>
                 <div class="form-group">
                     <label for="cred-name">Name</label>
-                    <input type="text" id="cred-name" placeholder="e.g. NASA_USERNAME">
+                    <input type="text" id="cred-name" placeholder="e.g. NASA_USERNAME"${nameValueAttr}>
                 </div>
                 <div class="form-group">
                     <label for="cred-value">Value</label>
@@ -1144,6 +1161,12 @@ export class ConfigWidget extends Widget {
                 </div>
             </div>
         `;
+        // When pre-filled from an approval card the user only needs to type
+        // the value, so land focus there directly. For a fresh Add-Credential
+        // click we leave focus on the name field (the browser default).
+        if (prefillName) {
+            (this._detail.querySelector('#cred-value') as HTMLInputElement).focus();
+        }
         this._detail.querySelector('#cancel-cred-btn')!.addEventListener('click', () => this._renderPlaceholder());
         this._detail.querySelector('#save-cred-btn')!.addEventListener('click', async () => {
             const name = (this._detail.querySelector('#cred-name') as HTMLInputElement).value.trim();
@@ -1161,7 +1184,25 @@ export class ConfigWidget extends Widget {
             }
             await this._loadCredentials();
             this._renderPlaceholder();
+            // Notify any open approval card that this name is now set. The
+            // chat widget listens for this on ``document`` and unblocks in
+            // place. Emitted after the list reload so any UI that queries
+            // ``/api/credentials`` also sees the new row.
+            document.dispatchEvent(new CustomEvent('credential-added', { detail: { name } }));
         });
+    }
+
+    /** Bring the credentials section into focus and optionally open the
+     *  new-credential form pre-filled with ``name``.
+     *
+     *  app.ts handles the dock-level "activate the Config tab" step via the
+     *  view:config command; this method just renders the correct form. The
+     *  two concerns are kept separate so ConfigWidget doesn't need to know
+     *  about the DockPanel or command registry.
+     */
+    focusCredentials(name?: string): void {
+        this._credentialList.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        this._showNewCredentialForm(name);
     }
 
     private _showEditCredentialForm(cred: any): void {

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import httpx
 
@@ -50,6 +50,11 @@ class SkillManifest:
     license: str | None
     compatibility: str | None
     has_scripts: bool
+    # Credential names declared via ``metadata.openclaw.requires.env`` in
+    # SKILL.md. Empty when the skill omits the block. Surfaced through
+    # ``/api/skills/discover`` so the install UI can warn when a skill
+    # needs credentials the user has not yet set.
+    required_env: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -230,6 +235,7 @@ async def discover_skills(
                     license=parsed.license,
                     compatibility=parsed.compatibility,
                     has_scripts=bool(scripts),
+                    required_env=list(parsed.required_env),
                 )
             ],
             [],
@@ -257,6 +263,7 @@ async def discover_skills(
                 license=parsed.license,
                 compatibility=parsed.compatibility,
                 has_scripts=bool(scripts),
+                required_env=list(parsed.required_env),
             )
         )
     return manifests, skipped

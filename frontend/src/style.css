@@ -187,7 +187,23 @@ body { height: 100vh; margin: 0; }
 .interrupt-args pre { background: var(--jp-layout-color3); padding: 0.5rem; border-radius: 4px; font-size: 0.8rem; color: var(--jp-content-font-color2); }
 .interrupt-actions { display: flex; gap: 0.5rem; padding: 0.5rem; }
 .interrupt-approve { background: var(--jp-accent-color1); color: white; border: none; padding: 0.4rem 1rem; border-radius: 4px; cursor: pointer; }
+.interrupt-approve:disabled { opacity: 0.5; cursor: not-allowed; }
 .interrupt-reject { background: transparent; color: var(--jp-error-color1); border: 1px solid var(--jp-error-color1); padding: 0.4rem 1rem; border-radius: 4px; cursor: pointer; }
+.interrupt-credentials { padding: 0.5rem; }
+.interrupt-credentials-header { font-size: 0.85rem; color: var(--jp-ui-font-color2); margin-bottom: 0.25rem; }
+.interrupt-credentials ul { margin: 0; padding-left: 1.25rem; }
+.interrupt-credentials code { font-size: 0.85rem; }
+.interrupt-cred-missing { color: var(--jp-error-color1); font-weight: 600; }
+.interrupt-missing-banner {
+    display: flex; align-items: center; gap: 0.5rem; justify-content: space-between;
+    margin: 0 0.5rem 0.5rem; padding: 0.4rem 0.6rem; border-radius: 4px;
+    background: rgba(255, 152, 0, 0.1); color: var(--md-orange-300); font-size: 0.85rem;
+}
+.interrupt-set-creds {
+    background: transparent; color: var(--md-orange-300); border: 1px solid var(--md-orange-500);
+    padding: 0.25rem 0.7rem; border-radius: 4px; cursor: pointer; font-size: 0.8rem; white-space: nowrap;
+}
+.interrupt-set-creds:hover { background: rgba(255, 152, 0, 0.2); }
 
 /* Welcome */
 .welcome { text-align: center; padding: 4rem 2rem; color: var(--jp-ui-font-color3); }
@@ -255,6 +271,10 @@ body { height: 100vh; margin: 0; }
 .coming-soon { font-size: 0.7rem; color: var(--jp-ui-font-color3); background: var(--jp-layout-color2); padding: 0.1rem 0.4rem; border-radius: 3px; }
 .vectorstore-list { display: flex; flex-direction: column; gap: 2px; }
 .vs-list-item { display: flex; justify-content: space-between; align-items: center; padding: 0.5rem; background: var(--jp-layout-color2); border-radius: 4px; font-size: 0.85rem; }
+
+/* Install-preview chip showing a skill's declared env credentials */
+.skill-required-env { color: var(--text-secondary); font-size: 0.85em; }
+.skill-required-env-missing { color: var(--md-orange-300); font-weight: 600; }
 .vs-list-info { display: flex; flex-direction: column; min-width: 0; }
 .vs-list-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--jp-ui-font-color1); }
 .vs-list-count { font-size: 0.7rem; color: var(--jp-ui-font-color3); }

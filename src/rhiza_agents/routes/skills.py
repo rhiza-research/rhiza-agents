@@ -180,6 +180,7 @@ async def discover_skills_route(request: Request, body: SkillDiscoverBody, user:
                 "license": m.license,
                 "compatibility": m.compatibility,
                 "has_scripts": m.has_scripts,
+                "required_env": list(m.required_env),
                 "already_installed": already,
             }
         )
