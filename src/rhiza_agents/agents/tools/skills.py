@@ -12,8 +12,8 @@ Each skill registers as a LangChain tool using progressive disclosure:
 import json
 import logging
 import re
+import shlex
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 
 import yaml
 from langchain_core.messages import ToolMessage
@@ -252,6 +252,17 @@ def requires_sandbox(skill_record: dict) -> bool:
     return False
 
 
+def update_with_error(update: dict, tool_call_id: str, msg: str) -> Command:
+    """Append an error ToolMessage to a Command-update dict and wrap as Command.
+
+    Used by skill activation when something goes wrong after the prompt has
+    already been queued — keeps the prompt in the response while making the
+    failure visible to the agent.
+    """
+    update.setdefault("messages", []).append(ToolMessage(content=msg, tool_call_id=tool_call_id, status="error"))
+    return Command(update=update)
+
+
 def create_skill_tool(skill_record: dict) -> StructuredTool:
     """Create a LangChain tool for a skill.
 
@@ -272,27 +283,93 @@ def create_skill_tool(skill_record: dict) -> StructuredTool:
     script_path_prefix = f"/skills/{parsed.name}/scripts"
 
     async def _activate(*, runtime: ToolRuntime) -> Command:
-        """Activate this skill and load any bundled scripts into file state."""
+        """Activate this skill and install any bundled scripts to /skills/.
+
+        Scripts are written to ``/skills/<name>/scripts/<filename>``
+        via shell + base64 from the unwrapped (root) exec path, then
+        chowned root:root with mode 0644. The agent runs as daytona
+        and can read+execute but cannot modify these files — POSIX
+        permissions enforce this because /skills/ is on the regular
+        container filesystem, not a volume.
+
+        Skill scripts are not added to state["files"] — they don't
+        belong in conversation state. The activation response message
+        tells the agent which paths to invoke via run_file.
+
+        Namespacing by skill name prevents filename collisions across
+        skills (e.g. multiple fetchers each shipping a ``fetch.py``).
+        """
+        import asyncio
+        import base64
+
+        from .sandbox import _get_or_create_sandbox, is_sandbox_available
+
         prompt = _build_activation_response(record)
         update: dict = {"messages": [ToolMessage(content=prompt, tool_call_id=runtime.tool_call_id)]}
-        if scripts:
-            now = datetime.now(UTC).isoformat()
-            files_update: dict = {}
+        if not scripts:
+            return Command(update=update)
+
+        if not is_sandbox_available():
+            # Skill activation needs a sandbox to install scripts.
+            # Skills that bundle scripts should not have been routed
+            # to a non-sandbox agent (graph build filters by
+            # requires_sandbox), but be defensive.
+            update["messages"].append(
+                ToolMessage(
+                    content=(
+                        f"Skill {parsed.name!r} bundles scripts but the sandbox is "
+                        "unavailable (DAYTONA_API_KEY not set). Scripts not installed; "
+                        "run_file will not find them."
+                    ),
+                    tool_call_id=runtime.tool_call_id,
+                    status="error",
+                )
+            )
+            return Command(update=update)
+
+        thread_id = (
+            (runtime.config or {}).get("configurable", {}).get("thread_id", "default")
+            if hasattr(runtime, "config")
+            else "default"
+        )
+
+        def _install_all():
+            sandbox = _get_or_create_sandbox(thread_id)
+            # script_path_prefix is "/skills/<skill-name>/scripts" so
+            # abs_path is "/skills/<skill-name>/scripts/<file>".
             for filename, content in scripts.items():
-                # Content is stored as a single string; split into lines to
-                # match the shape used by write_file.
                 if isinstance(content, list):
-                    lines = content
+                    text = "\n".join(content)
                 else:
-                    lines = str(content).split("\n")
-                files_update[f"{script_path_prefix}/{filename}"] = {
-                    "content": lines,
-                    "source": "skill",
-                    "skill_id": skill_id,
-                    "created_at": now,
-                    "modified_at": now,
-                }
-            update["files"] = files_update
+                    text = str(content)
+                abs_path = f"{script_path_prefix}/{filename}"
+                parent = abs_path.rsplit("/", 1)[0]
+                # Write via shell + base64 to an absolute path. The
+                # exec runs as root (unwrapped) so files land owned
+                # root:root; chown is defensive in case Daytona ever
+                # changes the unwrapped-exec identity. chmod 0644
+                # makes the file world-readable / executable but not
+                # writable — daytona reads + execs but cannot modify.
+                b64 = base64.b64encode(text.encode("utf-8")).decode("ascii")
+                sandbox.process.exec(
+                    f"mkdir -p {shlex.quote(parent)} && "
+                    f"chmod 0755 {shlex.quote(parent)} && "
+                    f"echo {shlex.quote(b64)} | base64 -d > {shlex.quote(abs_path)} && "
+                    f"chown root:root {shlex.quote(abs_path)} && "
+                    f"chmod 0644 {shlex.quote(abs_path)}"
+                )
+
+        try:
+            await asyncio.to_thread(_install_all)
+        except Exception as e:
+            logger.warning("Failed to install skill scripts for %s", parsed.name, exc_info=True)
+            update["messages"].append(
+                ToolMessage(
+                    content=f"Failed to install skill scripts for {parsed.name!r}: {e}",
+                    tool_call_id=runtime.tool_call_id,
+                    status="error",
+                )
+            )
         return Command(update=update)
 
     tool = StructuredTool.from_function(

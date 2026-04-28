@@ -69,6 +69,17 @@ services:
       DAYTONA_PROXY_URL: ${DAYTONA_PROXY_URL:-}
       # Optional: sandbox root disk in GiB (Daytona API). Unset = platform default.
       DAYTONA_SANDBOX_DISK_GIB: ${DAYTONA_SANDBOX_DISK_GIB:-}
+      # Persistent storage for sandbox files. The homes volume is mounted
+      # at DAYTONA_HOMES_MOUNT_PATH (default /workspace) with a per-thread
+      # subpath; the data volume is mounted at DAYTONA_DATA_MOUNT_PATH
+      # (default /data) and shared across conversations. Volumes must be
+      # pre-created in Daytona — names are looked up with create=False, so
+      # a missing volume disables that mount with a warning. Leave the
+      # volume-name vars empty to disable persistent storage.
+      DAYTONA_HOMES_VOLUME: ${DAYTONA_HOMES_VOLUME:-}
+      DAYTONA_HOMES_MOUNT_PATH: ${DAYTONA_HOMES_MOUNT_PATH:-}
+      DAYTONA_DATA_VOLUME: ${DAYTONA_DATA_VOLUME:-}
+      DAYTONA_DATA_MOUNT_PATH: ${DAYTONA_DATA_MOUNT_PATH:-}
       CHROMA_PERSIST_DIR: /data/chroma
       CHAT_EVENT_LOGGING: "true"
       WATCHFILES_FORCE_POLLING: "true"

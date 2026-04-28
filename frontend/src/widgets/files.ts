@@ -13,8 +13,19 @@ interface FilesWidgetOptions {
     onOpenFile: (path: string, content: string, source: string, encoding?: string) => void;
 }
 
+type FileScope = 'session' | 'workspace';
+
 /**
  * Files panel widget — file list + file viewer with download/approve.
+ *
+ * Two scopes:
+ * - session: files this conversation tracked in state (offline-friendly,
+ *   rendered from LangGraph checkpoint data; works without an active sandbox)
+ * - workspace: live filesystem listing of /workspace (lazy-creates the
+ *   sandbox if none is running; cold-start latency is on this click)
+ *
+ * File contents are fetched on demand from the live sandbox; clicking a
+ * file in either scope triggers sandbox creation if needed.
  */
 export class FilesWidget extends Widget {
     private _getConversationId: () => string;
@@ -26,6 +37,10 @@ export class FilesWidget extends Widget {
     private _fileSources: Record<string, string> = {};
     private _fileEncodings: Record<string, string> = {};
     private _filesList!: HTMLDivElement;
+    private _scopeToggle!: HTMLDivElement;
+    private _sessionBtn!: HTMLButtonElement;
+    private _workspaceBtn!: HTMLButtonElement;
+    private _scope: FileScope = 'session';
 
     constructor(options: FilesWidgetOptions) {
         super();
@@ -45,9 +60,34 @@ export class FilesWidget extends Widget {
     private _buildDOM(): void {
         const node = this.node;
 
+        // Scope toggle: session (default) vs workspace (live FS)
+        this._scopeToggle = document.createElement('div');
+        this._scopeToggle.className = 'files-scope-toggle';
+        this._sessionBtn = document.createElement('button');
+        this._sessionBtn.className = 'files-scope-btn active';
+        this._sessionBtn.textContent = 'This session';
+        this._sessionBtn.title = 'Files this conversation has tracked (works offline)';
+        this._sessionBtn.addEventListener('click', () => this._setScope('session'));
+        this._workspaceBtn = document.createElement('button');
+        this._workspaceBtn.className = 'files-scope-btn';
+        this._workspaceBtn.textContent = 'All files';
+        this._workspaceBtn.title = 'Live listing of /workspace and /data — starts the sandbox if it is not already running';
+        this._workspaceBtn.addEventListener('click', () => this._setScope('workspace'));
+        this._scopeToggle.appendChild(this._sessionBtn);
+        this._scopeToggle.appendChild(this._workspaceBtn);
+        node.appendChild(this._scopeToggle);
+
         this._filesList = document.createElement('div');
         this._filesList.className = 'files-list';
         node.appendChild(this._filesList);
+    }
+
+    private _setScope(scope: FileScope): void {
+        if (scope === this._scope) return;
+        this._scope = scope;
+        this._sessionBtn.classList.toggle('active', scope === 'session');
+        this._workspaceBtn.classList.toggle('active', scope === 'workspace');
+        void this.loadFiles();
     }
 
     async loadFiles(): Promise<void> {
@@ -57,22 +97,33 @@ export class FilesWidget extends Widget {
             return;
         }
 
+        const url = `/api/conversations/${convId}/files?scope=${this._scope}`;
         try {
-            const response = await fetch(`/api/conversations/${convId}/files`);
+            if (this._scope === 'workspace') {
+                this._filesList.innerHTML = '<div class="files-empty">Loading workspace…</div>';
+            }
+            const response = await fetch(url);
             if (!response.ok) {
-                this._filesList.innerHTML = '<div class="files-empty">Failed to load files</div>';
+                this._filesList.innerHTML = `<div class="files-empty">Failed to load files (${response.status})</div>`;
                 return;
             }
 
             const files: any[] = await response.json();
-            const apiPaths = new Set(files.map((f: any) => f.path));
-            for (const [path, content] of Object.entries(this._streamedFiles)) {
-                if (!apiPaths.has(path)) {
-                    files.push({ path, size: new Blob([content || '']).size });
+            // Streamed-file overlay only applies in session view (the
+            // workspace view comes from the live filesystem already).
+            if (this._scope === 'session') {
+                const apiPaths = new Set(files.map((f: any) => f.path));
+                for (const [path, content] of Object.entries(this._streamedFiles)) {
+                    if (!apiPaths.has(path)) {
+                        files.push({ path, size: new Blob([content || '']).size, source: 'agent' });
+                    }
                 }
             }
             if (files.length === 0) {
-                this._filesList.innerHTML = '<div class="files-empty">No files yet</div>';
+                const empty = this._scope === 'workspace'
+                    ? 'Workspace is empty'
+                    : 'No files yet';
+                this._filesList.innerHTML = `<div class="files-empty">${empty}</div>`;
                 return;
             }
 
@@ -127,7 +178,18 @@ export class FilesWidget extends Widget {
 
         const sourceLabel = document.createElement('span');
         sourceLabel.className = `file-source file-source-${source}`;
-        sourceLabel.textContent = source === 'output' ? 'code-generated' : 'agent-generated';
+        // Source labels match the per-volume / per-tool conventions used
+        // server-side: "data" = file on the shared /data volume; "output"
+        // = produced by run_file (skill); "workspace" = file on the
+        // workspace volume in the live listing; "agent" = legacy / pre-
+        // zero-trust state-tracked. Anything else falls through to "agent".
+        const sourceText: Record<string, string> = {
+            data: 'shared data',
+            output: 'skill output',
+            workspace: 'workspace',
+            agent: 'agent-generated',
+        };
+        sourceLabel.textContent = sourceText[source] || sourceText.agent;
         item.appendChild(sourceLabel);
 
         const meta = document.createElement('span');

@@ -64,3 +64,14 @@ env:
   # DATABASE_URL is set automatically to point at the PVC-mounted SQLite file
   # CHECKPOINT_DB_PATH is set automatically to point at the PVC-mounted checkpoints file
   # CHROMA_PERSIST_DIR is set automatically to point at the PVC-mounted chroma directory
+  # Persistent storage for sandbox files. The homes volume is mounted at
+  # DAYTONA_HOMES_MOUNT_PATH (default /workspace) with a per-conversation
+  # subpath; the data volume is mounted at DAYTONA_DATA_MOUNT_PATH (default
+  # /data) and shared across conversations. Volumes must be created in
+  # Daytona before the app uses them — names are looked up with
+  # create=False, so a missing volume disables that mount with a warning.
+  # Leave both volume-name vars empty to disable persistent storage.
+  DAYTONA_HOMES_VOLUME: ""
+  DAYTONA_HOMES_MOUNT_PATH: ""
+  DAYTONA_DATA_VOLUME: ""
+  DAYTONA_DATA_MOUNT_PATH: ""

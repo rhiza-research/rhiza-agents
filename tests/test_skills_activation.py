@@ -107,6 +107,43 @@ def _activate(tool, state=None):
     return asyncio.run(tool.coroutine(runtime=runtime))
 
 
+class _FakeSandbox:
+    """Minimal sandbox stand-in that records process.exec calls.
+
+    Used to verify the skill activation install commands without
+    needing a real Daytona sandbox. exec calls return a successful
+    response so the activation flow runs to completion.
+    """
+
+    def __init__(self):
+        self.exec_calls: list[str] = []
+
+        class _Process:
+            def exec(inner_self, cmd, **kwargs):  # noqa: N805 — match SDK signature
+                self.exec_calls.append(cmd)
+                return SimpleNamespace(exit_code=0, result="")
+
+        self.process = _Process()
+
+
+def _activate_with_sandbox(tool):
+    """Activate with sandbox available; return (Command, FakeSandbox).
+
+    Patches the real is_sandbox_available + _get_or_create_sandbox so
+    activation goes down the install-to-/skills/ path. The FakeSandbox
+    records every process.exec command issued.
+    """
+    from unittest import mock
+
+    fake = _FakeSandbox()
+    with (
+        mock.patch("rhiza_agents.agents.tools.sandbox.is_sandbox_available", return_value=True),
+        mock.patch("rhiza_agents.agents.tools.sandbox._get_or_create_sandbox", return_value=fake),
+    ):
+        cmd = _activate(tool)
+    return cmd, fake
+
+
 def test_tool_name_and_description():
     tool = create_skill_tool(_record())
     assert tool.name == "skill_hello_skill"
@@ -134,29 +171,35 @@ def test_activation_command_no_scripts_has_only_messages():
     assert "# Hello" in msg.content
 
 
-def test_activation_command_loads_scripts_into_files():
+def test_activation_installs_scripts_via_process_exec():
+    """Skill scripts are installed under /skills/<name>/scripts/ via
+    shell commands (mkdir, base64 decode, chown, chmod). They do NOT
+    appear in state["files"] — skill code does not belong in
+    conversation state.
+    """
     tool = create_skill_tool(_record(scripts={"fetch.py": "print('hi')\n", "plot.py": "print('bye')"}))
-    cmd = _activate(tool)
-    files = cmd.update["files"]
-    # Paths are namespaced under /skills/<skill-name>/scripts so that
-    # multiple skills shipping the same filename (e.g. four fetchers each
-    # with a fetch.py) don't collide in the file state.
-    assert set(files.keys()) == {
-        "/skills/hello-skill/scripts/fetch.py",
-        "/skills/hello-skill/scripts/plot.py",
-    }
-    # Stored as a list of lines, matching write_file's shape.
-    assert files["/skills/hello-skill/scripts/fetch.py"]["content"] == ["print('hi')", ""]
-    assert files["/skills/hello-skill/scripts/plot.py"]["content"] == ["print('bye')"]
-    # Metadata stamped for provenance.
-    for entry in files.values():
-        assert entry["source"] == "skill"
-        assert entry["skill_id"] == "sk-test"
-        assert "created_at" in entry and "modified_at" in entry
+    cmd, fake = _activate_with_sandbox(tool)
+
+    # State["files"] is not used for skill scripts.
+    assert "files" not in cmd.update
+
+    # Each script's install command landed at the namespaced path with
+    # the right ownership and mode applied.
+    joined = "\n".join(fake.exec_calls)
+    for filename in ("fetch.py", "plot.py"):
+        path = f"/skills/hello-skill/scripts/{filename}"
+        assert path in joined, f"install command missing for {path}: {fake.exec_calls!r}"
+    # Files end up root-owned and read-only-to-non-root via chmod 0644.
+    assert "chown root:root" in joined
+    assert "chmod 0644" in joined
 
 
 def test_activation_namespaces_by_skill_name():
-    """Two skills with a filename collision must not stomp each other."""
+    """Two skills with a filename collision must not stomp each other.
+
+    The install commands target /skills/<skill-name>/scripts/<file>,
+    so each skill's fetch.py lands at a distinct path.
+    """
     ecmwf = create_skill_tool(
         {
             "id": "sk-ecmwf",
@@ -171,21 +214,47 @@ def test_activation_namespaces_by_skill_name():
             "scripts_json": {"fetch.py": "print('chirps')"},
         }
     )
-    e_files = _activate(ecmwf).update["files"]
-    c_files = _activate(chirps).update["files"]
-    assert "/skills/ecmwf-fetch/scripts/fetch.py" in e_files
-    assert "/skills/chirps-fetch/scripts/fetch.py" in c_files
-    # Crucially they land at distinct paths so activating both in the same
-    # conversation keeps both scripts available.
-    assert set(e_files).isdisjoint(set(c_files))
+    _, e_fake = _activate_with_sandbox(ecmwf)
+    _, c_fake = _activate_with_sandbox(chirps)
+    e_joined = "\n".join(e_fake.exec_calls)
+    c_joined = "\n".join(c_fake.exec_calls)
+    assert "/skills/ecmwf-fetch/scripts/fetch.py" in e_joined
+    assert "/skills/chirps-fetch/scripts/fetch.py" in c_joined
+    # The other skill's path must NOT appear in the corresponding
+    # exec stream — namespacing keeps them disjoint.
+    assert "/skills/chirps-fetch/scripts/fetch.py" not in e_joined
+    assert "/skills/ecmwf-fetch/scripts/fetch.py" not in c_joined
 
 
 def test_activation_preserves_script_content_passed_as_list():
-    # If the DB serializer ever stores content pre-split, we should still
-    # round-trip without double-splitting or mangling.
+    """If scripts_json stores content pre-split as a list of lines,
+    activation should still install the joined content."""
+    import base64
+
     tool = create_skill_tool(_record(scripts={"a.py": ["line1", "line2"]}))
-    cmd = _activate(tool)
-    assert cmd.update["files"]["/skills/hello-skill/scripts/a.py"]["content"] == ["line1", "line2"]
+    _, fake = _activate_with_sandbox(tool)
+    # The install command base64-encodes the content; decode it and
+    # check the install actually carried "line1\nline2".
+    expected_b64 = base64.b64encode(b"line1\nline2").decode("ascii")
+    joined = "\n".join(fake.exec_calls)
+    assert expected_b64 in joined, f"expected base64 of joined lines in exec calls: {fake.exec_calls!r}"
+
+
+def test_activation_no_sandbox_emits_error_message():
+    """When DAYTONA_API_KEY is unset, activation can't install scripts.
+
+    The activation message still emits the prompt, but a follow-up
+    error ToolMessage tells the agent the install was skipped. State
+    is not touched (the legacy fallback that wrote skill content to
+    state was removed — skills don't belong in state).
+    """
+    tool = create_skill_tool(_record(scripts={"fetch.py": "pass"}))
+    cmd = _activate(tool)  # No sandbox patching; is_sandbox_available -> False
+    assert "files" not in cmd.update
+    msgs = cmd.update["messages"]
+    assert len(msgs) == 2  # prompt + error
+    assert "DAYTONA_API_KEY not set" in msgs[1].content
+    assert msgs[1].status == "error"
 
 
 def test_activation_tool_message_names_every_script():
