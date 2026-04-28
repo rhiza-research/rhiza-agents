@@ -20,6 +20,7 @@ import asyncio
 import base64
 import logging
 import os
+import shlex
 from datetime import UTC, datetime
 from typing import Any
 
@@ -37,12 +38,11 @@ from ...credentials import (
 
 logger = logging.getLogger(__name__)
 
-# File extensions that should be stored as base64-encoded binary
 # Daytona's filesystem API (``sandbox.fs.upload_file``) treats paths as
-# relative to the sandbox's home directory. Passing ``~/.netrc`` literally
-# creates a directory named ``~`` instead of expanding the tilde, and
-# passing absolute paths like ``/root/.netrc`` ends up under
-# ``<home>/root/.netrc``. Normalize all credential file paths through this
+# relative to the sandbox's working directory (which is the user's home,
+# /root, by default). Passing ``~/.netrc`` literally creates a directory
+# named ``~``; absolute paths like ``/root/.netrc`` end up under
+# ``<cwd>/root/.netrc``. Normalize credential file paths through this
 # helper so they land where the script expects to find them.
 #
 # Shell commands like ``chmod`` and ``rm`` go through ``sandbox.process.exec``
@@ -50,9 +50,42 @@ logger = logging.getLogger(__name__)
 # original logical path.
 _SANDBOX_HOME = "/root"
 
+# Per-thread persistent working directory. Mounted via the homes volume
+# with subpath=<thread_id> so files survive sandbox idle cleanup.
+SANDBOX_WORKSPACE = "/workspace"
+
+# Non-root user the agent's tool calls execute as. Created in the image
+# via `useradd`, then every agent-driven `process.exec` is wrapped in
+# `su -l daytona -c '<cmd>'` so the agent cannot escalate to root.
+# `os_user="daytona"` is also passed at sandbox creation for metadata
+# correctness, but it does not enforce per-command identity (Daytona open
+# issue #4309) — the wrap is what actually enforces it.
+SANDBOX_DAYTONA_USER = "daytona"
+SANDBOX_DAYTONA_HOME = "/home/daytona"
+
+# Trusted-skill directory. Lives on the regular container filesystem
+# (NOT a volume), so POSIX permissions actually enforce: owned root:root
+# mode 0644 means daytona can read+execute but not modify. Skill scripts
+# are installed here at activation time via the privileged path
+# (sandbox.fs.upload_file → toolbox-api as root, then chmod 0644).
+SANDBOX_SKILLS_DIR = "/skills"
+
+# Inotify journal: where the per-sandbox daemon records file events
+# (create / modify / open / access / close_write) on /workspace and
+# /data. Drained after every agent tool call to populate state["files"]
+# with paths the conversation touched. Owned by daytona so the agent
+# user can read it; the daemon itself runs as daytona too (events fire
+# regardless of the watching user, but running as daytona keeps the
+# log file ownership consistent).
+INOTIFY_JOURNAL_PATH = "/tmp/inotify.log"
+
 
 def _normalize_sandbox_upload_path(path: str) -> str:
-    """Convert a logical sandbox path to the form Daytona's fs.upload_file expects."""
+    """Convert a logical credential-file path to the form Daytona's fs.upload_file expects.
+
+    Used only for credential files (which still live under $HOME=/root).
+    User scripts and outputs go to SANDBOX_WORKSPACE via shell-based writes.
+    """
     if path.startswith("~/"):
         return path[2:]
     if path.startswith(_SANDBOX_HOME + "/"):
@@ -62,38 +95,91 @@ def _normalize_sandbox_upload_path(path: str) -> str:
     return path
 
 
-_BINARY_EXTENSIONS = {
-    ".png",
-    ".jpg",
-    ".jpeg",
-    ".gif",
-    ".bmp",
-    ".webp",
-    ".svg",
-    ".ico",
-    ".pdf",
-    ".zip",
-    ".tar",
-    ".gz",
-    ".bz2",
-    ".mp3",
-    ".wav",
-    ".ogg",
-    ".mp4",
-    ".avi",
-    ".mov",
-    ".webm",
-    ".woff",
-    ".woff2",
-    ".ttf",
-    ".eot",
-    ".pkl",
-    ".pickle",
-    ".npy",
-    ".npz",
-    ".parquet",
-    ".feather",
-}
+# Shared cross-conversation data volume. Mounted at SANDBOX_DATA via the
+# DAYTONA_DATA_VOLUME env var. Files written here by scripts are visible
+# to every conversation that mounts the same data volume.
+SANDBOX_DATA = "/data"
+
+
+def workspace_path(logical_path: str) -> str:
+    """Map a logical file path to its absolute location in the sandbox.
+
+    Logical paths starting with ``/data/`` (or exactly ``/data``) refer to
+    files on the shared data volume and are returned as-is. Everything
+    else maps under SANDBOX_WORKSPACE (the per-conversation persistent
+    working area).
+
+    The two-prefix scheme keeps state["files"] keys unambiguous: a file on
+    the data volume is identified by its ``/data/...`` path, a file in
+    the workspace by a path that does not start with ``/data/``.
+    """
+    if logical_path == SANDBOX_DATA or logical_path.startswith(SANDBOX_DATA + "/"):
+        return logical_path
+    rel = logical_path.lstrip("/")
+    return f"{SANDBOX_WORKSPACE}/{rel}"
+
+
+def write_workspace_file(sandbox, abs_path: str, content: bytes) -> None:
+    """Write bytes to an absolute path in the sandbox.
+
+    fs.upload_file resolves relative-to-cwd; absolute paths are not
+    respected. Use shell + base64 to write to arbitrary absolute paths.
+    Caller is responsible for shell-safe ``abs_path`` (this helper quotes it).
+    """
+    b64 = base64.b64encode(content).decode("ascii")
+    quoted = shlex.quote(abs_path)
+    parent = os.path.dirname(abs_path) or "/"
+    cmd = f"mkdir -p {shlex.quote(parent)} && echo {shlex.quote(b64)} | base64 -d > {quoted}"
+    response = sandbox.process.exec(cmd)
+    if response.exit_code != 0:
+        raise OSError(f"Failed to write {abs_path}: {response.result}")
+
+
+def read_workspace_file(sandbox, abs_path: str) -> bytes:
+    """Read bytes from an absolute path in the sandbox via shell + base64.
+
+    fs.download_file is relative-to-cwd; this is the absolute-path equivalent.
+    Raises FileNotFoundError if the path does not exist.
+    """
+    quoted = shlex.quote(abs_path)
+    response = sandbox.process.exec(f"test -f {quoted} && base64 -w 0 {quoted}")
+    if response.exit_code != 0:
+        raise FileNotFoundError(abs_path)
+    return base64.b64decode(response.result.strip())
+
+
+def list_workspace_files(sandbox, abs_dir: str) -> list[dict]:
+    """List files under an absolute directory in the sandbox.
+
+    Returns list of {path, size, modified_at} for regular files only,
+    recursively. Returns empty list if the directory does not exist or is empty.
+    """
+    quoted = shlex.quote(abs_dir)
+    # Use find + stat, format as TSV for safe parsing
+    cmd = f"test -d {quoted} || exit 0; find {quoted} -type f -printf '%p\\t%s\\t%T@\\n' 2>/dev/null"
+    response = sandbox.process.exec(cmd)
+    if response.exit_code != 0:
+        return []
+    out: list[dict] = []
+    for line in response.result.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 3:
+            continue
+        path, size_s, mtime_s = parts
+        try:
+            size = int(size_s)
+            mtime = float(mtime_s)
+        except ValueError:
+            continue
+        out.append(
+            {
+                "path": path,
+                "size": size,
+                "modified_at": datetime.fromtimestamp(mtime, tz=UTC).isoformat(),
+            }
+        )
+    return out
+
 
 IDLE_TIMEOUT_MINUTES = 15
 
@@ -101,6 +187,213 @@ IDLE_TIMEOUT_MINUTES = 15
 _sandboxes: dict[str, object] = {}
 _last_used: dict[str, datetime] = {}
 _daytona = None
+
+
+def exec_as_daytona(sandbox, command: str, cwd: str | None = None, env: dict[str, str] | None = None):
+    """Run a shell command as the daytona user via `su -l`.
+
+    Daytona's process.exec executes commands as root by default
+    (Daytona's `os_user` is metadata only — open issue #4309). Wrapping
+    in `su -l daytona -c '...'` is the only way to actually drop
+    privileges for agent-supplied or agent-invoked code. The login shell
+    (`-l`) resets PATH/HOME to daytona's defaults; `cwd` and `env` are
+    injected inside the wrapped command because su strips the parent
+    process's environment.
+
+    The command is base64-encoded before being passed through `su -c`
+    to avoid shell-quoting hazards (the command may contain quotes,
+    backticks, $-expansions the agent supplied).
+    """
+    parts: list[str] = []
+    if env:
+        for k, v in env.items():
+            parts.append(f"export {shlex.quote(k)}={shlex.quote(v)}")
+    if cwd:
+        parts.append(f"cd {shlex.quote(cwd)}")
+    parts.append(command)
+    inner = "; ".join(parts)
+    b64 = base64.b64encode(inner.encode()).decode("ascii")
+    wrapped = f'su -l {SANDBOX_DAYTONA_USER} -c "echo {shlex.quote(b64)} | base64 -d | sh"'
+    return sandbox.process.exec(wrapped)
+
+
+def exec_skill(
+    sandbox,
+    abs_skill_path: str,
+    script_args: list[str] | None = None,
+    cwd: str | None = None,
+    env: dict[str, str] | None = None,
+):
+    """Run a script under /skills/ as root via the unwrapped exec path.
+
+    Skills are trusted code (root-owned, agent cannot modify), so they
+    execute with elevated privileges — they need root to write to /data
+    (mountpoint-s3 mounts are world-writable in practice, but the trust
+    model is "only skills write to /data" by convention).
+
+    Path validation: ``abs_skill_path`` must already be an absolute
+    path strictly under SANDBOX_SKILLS_DIR. Caller is responsible for
+    normalizing logical paths (e.g. "/skills/foo/bar.py" → absolute) and
+    rejecting any path that does not satisfy the prefix check. This
+    function performs a final defensive check and raises ValueError
+    otherwise — defense-in-depth even though the agent has no path to
+    plant a symlink in /skills/ (root-owned, daytona has no write).
+    """
+    if not abs_skill_path.startswith(SANDBOX_SKILLS_DIR + "/"):
+        raise ValueError(f"exec_skill called with non-skill path: {abs_skill_path!r}")
+    if "/../" in abs_skill_path or abs_skill_path.endswith("/.."):
+        raise ValueError(f"path traversal in skill path: {abs_skill_path!r}")
+
+    quoted_path = shlex.quote(abs_skill_path)
+    if script_args:
+        suffix = " ".join(shlex.quote(a) for a in script_args)
+        cmd = f"uv run {quoted_path} {suffix}"
+    else:
+        cmd = f"uv run {quoted_path}"
+
+    exec_kwargs: dict = {}
+    if cwd:
+        exec_kwargs["cwd"] = cwd
+    if env:
+        exec_kwargs["env"] = dict(env)
+    return sandbox.process.exec(cmd, **exec_kwargs)
+
+
+def start_inotify_daemon(sandbox) -> None:
+    """Start an inotifywait daemon that records file events to INOTIFY_JOURNAL_PATH.
+
+    Watches SANDBOX_WORKSPACE and SANDBOX_DATA recursively for create,
+    modify, close_write, open, and access events. Output format is
+    TSV: ``<event>\\t<path>\\t<unix_timestamp>``. The daemon runs in
+    the background (nohup + &) so process.exec returns immediately.
+
+    Best-effort: if inotifywait is missing or the watch can't start
+    (e.g. inotify limits exhausted), logs and continues without
+    session tracking — agent calls still work.
+
+    Runs as daytona (via exec_as_daytona). Inotify events fire
+    based on filesystem events regardless of which user's process
+    triggered them, so running as daytona vs root is purely about
+    journal-file ownership; daytona is consistent with the rest of
+    the per-sandbox file ownership.
+    """
+    journal = shlex.quote(INOTIFY_JOURNAL_PATH)
+    workspace = shlex.quote(SANDBOX_WORKSPACE)
+    data = shlex.quote(SANDBOX_DATA)
+    # Truncate any previous journal (daemon may have left one if a
+    # different conversation reused the same sandbox name — shouldn't
+    # happen with our per-thread sandboxes, but defensive).
+    init_cmd = (
+        f": > {journal}; "
+        # Start the daemon. -m monitor mode (don't exit), -r recursive,
+        # -e events. --format produces TSV; --timefmt %s makes the
+        # timestamp a unix epoch second so we don't have to parse a
+        # human date string in the drain.
+        f"nohup inotifywait -mr "
+        f"-e create -e modify -e close_write -e open -e access "
+        f"--format '%e\\t%w%f\\t%T' --timefmt '%s' "
+        f"{workspace} {data} > {journal} 2>&1 &"
+    )
+    response = exec_as_daytona(sandbox, init_cmd)
+    if response.exit_code != 0:
+        logger.warning(
+            "Failed to start inotify daemon (session tracking disabled): %s",
+            response.result,
+        )
+
+
+def drain_inotify_journal(sandbox, default_source: str = "agent") -> dict[str, dict]:
+    """Read and truncate the inotify journal, return aggregated path metadata.
+
+    Returns a dict keyed by logical path (state["files"] format — leading
+    slash, no /workspace prefix; /data paths kept as-is). Each value is
+    {size, modified_at, source, last_event_type, first_seen}.
+
+    Path-to-source mapping:
+      - Paths under /data → source = "data" regardless of caller.
+      - Paths under /workspace → source = ``default_source`` (caller
+        passes "agent" for write_file / execute_python_code, "output"
+        for run_file, etc).
+      - Paths under /skills/ are filtered out — skill files are
+        runtime plumbing, not user-visible content. They never appear
+        in state["files"].
+
+    Stats each surviving path to attach size and mtime. If the path
+    no longer exists (e.g. the script was a temp file deleted before
+    the drain ran), the entry is dropped.
+    """
+    journal = shlex.quote(INOTIFY_JOURNAL_PATH)
+    # Atomic read+truncate: rename to .read so any in-flight writes
+    # from the daemon append to a fresh (empty) journal we recreate.
+    # Then cat the renamed file. Best-effort — inotifywait keeps its
+    # FD open against the renamed inode and continues writing to it
+    # until we delete it, so events that happened during the rename
+    # window are preserved in the .read copy.
+    drain_cmd = (
+        f"if [ -f {journal} ]; then "
+        f"  mv {journal} {journal}.read 2>/dev/null && : > {journal}; "
+        f"  cat {journal}.read 2>/dev/null; "
+        f"  rm -f {journal}.read; "
+        f"fi"
+    )
+    response = exec_as_daytona(sandbox, drain_cmd)
+    if response.exit_code != 0:
+        return {}
+
+    # Aggregate events per path.
+    by_path: dict[str, dict] = {}
+    for line in response.result.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 3:
+            continue
+        event, path, ts_s = parts
+        if not path or not path.startswith("/"):
+            continue
+        # Filter skill-internal paths.
+        if path.startswith(SANDBOX_SKILLS_DIR + "/") or path == SANDBOX_SKILLS_DIR:
+            continue
+        try:
+            ts = float(ts_s)
+        except ValueError:
+            continue
+        entry = by_path.setdefault(path, {"first_seen_ts": ts, "last_ts": ts, "last_event": event})
+        if ts >= entry["last_ts"]:
+            entry["last_ts"] = ts
+            entry["last_event"] = event
+
+    # Stat each path and build the state["files"] entries.
+    result: dict[str, dict] = {}
+    for abs_path, agg in by_path.items():
+        # Logical path: /workspace/foo → /foo, /data/bar stays /data/bar.
+        if abs_path == SANDBOX_WORKSPACE or abs_path.startswith(SANDBOX_WORKSPACE + "/"):
+            logical = abs_path[len(SANDBOX_WORKSPACE) :] or "/"
+            source = default_source
+        elif abs_path == SANDBOX_DATA or abs_path.startswith(SANDBOX_DATA + "/"):
+            logical = abs_path
+            source = "data"
+        else:
+            # Out of scope — skip events from outside watched areas.
+            continue
+
+        # Stat to get size + mtime. If gone, skip.
+        stat_resp = exec_as_daytona(sandbox, f"stat -c '%s|%Y' {shlex.quote(abs_path)}")
+        if stat_resp.exit_code != 0:
+            continue
+        try:
+            size_s, mtime_s = stat_resp.result.strip().split("|")
+            size = int(size_s)
+            mtime = float(mtime_s)
+        except (ValueError, AttributeError):
+            continue
+
+        result[logical] = {
+            "size": size,
+            "modified_at": datetime.fromtimestamp(mtime, tz=UTC).isoformat(),
+            "source": source,
+            "last_event": agg["last_event"],
+            "first_seen": datetime.fromtimestamp(agg["first_seen_ts"], tz=UTC).isoformat(),
+        }
+    return result
 
 
 def _get_daytona():
@@ -172,6 +465,144 @@ def _daytona_sandbox_resources_from_env():
     return Resources(disk=gib)
 
 
+# Volume configuration env vars. All optional — unset means no mounts and the
+# sandbox behaves as it did before persistent storage was added.
+_HOMES_VOLUME_NAME_ENV = "DAYTONA_HOMES_VOLUME"
+_HOMES_MOUNT_PATH_ENV = "DAYTONA_HOMES_MOUNT_PATH"
+_DATA_VOLUME_NAME_ENV = "DAYTONA_DATA_VOLUME"
+_DATA_MOUNT_PATH_ENV = "DAYTONA_DATA_MOUNT_PATH"
+
+
+def _build_volume_mounts(thread_id: str):
+    """Build the VolumeMount list for a sandbox, or None if no volumes configured.
+
+    The homes volume is mounted at ``DAYTONA_HOMES_MOUNT_PATH`` (default
+    ``/workspace``) with ``subpath=<thread_id>`` so each conversation gets
+    its own persistent slice. The data volume is mounted at
+    ``DAYTONA_DATA_MOUNT_PATH`` (default ``/data``) without a subpath so
+    it's shared across all conversations.
+
+    Volume lookup uses ``create=False`` so a misconfiguration fails loudly
+    rather than silently creating stray volumes.
+    """
+    from daytona_sdk import VolumeMount
+
+    mounts = []
+
+    homes_name = os.environ.get(_HOMES_VOLUME_NAME_ENV, "").strip()
+    if homes_name:
+        homes_path = os.environ.get(_HOMES_MOUNT_PATH_ENV, "").strip() or SANDBOX_WORKSPACE
+        try:
+            vol = _get_daytona().volume.get(homes_name, create=False)
+            mounts.append(VolumeMount(volume_id=vol.id, mount_path=homes_path, subpath=thread_id))
+        except Exception:
+            logger.warning(
+                "Homes volume %r not found; per-thread persistent workspace disabled", homes_name, exc_info=True
+            )
+
+    data_name = os.environ.get(_DATA_VOLUME_NAME_ENV, "").strip()
+    if data_name:
+        data_path = os.environ.get(_DATA_MOUNT_PATH_ENV, "").strip() or "/data"
+        try:
+            vol = _get_daytona().volume.get(data_name, create=False)
+            mounts.append(VolumeMount(volume_id=vol.id, mount_path=data_path))
+        except Exception:
+            logger.warning("Data volume %r not found; shared data disabled", data_name, exc_info=True)
+
+    return mounts or None
+
+
+def cleanup_thread_workspace(thread_id: str) -> None:
+    """Remove a thread's subpath from the homes volume.
+
+    Called when a conversation is deleted. Mounts the homes volume in a
+    short-lived sandbox and ``rm -rf``s the per-thread directory. No-op if
+    no homes volume is configured.
+
+    The Daytona platform's volume API has no direct file-delete operation,
+    so a temporary sandbox is the only path to remove subpath contents.
+    Best-effort: failures are logged, never raised, since the conversation
+    DB row is already gone by the time this runs.
+    """
+    homes_name = os.environ.get(_HOMES_VOLUME_NAME_ENV, "").strip()
+    if not homes_name:
+        return
+
+    homes_path = os.environ.get(_HOMES_MOUNT_PATH_ENV, "").strip() or SANDBOX_WORKSPACE
+
+    try:
+        from daytona_sdk import CreateSandboxFromImageParams, Image, VolumeMount
+
+        vol = _get_daytona().volume.get(homes_name, create=False)
+        # Minimal image — no need for git/uv since we just rm -rf
+        image = Image.debian_slim("3.12")
+        sb = _get_daytona().create(
+            CreateSandboxFromImageParams(
+                image=image,
+                volumes=[VolumeMount(volume_id=vol.id, mount_path=homes_path, subpath=thread_id)],
+            )
+        )
+        try:
+            # The mount only exposes the thread's subpath, so rm everything inside.
+            response = sb.process.exec(f"find {shlex.quote(homes_path)} -mindepth 1 -delete")
+            if response.exit_code != 0:
+                logger.warning(
+                    "Workspace cleanup for thread %s exited %d: %s",
+                    thread_id,
+                    response.exit_code,
+                    response.result,
+                )
+        finally:
+            _get_daytona().delete(sb)
+    except Exception:
+        logger.warning("Failed to clean up workspace for thread %s", thread_id, exc_info=True)
+
+
+async def cleanup_thread_workspace_async(thread_id: str) -> None:
+    """Async wrapper for ``cleanup_thread_workspace``."""
+    await asyncio.to_thread(cleanup_thread_workspace, thread_id)
+
+
+def _build_sandbox_image():
+    """Build the Daytona Image declaration for the runtime.
+
+    - python:3.12-slim base
+    - git installed (uv/pip can fetch VCS dependencies)
+    - inotify-tools installed (the inotifywait binary the per-sandbox
+      session-tracking daemon runs)
+    - uv installed via pip
+    - daytona user created (the non-root identity all agent tool calls
+      execute as via su -l wrapping)
+    - /workspace, /data, /skills directories created. Skills directory
+      is owned root:root mode 0755 — POSIX permissions actually enforce
+      here because /skills/ is on the regular container FS, not a volume.
+      /workspace and /data ownership is determined by mountpoint-s3 mount
+      options (probe confirmed they arrive nobody:nogroup mode 0777, and
+      chown/chmod from inside is not permitted) so we don't try to chown
+      them — see /tmp/daytona_ownership_probe.py for the empirical basis.
+    """
+    from daytona_sdk import Image
+
+    return (
+        Image.debian_slim("3.12")
+        .run_commands(
+            "apt-get update && apt-get install -y --no-install-recommends git inotify-tools "
+            "&& rm -rf /var/lib/apt/lists/*",
+            # Non-root user the agent's tool calls execute as. -m creates
+            # /home/daytona; -s sets the login shell; -r marks it a
+            # system account.
+            "groupadd -r daytona && useradd -r -m -g daytona -s /bin/bash daytona",
+            # Mount points / regular dirs.
+            f"mkdir -p {SANDBOX_WORKSPACE} /data {SANDBOX_SKILLS_DIR}",
+            # /skills/ stays root:root mode 0755 — agent (daytona) reads
+            # and executes but cannot write. Skill scripts dropped here at
+            # activation time get chmod 0644 (also root-owned).
+            f"chmod 0755 {SANDBOX_SKILLS_DIR}",
+        )
+        .pip_install(["uv"])
+    )
+
+
 def _get_or_create_sandbox(thread_id: str):
     """Get an existing sandbox for a thread or create a new one.
 
@@ -181,29 +612,47 @@ def _get_or_create_sandbox(thread_id: str):
     ``pip install`` / ``uv pip install`` can fetch VCS dependencies (e.g.
     ``git+https://...``).
 
+    Volume mounts are wired in based on env vars (see
+    ``_build_volume_mounts``): per-thread persistent ``/workspace`` and
+    shared ``/data`` when configured.
+
     Optional env ``DAYTONA_SANDBOX_DISK_GIB`` sets sandbox disk size (GiB);
-    see `_daytona_sandbox_resources_from_env`.
+    see ``_daytona_sandbox_resources_from_env``.
     """
-    from daytona_sdk import CreateSandboxFromImageParams, Image
+    from daytona_sdk import CreateSandboxFromImageParams
 
     _cleanup_idle_sandboxes()
 
     if thread_id not in _sandboxes:
-        image = (
-            Image.debian_slim("3.12")
-            .run_commands(
-                "apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*"
-            )
-            .pip_install(["uv"])
-        )
+        image = _build_sandbox_image()
         resources = _daytona_sandbox_resources_from_env()
-        sandbox = _get_daytona().create(CreateSandboxFromImageParams(image=image, resources=resources))
+        volumes = _build_volume_mounts(thread_id)
+        sandbox = _get_daytona().create(
+            CreateSandboxFromImageParams(
+                image=image,
+                resources=resources,
+                volumes=volumes,
+                # Metadata only — Daytona open issue #4309 confirms
+                # process.exec doesn't honor this. The actual identity
+                # for agent calls comes from exec_as_daytona's su wrap.
+                os_user=SANDBOX_DAYTONA_USER,
+            )
+        )
         _patch_proxy_url(sandbox)
         _sandboxes[thread_id] = sandbox
-        if resources is not None:
-            logger.info("Created sandbox for thread %s (with uv, git, %r)", thread_id, resources)
-        else:
-            logger.info("Created sandbox for thread %s (with uv, git)", thread_id)
+        # Best-effort start of the per-sandbox inotify daemon. Failure
+        # leaves session-tracking off for this sandbox but doesn't
+        # affect anything else.
+        try:
+            start_inotify_daemon(sandbox)
+        except Exception:
+            logger.warning("Failed to start inotify daemon for thread %s", thread_id, exc_info=True)
+        logger.info(
+            "Created sandbox for thread %s (resources=%r, volumes=%d)",
+            thread_id,
+            resources,
+            len(volumes) if volumes else 0,
+        )
 
     _last_used[thread_id] = datetime.now(UTC)
     return _sandboxes[thread_id]
@@ -464,6 +913,32 @@ async def resolve_credentials_or_error(
 def make_execute_python_code(db=None):
     """Build the ``execute_python_code`` tool with credential support.
 
+    SECURITY NOTE — residual tamper surface:
+
+    This tool is the only agent-controlled path to arbitrary code
+    execution. Under the zero-trust model:
+
+      - The agent runs as the ``daytona`` user via ``exec_as_daytona``,
+        so it cannot tamper with /skills/ (root-owned, mode 0644).
+        POSIX permissions enforce skill-script integrity.
+      - However, /workspace and /data are mountpoint-s3 volumes. The
+        ownership probe (/tmp/daytona_ownership_probe.py) confirmed that
+        chown/chmod return EPERM on those mounts even from root, and
+        mountpoint-s3 reports them as world-writable regardless of the
+        underlying user. **Filesystem permissions do not enforce
+        read-only on /workspace or /data.** The daytona user CAN write,
+        modify, or delete files there via ``execute_python_code``.
+      - HITL approval is the only defense for /workspace / /data write
+        attempts. Every ``execute_python_code`` invocation is in
+        ``_HITL_TOOLS`` (graph.py) and the user reviews the code before
+        it runs. A sufficiently subtle tamper that the user approves
+        without noticing would succeed.
+
+    The /skills/ trust story is strict (enforced by the OS); the
+    /workspace / /data integrity story is HITL-mediated. If this
+    tool is ever extended, removed, or replaced, revisit how skill
+    outputs in /workspace are protected from agent post-processing.
+
     Args:
         db: Application database. Required for credential resolution.
             When None, the tool still runs but rejects any non-empty
@@ -592,83 +1067,54 @@ def make_execute_python_code(db=None):
         def _run():
             sandbox = _get_or_create_sandbox(thread_id)
 
-            # Apply file materializations before running. These persist for
-            # the lifetime of the sandbox; future runs that don't request
-            # them will still see them in the filesystem until the sandbox
-            # is recycled. Best-effort cleanup happens after the run.
-            #
-            # Daytona's upload_file signature is (content_bytes, remote_path),
-            # NOT (remote_path, content_bytes). And remote_path is resolved
-            # against the sandbox's working directory and does NOT expand
-            # ``~``, so the path is normalized first.
+            # Apply credential file materializations before running.
+            # fs.upload_file goes through the Daytona toolbox-api as
+            # root, so files land owned root:root. After upload, chown
+            # to daytona and chmod 0600 so the daytona-context script
+            # can read them; without the chown, daytona would EACCES
+            # on a 0600 root-owned file.
             for path, content in file_uploads.items():
                 upload_path = _normalize_sandbox_upload_path(path)
                 try:
                     sandbox.fs.upload_file(content.encode("utf-8"), upload_path)
                 except Exception:
                     logger.warning("Failed to upload credential file %s", path, exc_info=True)
-                # netrc and similar credential files conventionally need
-                # restrictive permissions; default everything to 0600. Use
-                # the original logical path here — chmod runs in a shell
-                # that expands ``~`` correctly.
+                # chown + chmod via the unwrapped exec path (root) so
+                # daytona ends up able to read the file.
                 try:
-                    sandbox.process.exec(f"chmod 600 {path}")
+                    sandbox.process.exec(
+                        f"chown {SANDBOX_DAYTONA_USER}:{SANDBOX_DAYTONA_USER} {shlex.quote(path)}; "
+                        f"chmod 0600 {shlex.quote(path)}"
+                    )
                 except Exception:
                     pass
 
-            # Snapshot files before execution to detect new output files
-            try:
-                pre_files = {f.name for f in sandbox.fs.list_files(".")}
-            except Exception:
-                pre_files = set()
+            # Run the agent's code as daytona via su -l wrapping. The
+            # code is base64-encoded to avoid shell-quoting hazards from
+            # the agent's source (which may contain quotes, $-expansions,
+            # etc.). The wrapped command pipes the decoded source into
+            # python on stdin so the bytes never appear in argv (would
+            # be visible in /proc/<pid>/cmdline).
+            #
+            # Drain any pre-existing inotify events first so this run's
+            # session-file delta starts from a clean slate.
+            drain_inotify_journal(sandbox, default_source="agent")
 
-            run_params = None
-            if env_vars:
-                try:
-                    from daytona_sdk import CodeRunParams
+            code_b64 = base64.b64encode(code.encode("utf-8")).decode("ascii")
+            run_cmd = f"echo {shlex.quote(code_b64)} | base64 -d | python3"
+            response = exec_as_daytona(sandbox, run_cmd, env=env_vars or None)
 
-                    run_params = CodeRunParams(env=dict(env_vars))
-                except Exception:
-                    logger.warning("Failed to build CodeRunParams; env vars will not be set", exc_info=True)
+            # Pick up any new files the script wrote, via the inotify
+            # journal. The drain returns logical paths with proper
+            # source labels (/data → "data", /workspace → "agent").
+            new_files = drain_inotify_journal(sandbox, default_source="agent")
 
-            if run_params is not None:
-                response = sandbox.process.code_run(code, params=run_params)
-            else:
-                response = sandbox.process.code_run(code)
-
-            # Discover new files created during execution
-            new_files = {}
-            try:
-                post_files = sandbox.fs.list_files(".")
-                for f in post_files:
-                    if f.is_dir or f.name in pre_files:
-                        continue
-                    # Skip large files > 1MB
-                    if f.size and f.size > 1_000_000:
-                        continue
-                    try:
-                        content_bytes = sandbox.fs.download_file(f.name)
-                        ext = "." + f.name.rsplit(".", 1)[-1].lower() if "." in f.name else ""
-                        if ext in _BINARY_EXTENSIONS:
-                            new_files[f"/{f.name}"] = {
-                                "content": base64.b64encode(content_bytes).decode("ascii"),
-                                "encoding": "base64",
-                            }
-                        else:
-                            new_files[f"/{f.name}"] = {
-                                "content": content_bytes.decode("utf-8", errors="replace"),
-                                "encoding": "utf-8",
-                            }
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-
-            # Best-effort cleanup of credential files so they don't linger
-            # between executions.
+            # Best-effort cleanup of credential files. Run as root via
+            # the unwrapped path so we can rm files we chowned to
+            # daytona (root can rm regardless).
             for path in file_uploads:
                 try:
-                    sandbox.process.exec(f"rm -f {path}")
+                    sandbox.process.exec(f"rm -f {shlex.quote(path)}")
                 except Exception:
                     pass
 
@@ -681,28 +1127,6 @@ def make_execute_python_code(db=None):
         # Backstop: scrub verbatim secret values from anything we return.
         result = redact_output(result, redaction_list)
 
-        # Build files state update from captured output files
-        now = datetime.now(UTC).isoformat()
-        files_update = {}
-        for fpath, finfo in new_files.items():
-            encoding = finfo["encoding"]
-            raw = finfo["content"]
-            if encoding == "base64":
-                files_update[fpath] = {
-                    "content": [raw],
-                    "source": "output",
-                    "encoding": "base64",
-                    "modified_at": now,
-                }
-            else:
-                redacted = redact_output(raw, redaction_list)
-                lines = redacted.split("\n")
-                files_update[fpath] = {
-                    "content": lines,
-                    "source": "output",
-                    "modified_at": now,
-                }
-
         update_dict: dict = {
             "messages": [
                 ToolMessage(
@@ -712,8 +1136,8 @@ def make_execute_python_code(db=None):
             ],
         }
 
-        if files_update:
-            update_dict["files"] = files_update
+        if new_files:
+            update_dict["files"] = new_files
 
         return Command(update=update_dict)
 

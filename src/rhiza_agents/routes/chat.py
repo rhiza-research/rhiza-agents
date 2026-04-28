@@ -327,14 +327,19 @@ async def stream_chat_message(
                                             tool=tc["name"],
                                             tool_args=str(tc["args"])[:500],
                                         )
-                                        # Emit file data immediately so the UI can
-                                        # show the file before the checkpoint saves
-                                        if tc["name"] == "write_file" and isinstance(tc.get("args"), dict):
-                                            file_data = {
-                                                "path": tc["args"].get("path", ""),
-                                                "content": tc["args"].get("content", ""),
-                                            }
-                                            yield f"event: file_written\ndata: {json.dumps(file_data)}\n\n"
+                                        # write_file is commented out under
+                                        # the zero-trust model. The
+                                        # file_written SSE emission is
+                                        # preserved here as a comment so
+                                        # the streaming flow can be
+                                        # revived alongside write_file
+                                        # if the trust model changes.
+                                        # if tc["name"] == "write_file" and isinstance(tc.get("args"), dict):
+                                        #     file_data = {
+                                        #         "path": tc["args"].get("path", ""),
+                                        #         "content": tc["args"].get("content", ""),
+                                        #     }
+                                        #     yield f"event: file_written\ndata: {json.dumps(file_data)}\n\n"
                                 # Tool results from ToolMessages
                                 if isinstance(msg, ToolMessage):
                                     if msg.name and msg.name.startswith(("transfer_to_", "transfer_back_to_")):

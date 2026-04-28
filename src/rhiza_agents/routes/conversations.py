@@ -1,13 +1,17 @@
 """Conversation list/delete, messages, and files API routes."""
 
 import asyncio
+import base64
 import json
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import Response
 
 from ..agents.registry import get_default_configs, merge_configs
 from ..agents.supervisor import get_agent_graph
-from ..agents.tools.sandbox import cleanup_sandbox
+from ..agents.tools.files import fetch_file_content, list_thread_files
+from ..agents.tools.sandbox import cleanup_sandbox, cleanup_thread_workspace_async
 from ..db.models import AgentConfig
 from ..deps import (
     _skill_cache,
@@ -21,6 +25,8 @@ from ..deps import (
     require_auth,
 )
 from ..messages import build_name_mappings, process_messages
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["conversations"])
 
@@ -94,11 +100,28 @@ async def list_conversations(request: Request, user: dict = Depends(require_auth
 
 @router.delete("/api/conversations/{conversation_id}")
 async def delete_conversation(request: Request, conversation_id: str, user: dict = Depends(require_auth)):
-    """Delete a conversation and clean up its sandbox."""
+    """Delete a conversation and clean up its sandbox + workspace.
+
+    Only the conversation owner can delete. Non-owner requests get 404
+    (do not leak existence beyond what the read-only access allows) /
+    403 (when ownership mismatches a known conversation). The owner check
+    happens before any side effects so a non-owner request cannot disrupt
+    the owner's running sandbox.
+    """
     db = get_db(request)
     user_id = get_user_id(request)
+
+    conversation = await db.get_conversation_by_id(conversation_id)
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    if conversation.get("user_id") != user_id:
+        raise HTTPException(status_code=403, detail="You do not own this conversation")
+
+    # DB row first so a partial failure leaves no orphan; sandbox/volume
+    # cleanup is best-effort and logged on failure.
     await db.delete_conversation(conversation_id, user_id)
     await asyncio.to_thread(cleanup_sandbox, conversation_id)
+    await cleanup_thread_workspace_async(conversation_id)
     return {"status": "deleted"}
 
 
@@ -148,8 +171,26 @@ async def get_conversation_messages(request: Request, conversation_id: str, user
 
 
 @router.get("/api/conversations/{conversation_id}/files")
-async def list_conversation_files(request: Request, conversation_id: str, user: dict = Depends(require_auth)):
-    """List files in a conversation's virtual filesystem."""
+async def list_conversation_files(
+    request: Request,
+    conversation_id: str,
+    scope: str = "session",
+    user: dict = Depends(require_auth),
+):
+    """List files relevant to a conversation.
+
+    Two scopes:
+      - ``scope=session`` (default): files tracked in the conversation's
+        accumulated state — every file the agent wrote in this thread,
+        plus any new outputs from past tool runs. Works without an active
+        sandbox; rendered from the LangGraph checkpoint.
+      - ``scope=workspace``: the live contents of /workspace on the
+        sandbox volume. Lazy-creates the sandbox if none is running.
+        Use this view to see everything currently on the volume,
+        including files this thread didn't track in state.
+
+    Read-only viewers (shared link without ownership) can use both scopes.
+    """
     db = get_db(request)
     user_id = get_user_id(request)
     mcp_tools = get_mcp_tools(request)
@@ -158,12 +199,21 @@ async def list_conversation_files(request: Request, conversation_id: str, user: 
 
     conversation = await db.get_conversation(conversation_id, user_id)
     if not conversation:
-        # Allow read-only access to other users' conversations
         conversation = await db.get_conversation_by_id(conversation_id)
         if not conversation:
             raise HTTPException(status_code=404, detail="Conversation not found")
 
     owner_id = conversation.get("user_id", user_id)
+
+    if scope == "workspace":
+        # Live filesystem listing — triggers sandbox creation if needed.
+        try:
+            return await list_thread_files(conversation_id)
+        except Exception as e:
+            logger.warning("Failed to list workspace files for %s", conversation_id, exc_info=True)
+            raise HTTPException(status_code=502, detail=f"Failed to list workspace files: {e}") from e
+
+    # Default: session-scope listing from state metadata.
     user_mcp, mcp_names = await _get_mcp_tools_for_owner(request, owner_id)
     owner_skills = await _get_skill_tools_for_owner(request, owner_id)
     graph = await get_agent_graph(
@@ -181,22 +231,24 @@ async def list_conversation_files(request: Request, conversation_id: str, user: 
 
     file_list = []
     for path, file_data in files.items():
-        content_lines = file_data.get("content", [])
-        encoding = file_data.get("encoding")
-        if encoding == "base64":
-            # Base64 files store raw size differently
-            b64_str = content_lines[0] if content_lines else ""
-            size = len(b64_str) * 3 // 4  # Approximate decoded size
-        else:
-            content_str = "\n".join(content_lines)
-            size = len(content_str.encode("utf-8"))
+        # Schema after refactor: {size, modified_at, source, ...} — no content.
+        # Tolerate legacy entries (which had {content: [...], ...}) by computing
+        # size from content_lines if size key is absent.
+        size = file_data.get("size")
+        if size is None:
+            content_lines = file_data.get("content", []) or []
+            encoding = file_data.get("encoding")
+            if encoding == "base64":
+                b64_str = content_lines[0] if content_lines else ""
+                size = len(b64_str) * 3 // 4
+            else:
+                size = len("\n".join(content_lines).encode("utf-8"))
         file_list.append(
             {
                 "path": path,
                 "size": size,
                 "source": file_data.get("source", "agent"),
                 "modified_at": file_data.get("modified_at", ""),
-                "encoding": encoding,
             }
         )
     return file_list
@@ -206,7 +258,16 @@ async def list_conversation_files(request: Request, conversation_id: str, user: 
 async def get_conversation_file(
     request: Request, conversation_id: str, file_path: str, user: dict = Depends(require_auth)
 ):
-    """Get a file's contents from a conversation's virtual filesystem."""
+    """Get a file's contents from the conversation's workspace.
+
+    Fetched live from the sandbox filesystem. Lazy-creates the sandbox if
+    none exists; the cold-start latency is on the click that triggered
+    this fetch. Read-only viewers can read any path the workspace exposes.
+
+    Returns ``{path, content, encoding, modified_at}``. Binary content is
+    returned base64-encoded (encoding="base64"); text is utf-8 decoded
+    with ``errors='replace'`` (encoding="utf-8").
+    """
     db = get_db(request)
     user_id = get_user_id(request)
     mcp_tools = get_mcp_tools(request)
@@ -215,40 +276,107 @@ async def get_conversation_file(
 
     conversation = await db.get_conversation(conversation_id, user_id)
     if not conversation:
-        # Allow read-only access to other users' conversations
         conversation = await db.get_conversation_by_id(conversation_id)
         if not conversation:
             raise HTTPException(status_code=404, detail="Conversation not found")
 
-    owner_id = conversation.get("user_id", user_id)
-    user_mcp, mcp_names = await _get_mcp_tools_for_owner(request, owner_id)
-    owner_skills = await _get_skill_tools_for_owner(request, owner_id)
-    graph = await get_agent_graph(
-        mcp_tools,
-        checkpointer,
-        user_id=owner_id,
-        db=db,
-        vectorstore_manager=vectorstore_manager,
-        mcp_tools_by_server=user_mcp,
-        mcp_server_names=mcp_names,
-        skill_tools=owner_skills,
-    )
-    state = await graph.aget_state({"configurable": {"thread_id": conversation_id}})
-    files = state.values.get("files", {})
-
-    # Normalize path -- the stored keys start with /
     lookup_path = file_path if file_path.startswith("/") else "/" + file_path
-    file_data = files.get(lookup_path)
-    if not file_data:
-        raise HTTPException(status_code=404, detail="File not found")
 
-    content_lines = file_data.get("content", [])
-    encoding = file_data.get("encoding")
-    content_str = "\n".join(content_lines)
+    # If state has legacy content for this path (pre-volume migration),
+    # pass it along as a fallback so fetch_file_content can lazy-write it
+    # to the workspace volume on first read.
+    owner_id = conversation.get("user_id", user_id)
+    legacy_fallback: bytes | None = None
+    try:
+        user_mcp, mcp_names = await _get_mcp_tools_for_owner(request, owner_id)
+        owner_skills = await _get_skill_tools_for_owner(request, owner_id)
+        graph = await get_agent_graph(
+            mcp_tools,
+            checkpointer,
+            user_id=owner_id,
+            db=db,
+            vectorstore_manager=vectorstore_manager,
+            mcp_tools_by_server=user_mcp,
+            mcp_server_names=mcp_names,
+            skill_tools=owner_skills,
+        )
+        state = await graph.aget_state({"configurable": {"thread_id": conversation_id}})
+        files = state.values.get("files", {})
+        entry = files.get(lookup_path)
+        if entry and "content" in entry:
+            content_lines = entry.get("content", []) or []
+            encoding = entry.get("encoding")
+            if encoding == "base64":
+                b64_str = content_lines[0] if content_lines else ""
+                try:
+                    legacy_fallback = base64.b64decode(b64_str)
+                except Exception:
+                    legacy_fallback = None
+            else:
+                legacy_fallback = "\n".join(content_lines).encode("utf-8")
+    except Exception:
+        # Migration is best-effort; if we can't read state, just try the
+        # live filesystem and let it 404 if missing.
+        logger.warning("Legacy fallback lookup failed for %s/%s", conversation_id, lookup_path, exc_info=True)
 
-    return {
-        "path": lookup_path,
-        "content": content_str,
-        "encoding": encoding,
-        "modified_at": file_data.get("modified_at", ""),
-    }
+    try:
+        content_bytes, modified_at = await fetch_file_content(conversation_id, lookup_path, legacy_fallback)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail="File not found") from e
+    except Exception as e:
+        logger.warning("Failed to fetch file %s for conversation %s", lookup_path, conversation_id, exc_info=True)
+        raise HTTPException(status_code=502, detail=f"Failed to fetch file: {e}") from e
+
+    # Heuristic: try utf-8 first (errors=strict to detect binary), fall back
+    # to base64. This avoids encoding plain text files as base64.
+    try:
+        text = content_bytes.decode("utf-8")
+        return {
+            "path": lookup_path,
+            "content": text,
+            "encoding": "utf-8",
+            "modified_at": modified_at,
+        }
+    except UnicodeDecodeError:
+        return {
+            "path": lookup_path,
+            "content": base64.b64encode(content_bytes).decode("ascii"),
+            "encoding": "base64",
+            "modified_at": modified_at,
+        }
+
+
+@router.get("/api/conversations/{conversation_id}/files/{file_path:path}/raw")
+async def download_conversation_file(
+    request: Request, conversation_id: str, file_path: str, user: dict = Depends(require_auth)
+):
+    """Download a file's raw bytes for the conversation.
+
+    Same auth as the JSON-content endpoint (read-only access via shared
+    link is allowed). Streams binary content with the appropriate filename.
+    """
+    db = get_db(request)
+    user_id = get_user_id(request)
+
+    conversation = await db.get_conversation(conversation_id, user_id)
+    if not conversation:
+        conversation = await db.get_conversation_by_id(conversation_id)
+        if not conversation:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+
+    lookup_path = file_path if file_path.startswith("/") else "/" + file_path
+
+    try:
+        content_bytes, _ = await fetch_file_content(conversation_id, lookup_path)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail="File not found") from e
+    except Exception as e:
+        logger.warning("Failed to fetch file %s for conversation %s", lookup_path, conversation_id, exc_info=True)
+        raise HTTPException(status_code=502, detail=f"Failed to fetch file: {e}") from e
+
+    filename = lookup_path.rsplit("/", 1)[-1] or "file"
+    return Response(
+        content=content_bytes,
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
