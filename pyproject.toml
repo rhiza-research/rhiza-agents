@@ -42,7 +42,7 @@ postgres = [
     "langgraph-checkpoint-postgres>=3.0.4",
 ]
 sandbox = [
-    "daytona-sdk>=0.149.0",
+    "daytona-sdk>=0.166.0",
 ]
 vectorstore = [
     "langchain-chroma>=1.1.0",
