@@ -158,14 +158,6 @@ async def _resolve_tools(
             from .tools.files import make_run_file
             from .tools.sandbox import is_sandbox_available, make_execute_python_code
 
-            # write_file is intentionally NOT registered under the
-            # zero-trust model — the agent has no direct file-write
-            # capability. Persistent files arrive via skills (run_file
-            # on /skills/<...> paths, executed as root) or via
-            # execute_python_code (HITL-approved arbitrary code,
-            # running as daytona). The implementation is preserved as
-            # a comment in tools/files.py for future revival.
-            # tools.append(write_file)
             if is_sandbox_available():
                 tools.append(make_execute_python_code(db=db))
                 tools.append(make_run_file(db=db))

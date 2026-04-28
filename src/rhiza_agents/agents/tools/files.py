@@ -10,10 +10,9 @@ Trust model:
     the sandbox. Filesystem permissions cannot enforce read-only on
     those volumes; HITL approval on execute_python_code is the only
     defense for write-from-agent attempts there.
-  - write_file is commented out under the zero-trust model — the agent
-    has no direct write tool. Side-effecting file writes happen only
-    via skill execution (run_file with /skills/<...> paths) or via
-    execute_python_code (HITL-approved arbitrary code).
+  - The agent has no direct file-write tool. Side-effecting file writes
+    happen only via skill execution (run_file with /skills/<...> paths)
+    or via execute_python_code (HITL-approved arbitrary code).
   - run_file is restricted to /skills/<name>/scripts/<file> paths only.
     Anything else returns an error.
   - File metadata in state["files"] is populated by the per-sandbox
@@ -115,35 +114,6 @@ def _validate_skill_path(logical_path: str) -> str | None:
     if parts[-1] == "" or parts[1] == "":
         return "Path has empty segment"
     return None
-
-
-# ----------------------------------------------------------------------
-# write_file is COMMENTED OUT under the zero-trust model.
-#
-# Under the original design write_file let the agent put arbitrary text
-# into the conversation's persistent workspace. The user changed the
-# trust model to "the agent should NEVER be able to edit a skill script
-# or write to data," and then to the broader "lets actually remove the
-# agents ability to write any files. it can only execute files." The
-# tool is preserved here as a comment so the implementation can be
-# revived if the trust model changes; the function is not registered
-# in graph.py's _resolve_tools, so no agent has access to it.
-#
-# If reviving: also restore the file_written SSE event emission in
-# routes/chat.py (currently commented out) and re-evaluate /workspace
-# ownership in #27 — under zero-trust /workspace is root-owned via
-# mountpoint-s3 and the agent has no write capability.
-# ----------------------------------------------------------------------
-# @tool
-# async def write_file(
-#     path: str,
-#     content: str,
-#     *,
-#     runtime: ToolRuntime,
-# ) -> Command:
-#     """Write a file to the conversation's persistent workspace."""
-#     ...
-# ----------------------------------------------------------------------
 
 
 def make_run_file(db=None):
