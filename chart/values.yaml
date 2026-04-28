@@ -3,7 +3,7 @@
 # Container image configuration
 image:
   repository: ghcr.io/rhiza-research/rhiza-agents
-  tag: latest
+  tag: 19089d9129cc58c67def76fae486e8b6695a7870
   pullPolicy: Always
 
 # Image pull secrets (not needed for public GHCR repos)
