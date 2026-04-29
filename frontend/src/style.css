@@ -198,6 +198,60 @@ body { height: 100vh; margin: 0; }
 }
 .conversation-item:hover .conversation-delete-btn { opacity: 1; }
 .conversation-delete-btn:hover { background: var(--md-red-500, #e53935); color: white; opacity: 1; }
+
+/* Modal dialogs (lib/dialog.ts) — replaces window.confirm/alert so the
+ * delete-conversation flow is reachable by browser automation. */
+.app-dialog {
+    border: 1px solid var(--jp-border-color1);
+    border-radius: 6px;
+    padding: 1rem 1.25rem;
+    min-width: 320px;
+    max-width: 480px;
+    background: var(--jp-layout-color1);
+    color: var(--jp-ui-font-color0);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
+}
+.app-dialog::backdrop {
+    background: rgba(0, 0, 0, 0.45);
+}
+.app-dialog-title {
+    margin: 0 0 0.5rem 0;
+    font-size: 1rem;
+    font-weight: 600;
+}
+.app-dialog-message {
+    margin: 0 0 1rem 0;
+    font-size: 0.9rem;
+    line-height: 1.4;
+    color: var(--jp-ui-font-color1);
+}
+.app-dialog-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5rem;
+}
+.app-dialog-btn {
+    padding: 0.4rem 0.9rem;
+    border-radius: 4px;
+    border: 1px solid var(--jp-border-color1);
+    background: var(--jp-layout-color2);
+    color: var(--jp-ui-font-color0);
+    font-size: 0.85rem;
+    cursor: pointer;
+}
+.app-dialog-btn:hover { background: var(--jp-layout-color3); }
+.app-dialog-btn-confirm {
+    background: var(--jp-brand-color1);
+    color: white;
+    border-color: var(--jp-brand-color1);
+}
+.app-dialog-btn-confirm:hover { background: var(--jp-brand-color0); }
+.app-dialog-btn-destructive {
+    background: var(--md-red-500, #e53935);
+    color: white;
+    border-color: var(--md-red-500, #e53935);
+}
+.app-dialog-btn-destructive:hover { background: var(--md-red-700, #c62828); }
 .sidebar-header { padding: 0.5rem; border-bottom: 1px solid var(--jp-border-color1); }
 .new-chat-btn {
     width: 100%; padding: 0.5rem; background: var(--jp-brand-color1); color: white;
