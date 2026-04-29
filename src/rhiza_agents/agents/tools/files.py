@@ -100,6 +100,9 @@ def _validate_skill_path(logical_path: str) -> str | None:
     Returns an error string on rejection, None if the path is acceptable.
     Refuses paths with .. components, double slashes, empty segments, or
     that don't end with a filename component below /skills/<name>/scripts/.
+
+    The empty-skill-name case (``/skills//scripts/x``) is caught by the
+    consecutive-slashes check above, not by a redundant parts[1] check.
     """
     if not logical_path.startswith(SANDBOX_SKILLS_DIR + "/"):
         return f"Path must be under {SANDBOX_SKILLS_DIR}/"
@@ -111,7 +114,7 @@ def _validate_skill_path(logical_path: str) -> str | None:
     # Expected shape: skills / <name> / scripts / <file>
     if len(parts) < 4 or parts[2] != "scripts":
         return f"Path must be of the form {SANDBOX_SKILLS_DIR}/<name>/scripts/<file>"
-    if parts[-1] == "" or parts[1] == "":
+    if parts[-1] == "":
         return "Path has empty segment"
     return None
 
