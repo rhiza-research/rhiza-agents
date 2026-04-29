@@ -262,10 +262,27 @@ def exec_skill(
 def start_inotify_daemon(sandbox) -> None:
     """Start an inotifywait daemon that records file events to INOTIFY_JOURNAL_PATH.
 
-    Watches SANDBOX_WORKSPACE and SANDBOX_DATA recursively for create,
-    modify, close_write, open, and access events. Output format is
-    TSV: ``<event>\\t<path>\\t<unix_timestamp>``. The daemon runs in
-    the background (nohup + &) so process.exec returns immediately.
+    Watches SANDBOX_WORKSPACE and SANDBOX_DATA recursively for both
+    write-side events (create, modify, close_write, move, delete) and
+    read-side events (open, access). The read events are necessary
+    for the spec's cache-hit visibility on /data: when a previously-
+    downloaded /data file gets opened by this tool call's script, the
+    file shows up in the conversation's session view as something
+    this run touched, even though it wasn't written. Output format is
+    TSV ``<event>\\t<path>\\t<unix_timestamp>`` per event line.
+
+    The watched trees do NOT include Python's import paths (venvs and
+    the uv cache live under /root/.cache/uv and /root/.venv, outside
+    the watch set), so read events fire only for files the script
+    explicitly opens under /workspace or /data — exactly the signal
+    we want for "files this run touched."
+
+    Daemon redirect uses ``>>`` (O_APPEND) — every write atomically
+    seeks to end-of-file, which makes the truncate-in-place pattern
+    in ``drain_inotify_journal`` work correctly on subsequent drains.
+    Without O_APPEND, the daemon's FD position wouldn't follow a
+    truncate, and it would keep writing past offset 0 leaving sparse
+    holes in the journal that drain reads couldn't see.
 
     Best-effort: if inotifywait is missing or the watch can't start
     (e.g. inotify limits exhausted), logs and continues without
@@ -288,11 +305,13 @@ def start_inotify_daemon(sandbox) -> None:
         # Start the daemon. -m monitor mode (don't exit), -r recursive,
         # -e events. --format produces TSV; --timefmt %s makes the
         # timestamp a unix epoch second so we don't have to parse a
-        # human date string in the drain.
+        # human date string in the drain. >> opens with O_APPEND so
+        # every write atomically seeks to EOF — required for the
+        # truncate-in-place drain pattern to work without losing data.
         f"nohup inotifywait -mr "
-        f"-e create -e modify -e close_write -e open -e access "
+        f"-e create -e modify -e close_write -e move -e delete -e open -e access "
         f"--format '%e\\t%w%f\\t%T' --timefmt '%s' "
-        f"{workspace} {data} > {journal} 2>&1 &"
+        f"{workspace} {data} >> {journal} 2>&1 &"
     )
     response = exec_as_daytona(sandbox, init_cmd)
     if response.exit_code != 0:
@@ -307,7 +326,7 @@ def drain_inotify_journal(sandbox, default_source: str = "agent") -> dict[str, d
 
     Returns a dict keyed by logical path (state["files"] format — leading
     slash, no /workspace prefix; /data paths kept as-is). Each value is
-    {size, modified_at, source, last_event_type, first_seen}.
+    {size, modified_at, source, last_event, first_seen}.
 
     Path-to-source mapping:
       - Paths under /data → source = "data" regardless of caller.
@@ -318,24 +337,26 @@ def drain_inotify_journal(sandbox, default_source: str = "agent") -> dict[str, d
         runtime plumbing, not user-visible content. They never appear
         in state["files"].
 
-    Stats each surviving path to attach size and mtime. If the path
-    no longer exists (e.g. the script was a temp file deleted before
-    the drain ran), the entry is dropped.
+    Drain pattern: ``cat`` then truncate-in-place. The daemon was
+    started with O_APPEND (``>>``) so writes after truncate atomically
+    seek to the new end-of-file at offset 0 — the daemon's FD position
+    no longer matters. There's a tiny window between ``cat`` finishing
+    and ``: > journal`` running where the daemon could write events
+    that get truncated and lost; this is bounded by the few microseconds
+    between the two shell commands and is acceptable for "did this tool
+    call touch a file."
+
+    Path metadata is collected with a single ``stat`` call passing all
+    surviving paths as positional arguments, not one stat per path.
+    Paths that no longer exist (e.g. a temp file deleted before the
+    drain ran) are silently dropped — stat writes them to stderr (which
+    we discard) and continues with the rest.
     """
     journal = shlex.quote(INOTIFY_JOURNAL_PATH)
-    # Atomic read+truncate: rename to .read so any in-flight writes
-    # from the daemon append to a fresh (empty) journal we recreate.
-    # Then cat the renamed file. Best-effort — inotifywait keeps its
-    # FD open against the renamed inode and continues writing to it
-    # until we delete it, so events that happened during the rename
-    # window are preserved in the .read copy.
-    drain_cmd = (
-        f"if [ -f {journal} ]; then "
-        f"  mv {journal} {journal}.read 2>/dev/null && : > {journal}; "
-        f"  cat {journal}.read 2>/dev/null; "
-        f"  rm -f {journal}.read; "
-        f"fi"
-    )
+    # cat-then-truncate. Works correctly because the daemon writes
+    # with O_APPEND, so post-truncate writes seek to the new EOF (0)
+    # rather than the daemon's stale FD offset.
+    drain_cmd = f"if [ -f {journal} ]; then cat {journal} 2>/dev/null; : > {journal}; fi"
     response = exec_as_daytona(sandbox, drain_cmd)
     if response.exit_code != 0:
         return {}
@@ -361,9 +382,34 @@ def drain_inotify_journal(sandbox, default_source: str = "agent") -> dict[str, d
             entry["last_ts"] = ts
             entry["last_event"] = event
 
-    # Stat each path and build the state["files"] entries.
+    if not by_path:
+        return {}
+
+    # Single stat call covering every surviving path. stat prints one
+    # line per existing file to stdout; missing files go to stderr
+    # (which we discard) and stat exits non-zero only when no args
+    # could be processed at all. We always parse stdout regardless.
+    quoted_paths = " ".join(shlex.quote(p) for p in by_path)
+    stat_cmd = f"stat -c '%n|%s|%Y' {quoted_paths} 2>/dev/null || true"
+    stat_resp = exec_as_daytona(sandbox, stat_cmd)
+    stat_by_path: dict[str, tuple[int, float]] = {}
+    for line in stat_resp.result.splitlines():
+        # %n could in principle contain a literal '|' if a watched
+        # path embedded one; rsplit handles that by treating the last
+        # two '|' fields as size and mtime.
+        try:
+            name, size_s, mtime_s = line.rsplit("|", 2)
+            stat_by_path[name] = (int(size_s), float(mtime_s))
+        except ValueError:
+            continue
+
+    # Build the state["files"] entries from the intersection of
+    # journal events and successful stats.
     result: dict[str, dict] = {}
     for abs_path, agg in by_path.items():
+        if abs_path not in stat_by_path:
+            continue  # File was deleted between event and drain.
+        size, mtime = stat_by_path[abs_path]
         # Logical path: /workspace/foo → /foo, /data/bar stays /data/bar.
         if abs_path == SANDBOX_WORKSPACE or abs_path.startswith(SANDBOX_WORKSPACE + "/"):
             logical = abs_path[len(SANDBOX_WORKSPACE) :] or "/"
@@ -373,17 +419,6 @@ def drain_inotify_journal(sandbox, default_source: str = "agent") -> dict[str, d
             source = "data"
         else:
             # Out of scope — skip events from outside watched areas.
-            continue
-
-        # Stat to get size + mtime. If gone, skip.
-        stat_resp = exec_as_daytona(sandbox, f"stat -c '%s|%Y' {shlex.quote(abs_path)}")
-        if stat_resp.exit_code != 0:
-            continue
-        try:
-            size_s, mtime_s = stat_resp.result.strip().split("|")
-            size = int(size_s)
-            mtime = float(mtime_s)
-        except (ValueError, AttributeError):
             continue
 
         result[logical] = {
