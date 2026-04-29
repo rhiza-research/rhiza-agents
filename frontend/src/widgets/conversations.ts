@@ -1,5 +1,7 @@
 import { Widget } from '@lumino/widgets';
 
+import { alertDialog, confirmDialog } from '../lib/dialog';
+
 export interface ConversationData {
     id: string;
     title: string | null;
@@ -97,16 +99,25 @@ export class ConversationListWidget extends Widget {
 
     private async _handleDelete(conv: ConversationData): Promise<void> {
         const title = conv.title || 'this conversation';
-        const ok = window.confirm(
-            `Delete "${title}"?\n\nThis removes the conversation, its messages, and any files saved on its workspace volume. This cannot be undone.`,
-        );
+        const ok = await confirmDialog({
+            title: 'Delete conversation?',
+            message:
+                `Delete "${title}"? This removes the conversation, its messages, ` +
+                'and any files saved on its workspace volume. This cannot be undone.',
+            confirmLabel: 'Delete',
+            cancelLabel: 'Cancel',
+            destructive: true,
+        });
         if (!ok) return;
 
         let response: Response;
         try {
             response = await fetch(`/api/conversations/${conv.id}`, { method: 'DELETE' });
         } catch (e) {
-            window.alert(`Failed to delete: ${(e as Error).message}`);
+            await alertDialog({
+                title: 'Delete failed',
+                message: `Failed to delete: ${(e as Error).message}`,
+            });
             return;
         }
 
@@ -118,7 +129,10 @@ export class ConversationListWidget extends Widget {
             } catch {
                 // ignore JSON parse failure; fall back to status text
             }
-            window.alert(`Failed to delete: ${message}`);
+            await alertDialog({
+                title: 'Delete failed',
+                message: `Failed to delete: ${message}`,
+            });
             return;
         }
 
