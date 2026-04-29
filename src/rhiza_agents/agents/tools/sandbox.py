@@ -550,12 +550,21 @@ def _build_volume_mounts(thread_id: str):
 def cleanup_thread_workspace(thread_id: str) -> None:
     """Remove a thread's subpath from the homes volume.
 
-    Called when a conversation is deleted. Mounts the homes volume in a
-    short-lived sandbox and ``rm -rf``s the per-thread directory. No-op if
-    no homes volume is configured.
+    Called when a conversation is deleted. The Daytona platform's volume
+    API has no direct file-delete operation, so the cleanup runs as a
+    shell command in a sandbox that has the homes volume mounted at this
+    thread's subpath. Two paths:
 
-    The Daytona platform's volume API has no direct file-delete operation,
-    so a temporary sandbox is the only path to remove subpath contents.
+      1. If the per-thread sandbox is still alive in ``_sandboxes``, run
+         the ``rm`` through it. Its mount already points at the right
+         volume + subpath, so this saves the ~5–15s sandbox-create cost.
+         For this to fire, the caller must invoke this BEFORE
+         ``cleanup_sandbox`` (which removes the entry from ``_sandboxes``).
+      2. Otherwise spin up a temp sandbox just to do the rm. This handles
+         the case where the active sandbox was already idle-cleaned, or
+         where the conversation never had an active sandbox in this
+         server process.
+
     Best-effort: failures are logged, never raised, since the conversation
     DB row is already gone by the time this runs.
     """
@@ -564,12 +573,36 @@ def cleanup_thread_workspace(thread_id: str) -> None:
         return
 
     homes_path = os.environ.get(_HOMES_MOUNT_PATH_ENV, "").strip() or SANDBOX_WORKSPACE
+    rm_cmd = f"find {shlex.quote(homes_path)} -mindepth 1 -delete"
 
+    # Path 1: reuse the active per-thread sandbox if alive.
+    active = _sandboxes.get(thread_id)
+    if active is not None:
+        try:
+            response = active.process.exec(rm_cmd)
+            if response.exit_code != 0:
+                logger.warning(
+                    "Workspace cleanup for thread %s (active sandbox) exited %d: %s",
+                    thread_id,
+                    response.exit_code,
+                    response.result,
+                )
+            return
+        except Exception:
+            logger.warning(
+                "Active-sandbox workspace cleanup failed for thread %s; falling back to temp sandbox",
+                thread_id,
+                exc_info=True,
+            )
+            # Fall through to path 2.
+
+    # Path 2: no live sandbox (or the active path failed). Spin up a
+    # temp sandbox just to do the rm.
     try:
         from daytona_sdk import CreateSandboxFromImageParams, Image, VolumeMount
 
         vol = _get_daytona().volume.get(homes_name, create=False)
-        # Minimal image — no need for git/uv since we just rm -rf
+        # Minimal image — no need for git/uv since we just rm -rf.
         image = Image.debian_slim("3.12")
         sb = _get_daytona().create(
             CreateSandboxFromImageParams(
@@ -578,11 +611,10 @@ def cleanup_thread_workspace(thread_id: str) -> None:
             )
         )
         try:
-            # The mount only exposes the thread's subpath, so rm everything inside.
-            response = sb.process.exec(f"find {shlex.quote(homes_path)} -mindepth 1 -delete")
+            response = sb.process.exec(rm_cmd)
             if response.exit_code != 0:
                 logger.warning(
-                    "Workspace cleanup for thread %s exited %d: %s",
+                    "Workspace cleanup for thread %s (temp sandbox) exited %d: %s",
                     thread_id,
                     response.exit_code,
                     response.result,
