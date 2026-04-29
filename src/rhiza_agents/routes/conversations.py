@@ -148,10 +148,14 @@ async def delete_conversation(request: Request, conversation_id: str, user: dict
         raise HTTPException(status_code=403, detail="You do not own this conversation")
 
     # DB row first so a partial failure leaves no orphan; sandbox/volume
-    # cleanup is best-effort and logged on failure.
+    # cleanup is best-effort and logged on failure. Workspace cleanup
+    # runs BEFORE the sandbox kill so cleanup_thread_workspace can reuse
+    # the active sandbox to do the rm — saves a ~5–15s sandbox-create.
+    # If the sandbox is already gone (idle-cleaned), the helper spins up
+    # a temp sandbox to perform the cleanup.
     await db.delete_conversation(conversation_id, user_id)
-    await asyncio.to_thread(cleanup_sandbox, conversation_id)
     await cleanup_thread_workspace_async(conversation_id)
+    await asyncio.to_thread(cleanup_sandbox, conversation_id)
     return {"status": "deleted"}
 
 
