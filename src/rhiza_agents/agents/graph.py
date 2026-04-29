@@ -155,11 +155,9 @@ async def _resolve_tools(
             else:
                 logger.info("Skill %s not loaded, skipping", skill_id)
         elif tool_id == "sandbox:daytona":
-            from .tools.files import make_run_file, write_file
+            from .tools.files import make_run_file
             from .tools.sandbox import is_sandbox_available, make_execute_python_code
 
-            # File tools are always available (write to state, not sandbox)
-            tools.append(write_file)
             if is_sandbox_available():
                 tools.append(make_execute_python_code(db=db))
                 tools.append(make_run_file(db=db))

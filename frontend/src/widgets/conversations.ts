@@ -1,5 +1,7 @@
 import { Widget } from '@lumino/widgets';
 
+import { alertDialog, confirmDialog } from '../lib/dialog';
+
 export interface ConversationData {
     id: string;
     title: string | null;
@@ -13,10 +15,16 @@ interface ConversationListOptions {
 
 /**
  * Sidebar widget showing conversation list, new chat button, and user info.
+ *
+ * Each row carries a delete affordance. The sidebar lists only the
+ * current user's own conversations (server filters by user_id), so the
+ * delete request is always against an owned conversation; the backend
+ * additionally enforces ownership and returns 403/404 on a mismatch.
  */
 export class ConversationListWidget extends Widget {
     private _conversations: ConversationData[];
     private _currentId: string;
+    private _nav: HTMLElement | null = null;
 
     constructor(options: ConversationListOptions) {
         super();
@@ -46,18 +54,95 @@ export class ConversationListWidget extends Widget {
         node.appendChild(header);
 
         // Conversation list
-        const nav = document.createElement('nav');
-        nav.className = 'conversations';
+        this._nav = document.createElement('nav');
+        this._nav.className = 'conversations';
+        this._renderList();
+        node.appendChild(this._nav);
+    }
+
+    private _renderList(): void {
+        if (!this._nav) return;
+        this._nav.innerHTML = '';
         for (const conv of this._conversations) {
-            const a = document.createElement('a');
-            a.href = `/c/${conv.id}`;
-            a.className = 'conversation-item';
-            if (conv.id === this._currentId) {
-                a.classList.add('active');
-            }
-            a.textContent = conv.title || 'New conversation';
-            nav.appendChild(a);
+            this._nav.appendChild(this._buildRow(conv));
         }
-        node.appendChild(nav);
+    }
+
+    private _buildRow(conv: ConversationData): HTMLElement {
+        const row = document.createElement('div');
+        row.className = 'conversation-item';
+        row.dataset.conversationId = conv.id;
+        if (conv.id === this._currentId) {
+            row.classList.add('active');
+        }
+
+        const link = document.createElement('a');
+        link.href = `/c/${conv.id}`;
+        link.className = 'conversation-item-link';
+        link.textContent = conv.title || 'New conversation';
+        row.appendChild(link);
+
+        const deleteBtn = document.createElement('button');
+        deleteBtn.className = 'conversation-delete-btn';
+        deleteBtn.title = 'Delete this conversation';
+        deleteBtn.setAttribute('aria-label', 'Delete conversation');
+        deleteBtn.textContent = '×';
+        deleteBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            void this._handleDelete(conv);
+        });
+        row.appendChild(deleteBtn);
+
+        return row;
+    }
+
+    private async _handleDelete(conv: ConversationData): Promise<void> {
+        const title = conv.title || 'this conversation';
+        const ok = await confirmDialog({
+            title: 'Delete conversation?',
+            message:
+                `Delete "${title}"? This removes the conversation, its messages, ` +
+                'and any files saved on its workspace volume. This cannot be undone.',
+            confirmLabel: 'Delete',
+            cancelLabel: 'Cancel',
+            destructive: true,
+        });
+        if (!ok) return;
+
+        let response: Response;
+        try {
+            response = await fetch(`/api/conversations/${conv.id}`, { method: 'DELETE' });
+        } catch (e) {
+            await alertDialog({
+                title: 'Delete failed',
+                message: `Failed to delete: ${(e as Error).message}`,
+            });
+            return;
+        }
+
+        if (!response.ok) {
+            let message = `${response.status} ${response.statusText}`;
+            try {
+                const data = await response.json();
+                if (data?.detail) message = data.detail;
+            } catch {
+                // ignore JSON parse failure; fall back to status text
+            }
+            await alertDialog({
+                title: 'Delete failed',
+                message: `Failed to delete: ${message}`,
+            });
+            return;
+        }
+
+        // Remove from local list and re-render
+        this._conversations = this._conversations.filter((c) => c.id !== conv.id);
+        this._renderList();
+
+        // If the deleted conversation is the one being viewed, navigate home.
+        if (conv.id === this._currentId) {
+            window.location.href = '/';
+        }
     }
 }

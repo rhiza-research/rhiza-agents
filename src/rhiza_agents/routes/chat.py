@@ -327,14 +327,6 @@ async def stream_chat_message(
                                             tool=tc["name"],
                                             tool_args=str(tc["args"])[:500],
                                         )
-                                        # Emit file data immediately so the UI can
-                                        # show the file before the checkpoint saves
-                                        if tc["name"] == "write_file" and isinstance(tc.get("args"), dict):
-                                            file_data = {
-                                                "path": tc["args"].get("path", ""),
-                                                "content": tc["args"].get("content", ""),
-                                            }
-                                            yield f"event: file_written\ndata: {json.dumps(file_data)}\n\n"
                                 # Tool results from ToolMessages
                                 if isinstance(msg, ToolMessage):
                                     if msg.name and msg.name.startswith(("transfer_to_", "transfer_back_to_")):
@@ -373,10 +365,8 @@ async def stream_chat_message(
                                         html_url = extract_chart_url(msg.content)
                                         if html_url:
                                             yield f"event: chart\ndata: {json.dumps({'url': html_url})}\n\n"
-                                    # Emit files_changed for run_file results
-                                    # (write_file uses file_written from tool_start instead,
-                                    # since files_changed triggers loadFiles which overwrites
-                                    # the immediate file display before checkpoint saves)
+                                    # Emit files_changed after run_file so the
+                                    # client refetches the file list.
                                     if msg.name == "run_file":
                                         yield f"event: files_changed\ndata: {json.dumps({})}\n\n"
 
@@ -602,14 +592,6 @@ async def resume_chat(
                                         tool=tc["name"],
                                         tool_args=str(tc["args"])[:500],
                                     )
-                                    # Emit file data immediately so the UI can
-                                    # show the file before the checkpoint saves
-                                    if tc["name"] == "write_file" and isinstance(tc.get("args"), dict):
-                                        file_data = {
-                                            "path": tc["args"].get("path", ""),
-                                            "content": tc["args"].get("content", ""),
-                                        }
-                                        yield f"event: file_written\ndata: {json.dumps(file_data)}\n\n"
                             if isinstance(msg, ToolMessage):
                                 if msg.name and msg.name.startswith(("transfer_to_", "transfer_back_to_")):
                                     continue
