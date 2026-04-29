@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import logging
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
@@ -29,6 +30,35 @@ from ..messages import build_name_mappings, process_messages
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["conversations"])
+
+
+def _content_disposition_attachment(filename: str) -> str:
+    """Build a Content-Disposition header value safe for any filename.
+
+    Per RFC 6266 + RFC 5987: emit ``filename="<ascii>"`` for old clients
+    plus ``filename*=UTF-8''<pct-encoded>`` for the modern unicode form.
+    Control characters (CR/LF in particular) are stripped before either
+    form is produced so the result cannot break out of the header into
+    a new header — closing CVE-style injection where a filename like
+    ``foo"; X-Injected: bar.txt`` would otherwise add a header.
+
+    Filenames are sourced from sandbox paths controlled either by a
+    skill's output or by the agent itself; this helper makes both
+    sources safe to render verbatim in the response header.
+    """
+    # Drop ASCII control characters (\x00-\x1F, \x7F). These are what
+    # actually let an attacker inject a new header line.
+    safe = "".join(c for c in filename if 32 <= ord(c) < 127 or ord(c) > 127)
+    if not safe:
+        safe = "file"
+    # ASCII-only fallback for ancient clients. Non-ASCII characters
+    # become "?" (replace error handler), then any remaining quotes /
+    # backslashes get escaped per RFC 6266 grammar.
+    ascii_only = safe.encode("ascii", errors="replace").decode("ascii")
+    ascii_escaped = ascii_only.replace("\\", "\\\\").replace('"', '\\"')
+    # RFC 5987 percent-encoded form preserves the original unicode.
+    pct_encoded = quote(safe, safe="")
+    return f"attachment; filename=\"{ascii_escaped}\"; filename*=UTF-8''{pct_encoded}"
 
 
 async def _get_mcp_tools_for_owner(request: Request, owner_id: str) -> tuple[dict[str, list], dict[str, str]]:
@@ -378,5 +408,5 @@ async def download_conversation_file(
     return Response(
         content=content_bytes,
         media_type="application/octet-stream",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": _content_disposition_attachment(filename)},
     )
