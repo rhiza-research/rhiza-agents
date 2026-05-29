@@ -77,6 +77,28 @@ async def test_at_limit_file_is_read(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_grown_file_rejected_after_read(monkeypatch):
+    # TOCTOU: stat reports a size under the cap, but the file grew past
+    # the cap by the time read_workspace_file pulls it. The actual-bytes
+    # check after the read must reject it.
+    sandbox = _StatSandbox(size=MAX_FETCH_FILE_BYTES - 10)
+
+    monkeypatch.setattr(
+        files_mod,
+        "read_workspace_file",
+        lambda _s, _p: b"x" * (MAX_FETCH_FILE_BYTES + 1),
+    )
+    monkeypatch.setattr(
+        "rhiza_agents.agents.tools.sandbox._get_or_create_sandbox",
+        lambda _tid: sandbox,
+    )
+
+    with pytest.raises(FileTooLargeError) as exc:
+        await fetch_file_content("thread-1", "/grew.bin")
+    assert exc.value.size == MAX_FETCH_FILE_BYTES + 1
+
+
+@pytest.mark.asyncio
 async def test_oversized_legacy_fallback_rejected_before_write(monkeypatch):
     # File absent on the volume (stat fails), and the legacy fallback
     # itself is over the cap — must reject without writing it.
