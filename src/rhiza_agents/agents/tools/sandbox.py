@@ -713,19 +713,28 @@ def _is_safe_cleanup_path(homes_path: str) -> bool:
     """Return True only if ``homes_path`` is safe to recursively empty.
 
     Refuses an empty/relative path, ``/``, and any well-known system
-    directory. The delete is ``find <path> -mindepth 1 -delete``; pointing
-    it at one of these would wipe a system tree. A dedicated workspace
-    mount is an absolute path at least two levels deep (e.g. ``/workspace``
-    is one level but explicitly allowed via the not-forbidden check below;
-    anything shallower or system-owned is refused).
+    directory *or any path nested under one*. The delete is
+    ``find <path> -mindepth 1 -delete``; pointing it at one of these (or
+    a child like ``/etc/cron.d`` or ``/var/lib/postgresql``) would wipe a
+    system tree. A path is rejected when its normalized form equals a
+    forbidden root or is strictly under one. A dedicated workspace mount
+    (e.g. ``/workspace``, ``/mnt/homes``) lives outside every forbidden
+    root and is allowed.
     """
     if not homes_path:
         return False
     resolved = os.path.normpath(homes_path)
     if not resolved.startswith("/"):
         return False
-    if resolved in _FORBIDDEN_CLEANUP_PATHS:
-        return False
+    for root in _FORBIDDEN_CLEANUP_PATHS:
+        if resolved == root:
+            return False
+        # ``/`` is a forbidden root but its "under" prefix would be "//"
+        # and would reject every absolute path; the exact-match check
+        # above already covers it. For every other root, reject paths
+        # strictly nested beneath it (e.g. /etc/cron.d under /etc).
+        if root != "/" and resolved.startswith(root + "/"):
+            return False
     return True
 
 

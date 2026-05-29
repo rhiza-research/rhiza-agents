@@ -137,10 +137,28 @@ def test_uses_custom_homes_mount_path(monkeypatch):
     assert "find /persist -mindepth 1 -delete" in active.exec_calls[0]
 
 
-@pytest.mark.parametrize("bad_path", ["/", "/etc", "/var", "/home", "/root", "/usr", "/.."])
+@pytest.mark.parametrize(
+    "bad_path",
+    [
+        "/",
+        "/etc",
+        "/var",
+        "/home",
+        "/root",
+        "/usr",
+        "/..",
+        # Nested system paths: a child of a forbidden root is just as
+        # dangerous to recursively empty as the root itself.
+        "/etc/cron.d",
+        "/var/lib/postgresql",
+        "/usr/local/bin",
+        "/home/someuser",
+    ],
+)
 def test_refuses_unsafe_homes_mount_path(monkeypatch, bad_path):
     """A misconfigured homes mount path that resolves to a system tree
-    must not run the recursive delete — no exec, no temp sandbox."""
+    (or a path nested under one) must not run the recursive delete — no
+    exec, no temp sandbox."""
     monkeypatch.setenv("DAYTONA_HOMES_MOUNT_PATH", bad_path)
     active = _RecordingSandbox()
     sbx._sandboxes["thread-bad"] = active
@@ -151,6 +169,22 @@ def test_refuses_unsafe_homes_mount_path(monkeypatch, bad_path):
     # Guard fired before any filesystem-touching command ran.
     assert active.exec_calls == []
     mock_daytona.assert_not_called()
+
+
+def test_is_safe_cleanup_path_rejects_nested_system_paths():
+    """Prefix-based rejection: a path under any forbidden root is unsafe,
+    while a legitimate deep mount outside every forbidden root is allowed."""
+    # Nested under a forbidden system root → refused.
+    assert sbx._is_safe_cleanup_path("/etc/cron.d") is False
+    assert sbx._is_safe_cleanup_path("/var/lib/postgresql") is False
+    assert sbx._is_safe_cleanup_path("/usr/local/lib") is False
+    assert sbx._is_safe_cleanup_path("/home/alice/data") is False
+    # A deep mount path outside every forbidden root → allowed.
+    assert sbx._is_safe_cleanup_path("/mnt/homes") is True
+    assert sbx._is_safe_cleanup_path("/mnt/homes/thread-123") is True
+    # A prefix that merely starts with a forbidden root's name but is not
+    # actually nested under it (no trailing slash boundary) is allowed.
+    assert sbx._is_safe_cleanup_path("/etcdata") is True
 
 
 def test_is_safe_cleanup_path_guard():
