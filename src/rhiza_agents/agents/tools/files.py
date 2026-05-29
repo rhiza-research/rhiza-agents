@@ -307,7 +307,14 @@ async def fetch_file_content(
     """
     from .sandbox import _get_or_create_sandbox, write_workspace_file
 
-    abs_path = workspace_path(_normalize_logical_path(logical_path))
+    # workspace_path rejects traversal (paths escaping /workspace or
+    # /data) with ValueError. Map it to FileNotFoundError so the route
+    # returns 404 and no stat/read/migration-write runs as root against a
+    # path outside the permitted roots.
+    try:
+        abs_path = workspace_path(_normalize_logical_path(logical_path))
+    except ValueError as e:
+        raise FileNotFoundError(logical_path) from e
 
     def _fetch():
         sandbox = _get_or_create_sandbox(thread_id)

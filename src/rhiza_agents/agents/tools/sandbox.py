@@ -112,11 +112,37 @@ def workspace_path(logical_path: str) -> str:
     The two-prefix scheme keeps state["files"] keys unambiguous: a file on
     the data volume is identified by its ``/data/...`` path, a file in
     the workspace by a path that does not start with ``/data/``.
+
+    Path traversal is rejected: the resolved absolute path must stay
+    strictly under SANDBOX_WORKSPACE or SANDBOX_DATA. A logical path
+    containing ``..`` segments (e.g. ``/../etc/passwd`` or
+    ``/data/../../etc/x``) would otherwise normalize to a root-owned file
+    that ``read_workspace_file``/``write_workspace_file`` run as root.
+    Mirrors ``_validate_skill_path``'s rejection style; raises
+    ``ValueError`` so the caller can map it to a 4xx without performing
+    any filesystem access. This is the single choke point feeding both
+    the stat/read and the migration write.
     """
     if logical_path == SANDBOX_DATA or logical_path.startswith(SANDBOX_DATA + "/"):
-        return logical_path
-    rel = logical_path.lstrip("/")
-    return f"{SANDBOX_WORKSPACE}/{rel}"
+        candidate = logical_path
+    else:
+        rel = logical_path.lstrip("/")
+        candidate = f"{SANDBOX_WORKSPACE}/{rel}"
+
+    # Collapse ``..``/``.`` and redundant separators, then confirm the
+    # result still lives under one of the two permitted roots. normpath
+    # is enough because there are no symlinks in the logical namespace;
+    # the symlink concern is moot since these roots are mountpoint-s3.
+    resolved = os.path.normpath(candidate)
+    allowed = (
+        resolved == SANDBOX_WORKSPACE
+        or resolved.startswith(SANDBOX_WORKSPACE + "/")
+        or resolved == SANDBOX_DATA
+        or resolved.startswith(SANDBOX_DATA + "/")
+    )
+    if not allowed:
+        raise ValueError(f"path escapes workspace/data roots: {logical_path!r}")
+    return resolved
 
 
 def write_workspace_file(sandbox, abs_path: str, content: bytes) -> None:
