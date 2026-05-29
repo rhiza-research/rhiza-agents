@@ -308,7 +308,13 @@ async def get_conversation_file(
     checkpointer = get_checkpointer(request)
     vectorstore_manager = get_vectorstore_manager(request)
 
+    # get_conversation(…, user_id) returns truthy only when the requester
+    # owns the conversation; get_conversation_by_id is the read-only
+    # viewer fallback (shared-link access). Only the owner may trigger the
+    # lazy migration write to their own volume — a non-owner viewer gets
+    # read-only behavior (404 if the file isn't materialized yet).
     conversation = await db.get_conversation(conversation_id, user_id)
+    is_owner = conversation is not None
     if not conversation:
         conversation = await db.get_conversation_by_id(conversation_id)
         if not conversation:
@@ -318,40 +324,43 @@ async def get_conversation_file(
 
     # If state has legacy content for this path (pre-volume migration),
     # pass it along as a fallback so fetch_file_content can lazy-write it
-    # to the workspace volume on first read.
+    # to the workspace volume on first read. Owner-only: a non-owner must
+    # not cause a write to the owner's volume, so we leave legacy_fallback
+    # as None for viewers.
     owner_id = conversation.get("user_id", user_id)
     legacy_fallback: bytes | None = None
-    try:
-        user_mcp, mcp_names = await _get_mcp_tools_for_owner(request, owner_id)
-        owner_skills = await _get_skill_tools_for_owner(request, owner_id)
-        graph = await get_agent_graph(
-            mcp_tools,
-            checkpointer,
-            user_id=owner_id,
-            db=db,
-            vectorstore_manager=vectorstore_manager,
-            mcp_tools_by_server=user_mcp,
-            mcp_server_names=mcp_names,
-            skill_tools=owner_skills,
-        )
-        state = await graph.aget_state({"configurable": {"thread_id": conversation_id}})
-        files = state.values.get("files", {})
-        entry = files.get(lookup_path)
-        if entry and "content" in entry:
-            content_lines = entry.get("content", []) or []
-            encoding = entry.get("encoding")
-            if encoding == "base64":
-                b64_str = content_lines[0] if content_lines else ""
-                try:
-                    legacy_fallback = base64.b64decode(b64_str)
-                except Exception:
-                    legacy_fallback = None
-            else:
-                legacy_fallback = "\n".join(content_lines).encode("utf-8")
-    except Exception:
-        # Migration is best-effort; if we can't read state, just try the
-        # live filesystem and let it 404 if missing.
-        logger.warning("Legacy fallback lookup failed for %s/%s", conversation_id, lookup_path, exc_info=True)
+    if is_owner:
+        try:
+            user_mcp, mcp_names = await _get_mcp_tools_for_owner(request, owner_id)
+            owner_skills = await _get_skill_tools_for_owner(request, owner_id)
+            graph = await get_agent_graph(
+                mcp_tools,
+                checkpointer,
+                user_id=owner_id,
+                db=db,
+                vectorstore_manager=vectorstore_manager,
+                mcp_tools_by_server=user_mcp,
+                mcp_server_names=mcp_names,
+                skill_tools=owner_skills,
+            )
+            state = await graph.aget_state({"configurable": {"thread_id": conversation_id}})
+            files = state.values.get("files", {})
+            entry = files.get(lookup_path)
+            if entry and "content" in entry:
+                content_lines = entry.get("content", []) or []
+                encoding = entry.get("encoding")
+                if encoding == "base64":
+                    b64_str = content_lines[0] if content_lines else ""
+                    try:
+                        legacy_fallback = base64.b64decode(b64_str)
+                    except Exception:
+                        legacy_fallback = None
+                else:
+                    legacy_fallback = "\n".join(content_lines).encode("utf-8")
+        except Exception:
+            # Migration is best-effort; if we can't read state, just try the
+            # live filesystem and let it 404 if missing.
+            logger.warning("Legacy fallback lookup failed for %s/%s", conversation_id, lookup_path, exc_info=True)
 
     try:
         content_bytes, modified_at = await fetch_file_content(conversation_id, lookup_path, legacy_fallback)
