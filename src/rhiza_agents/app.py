@@ -14,7 +14,6 @@ from fastapi.templating import Jinja2Templates
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from starlette.middleware.sessions import SessionMiddleware
 
-from .agents.registry import get_default_configs_by_id
 from .agents.tools.mcp import create_mcp_client
 from .agents.tools.sandbox import cleanup_idle_sandboxes
 from .auth import create_oauth
@@ -146,20 +145,6 @@ async def lifespan(app: FastAPI):
 
     register_default_prompts()
 
-    # Build initial agent name mappings for logging
-    configs_by_id = get_default_configs_by_id()
-    app.state.agent_names = {agent_id: c.name for agent_id, c in configs_by_id.items()}
-    app.state.tool_to_agent = {}
-    for agent_id, c in configs_by_id.items():
-        for tool_id in c.tools:
-            if tool_id.startswith("mcp:"):
-                for t in app.state.mcp_tools:
-                    app.state.tool_to_agent[t.name] = agent_id
-        if "sandbox:daytona" in c.tools:
-            app.state.tool_to_agent["execute_python_code"] = agent_id
-            app.state.tool_to_agent["write_file"] = agent_id
-            app.state.tool_to_agent["run_file"] = agent_id
-
     async def _sandbox_cleanup_loop():
         while True:
             await asyncio.sleep(60)
@@ -167,7 +152,7 @@ async def lifespan(app: FastAPI):
 
     async with AsyncSqliteSaver.from_conn_string(config.checkpoint_db_path) as cp:
         app.state.checkpointer = cp
-        logger.info("Supervisor graph ready (built on first request)")
+        logger.info("Agent graph ready (built on first request)")
 
         cleanup_task = asyncio.create_task(_sandbox_cleanup_loop())
 

@@ -80,9 +80,10 @@ def make_langfuse_handler(
             #
             # We can rely on `langgraph_node` being present because langgraph
             # adds it to the metadata of every node it executes. The chain
-            # name happens to match the agent id (because we name workers via
-            # `create_agent(..., name=wc.id)` and the supervisor node is
-            # `supervisor`), so the lookup against `prompt_objects` is direct.
+            # name happens to match the agent id (the single agent is compiled
+            # via `create_agent(..., name="assistant")`, matching the
+            # `SINGLE_AGENT_ID`), so the lookup against `prompt_objects` is
+            # direct.
             _orig_on_chain_start = handler.on_chain_start
 
             def _on_chain_start_with_prompt_injection(

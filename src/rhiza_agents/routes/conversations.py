@@ -2,18 +2,15 @@
 
 import asyncio
 import base64
-import json
 import logging
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
 
-from ..agents.registry import get_default_configs, merge_configs
 from ..agents.supervisor import get_agent_graph
 from ..agents.tools.files import FileTooLargeError, fetch_file_content, list_thread_files
 from ..agents.tools.sandbox import cleanup_sandbox, cleanup_thread_workspace_async
-from ..db.models import AgentConfig
 from ..deps import (
     _skill_cache,
     _user_mcp_cache,
@@ -25,7 +22,7 @@ from ..deps import (
     get_vectorstore_manager,
     require_auth,
 )
-from ..messages import build_name_mappings, process_messages
+from ..messages import process_messages
 
 logger = logging.getLogger(__name__)
 
@@ -109,17 +106,6 @@ async def _get_skill_tools_for_owner(request: Request, owner_id: str) -> dict:
     return result
 
 
-async def _get_effective_configs(request: Request, user_id: str) -> list[AgentConfig]:
-    """Get effective agent configs for a user (defaults + overrides, merged)."""
-    db = get_db(request)
-    defaults = get_default_configs()
-    override_rows = await db.get_user_agent_configs(user_id)
-    if not override_rows:
-        return defaults
-    overrides = [json.loads(row["config_json"]) for row in override_rows]
-    return merge_configs(defaults, overrides)
-
-
 @router.get("/api/conversations")
 async def list_conversations(request: Request, user: dict = Depends(require_auth)):
     """List user's conversations."""
@@ -193,14 +179,12 @@ async def get_conversation_messages(request: Request, conversation_id: str, user
         mcp_server_names=mcp_names,
         skill_tools=owner_skills,
     )
-    effective = await _get_effective_configs(request, owner_id)
-    agent_names, tool_to_agent_map = build_name_mappings(effective, mcp_tools)
     state = await graph.aget_state({"configurable": {"thread_id": conversation_id}})
     raw_messages = state.values.get("messages", [])
 
     return {
         "conversation_id": conversation_id,
-        "messages": process_messages(raw_messages, agent_names),
+        "messages": process_messages(raw_messages),
     }
 
 

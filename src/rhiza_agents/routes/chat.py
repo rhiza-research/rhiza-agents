@@ -28,11 +28,9 @@ from ..deps import (
 )
 from ..logging_config import chat_event_logger
 from ..messages import (
-    build_name_mappings,
     extract_chart_url,
     extract_content_blocks,
     extract_content_blocks_from_token,
-    resolve_agent_name,
 )
 from ..observability import (
     get_langfuse_client,
@@ -160,7 +158,7 @@ async def stream_chat_message(
     user_mcp, mcp_names = await get_mcp_tools_for_user(request)
     user_skills = await get_skill_tools_for_user(request)
     # Compute effective configs first so we can sync prompts before the graph
-    # is built and bind each agent's prompt object to its model in build_graph.
+    # is built and bind the agent's prompt object to its model.
     effective = await _get_effective_configs(request, user_id)
     prompt_refs, prompt_objects = sync_user_prompts(get_user_name(request), effective)
     graph = await get_agent_graph(
@@ -173,29 +171,15 @@ async def stream_chat_message(
         mcp_server_names=mcp_names,
         skill_tools=user_skills,
     )
-    agent_names, tool_to_agent = build_name_mappings(effective, mcp_tools)
-    # Map the langgraph default node name "agent" to the supervisor's display name
-    supervisor_name = next((c.name for c in effective if c.type == "supervisor"), "Supervisor")
-    agent_names["agent"] = supervisor_name
     _log_event(
         "graph_build",
         status="ready",
-        agents=", ".join(dict.fromkeys(agent_names.values())),
         mcp_servers={mcp_names.get(k, k): len(v) for k, v in user_mcp.items()},
     )
-
-    def _resolve_tool_agent(tool_name: str, fallback: str | None) -> str | None:
-        """Resolve agent display name from tool name via tool_to_agent mapping."""
-        agent_id = tool_to_agent.get(tool_name)
-        if agent_id:
-            return agent_names.get(agent_id, fallback)
-        return fallback
 
     async def event_generator():
         yield f"event: conversation_id\ndata: {json.dumps({'conversation_id': conversation_id})}\n\n"
 
-        current_agent = None
-        current_agent_display = None
         accumulated_text = []
         seen_tool_call_ids = set()
         seen_tool_result_ids = set()
@@ -206,7 +190,6 @@ async def stream_chat_message(
             if accumulated_text:
                 _log_event(
                     "agent_message",
-                    agent=current_agent_display,
                     content="".join(accumulated_text)[:2000],
                 )
                 accumulated_text = []
@@ -250,23 +233,6 @@ async def stream_chat_message(
                         if not text and not reasoning:
                             continue
 
-                        node = metadata.get("lc_agent_name") or metadata.get("langgraph_node", "")
-                        ns = chunk.get("ns", [])
-                        display = resolve_agent_name(
-                            agent_names,
-                            node_name=node,
-                            ns=ns,
-                            fallback=current_agent_display,
-                        )
-                        # Find the agent_id for tracking (reverse lookup)
-                        agent_id = next((k for k, v in agent_names.items() if v == display), current_agent)
-                        if agent_id and agent_id != current_agent:
-                            _flush_accumulated()
-                            current_agent = agent_id
-                            current_agent_display = display
-                            yield f"event: agent_start\ndata: {json.dumps({'agent': display})}\n\n"
-                            _log_event("agent_start", agent=display)
-
                         if reasoning:
                             yield f"event: thinking\ndata: {json.dumps({'content': reasoning})}\n\n"
                         if text:
@@ -298,9 +264,6 @@ async def stream_chat_message(
                         # Extract tool call/result info from node updates.
                         # Deduplicate by tool call ID since subgraphs=True
                         # surfaces the same event from both subgraph and parent.
-                        ns = chunk.get("ns", [])
-                        update_agent_display = resolve_agent_name(agent_names, ns=ns, fallback=current_agent_display)
-
                         for _node_name, node_data in update_data.items():
                             if not isinstance(node_data, dict):
                                 continue
@@ -308,8 +271,6 @@ async def stream_chat_message(
                                 # Tool calls from AI messages
                                 if hasattr(msg, "tool_calls") and msg.tool_calls:
                                     for tc in msg.tool_calls:
-                                        if tc["name"].startswith(("transfer_to_", "transfer_back_to_")):
-                                            continue
                                         tc_id = tc.get("id")
                                         if tc_id:
                                             if tc_id in seen_tool_call_ids:
@@ -320,17 +281,13 @@ async def stream_chat_message(
                                             default=str,
                                         )
                                         yield f"event: tool_start\ndata: {data}\n\n"
-                                        tool_agent = _resolve_tool_agent(tc["name"], update_agent_display)
                                         _log_event(
                                             "tool_start",
-                                            agent=tool_agent,
                                             tool=tc["name"],
                                             tool_args=str(tc["args"])[:500],
                                         )
                                 # Tool results from ToolMessages
                                 if isinstance(msg, ToolMessage):
-                                    if msg.name and msg.name.startswith(("transfer_to_", "transfer_back_to_")):
-                                        continue
                                     result_id = getattr(msg, "tool_call_id", None)
                                     if result_id:
                                         if result_id in seen_tool_result_ids:
@@ -353,7 +310,6 @@ async def stream_chat_message(
                                     )
                                     _log_event(
                                         "tool_end",
-                                        agent=_resolve_tool_agent(msg.name, update_agent_display),
                                         tool=msg.name,
                                         output=tool_output_str,
                                     )
@@ -438,15 +394,6 @@ async def resume_chat(
         mcp_server_names=mcp_names,
         skill_tools=user_skills,
     )
-    agent_names, tool_to_agent = build_name_mappings(effective, mcp_tools)
-    supervisor_name = next((c.name for c in effective if c.type == "supervisor"), "Supervisor")
-    agent_names["agent"] = supervisor_name
-
-    def _resolve_tool_agent(tool_name: str, fallback: str | None) -> str | None:
-        agent_id = tool_to_agent.get(tool_name)
-        if agent_id:
-            return agent_names.get(agent_id, fallback)
-        return fallback
 
     if body.decision == "approve":
         decision = {"type": "approve"}
@@ -460,28 +407,7 @@ async def resume_chat(
         if log_chat_events:
             chat_event_logger.info(event, extra={"conversation_id": conversation_id, "user_id": user_id, **data})
 
-    # Seed initial agent from the interrupted tool so resume logs
-    # attribute the first message correctly (before any agent_start fires).
-    state = await graph.aget_state(config={"configurable": {"thread_id": conversation_id}})
-    initial_agent = None
-    initial_agent_display = None
-    if state and state.next:
-        # state.tasks contains the interrupted tool info
-        for task in getattr(state, "tasks", []):
-            for intr in getattr(task, "interrupts", []):
-                intr_value = getattr(intr, "value", {})
-                for ar in intr_value.get("action_requests", []):
-                    tool_name = ar.get("name")
-                    if tool_name:
-                        agent_id = tool_to_agent.get(tool_name)
-                        if agent_id and agent_id in agent_names:
-                            initial_agent = agent_id
-                            initial_agent_display = agent_names[agent_id]
-                            break
-
     async def event_generator():
-        current_agent = initial_agent
-        current_agent_display = initial_agent_display
         accumulated_text = []
         seen_tool_call_ids = set()
         seen_tool_result_ids = set()
@@ -491,7 +417,6 @@ async def resume_chat(
             if accumulated_text:
                 _log_event(
                     "agent_message",
-                    agent=current_agent_display,
                     content="".join(accumulated_text)[:2000],
                 )
                 accumulated_text = []
@@ -531,17 +456,6 @@ async def resume_chat(
                     if not text and not reasoning:
                         continue
 
-                    node = metadata.get("lc_agent_name") or metadata.get("langgraph_node", "")
-                    ns = chunk.get("ns", [])
-                    display = resolve_agent_name(agent_names, node_name=node, ns=ns, fallback=current_agent_display)
-                    agent_id = next((k for k, v in agent_names.items() if v == display), current_agent)
-                    if agent_id and agent_id != current_agent:
-                        _flush_accumulated()
-                        current_agent = agent_id
-                        current_agent_display = display
-                        yield f"event: agent_start\ndata: {json.dumps({'agent': display})}\n\n"
-                        _log_event("agent_start", agent=display)
-
                     if reasoning:
                         yield f"event: thinking\ndata: {json.dumps({'content': reasoning})}\n\n"
                     if text:
@@ -565,17 +479,12 @@ async def resume_chat(
                     # Extract tool call/result info from node updates.
                     # Deduplicate by tool call ID since subgraphs=True
                     # surfaces the same event from both subgraph and parent.
-                    ns = chunk.get("ns", [])
-                    update_agent_display = resolve_agent_name(agent_names, ns=ns, fallback=current_agent_display)
-
                     for _node_name, node_data in update_data.items():
                         if not isinstance(node_data, dict):
                             continue
                         for msg in node_data.get("messages", []):
                             if hasattr(msg, "tool_calls") and msg.tool_calls:
                                 for tc in msg.tool_calls:
-                                    if tc["name"].startswith(("transfer_to_", "transfer_back_to_")):
-                                        continue
                                     tc_id = tc.get("id")
                                     if tc_id:
                                         if tc_id in seen_tool_call_ids:
@@ -588,13 +497,10 @@ async def resume_chat(
                                     yield f"event: tool_start\ndata: {data}\n\n"
                                     _log_event(
                                         "tool_start",
-                                        agent=_resolve_tool_agent(tc["name"], update_agent_display),
                                         tool=tc["name"],
                                         tool_args=str(tc["args"])[:500],
                                     )
                             if isinstance(msg, ToolMessage):
-                                if msg.name and msg.name.startswith(("transfer_to_", "transfer_back_to_")):
-                                    continue
                                 result_id = getattr(msg, "tool_call_id", None)
                                 if result_id:
                                     if result_id in seen_tool_result_ids:
@@ -617,7 +523,6 @@ async def resume_chat(
                                 )
                                 _log_event(
                                     "tool_end",
-                                    agent=_resolve_tool_agent(msg.name, update_agent_display),
                                     tool=msg.name,
                                     output=tool_output_str,
                                 )

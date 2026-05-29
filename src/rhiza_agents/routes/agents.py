@@ -1,19 +1,26 @@
-"""Agent config CRUD API routes."""
+"""Agent config CRUD API routes.
+
+The platform runs a single agent (``SINGLE_AGENT_ID``). These routes expose
+read/edit/reset for that one config. Create and delete are rejected: there is
+no multi-agent topology to add to or remove from.
+"""
 
 import json
-import re
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from ..agents.graph import invalidate_graph_cache
-from ..agents.registry import get_default_configs, get_default_configs_by_id, merge_configs
+from ..agents.registry import (
+    SINGLE_AGENT_ID,
+    get_default_configs,
+    get_default_configs_by_id,
+    merge_configs,
+)
 from ..agents.tools.sandbox import is_sandbox_available
 from ..db.models import AgentConfig
 from ..deps import _user_mcp_cache, get_db, get_mcp_tools, get_mcp_tools_by_server, get_user_id, require_auth
 
 router = APIRouter(tags=["agents"])
-
-_AGENT_ID_PATTERN = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]*$")
 
 
 async def _get_effective_configs(request: Request, user_id: str) -> list[AgentConfig]:
@@ -40,98 +47,39 @@ def _configs_to_api_response(configs: list[AgentConfig]) -> list[dict]:
 
 @router.get("/api/agents")
 async def get_agents(request: Request, user: dict = Depends(require_auth)):
-    """Get effective agent configs for the current user."""
-    db = get_db(request)
+    """Get the effective single-agent config for the current user.
+
+    Returned as a one-element list for frontend compatibility.
+    """
     user_id = get_user_id(request)
     effective = await _get_effective_configs(request, user_id)
-    # Also include disabled default agents that have overrides
-    override_rows = await db.get_user_agent_configs(user_id)
-    disabled_overrides = []
-    effective_ids = {c.id for c in effective}
-    for row in override_rows:
-        parsed = json.loads(row["config_json"])
-        if parsed.get("id") not in effective_ids:
-            c = AgentConfig(**parsed)
-            disabled_overrides.append(c)
-    all_configs = list(effective) + disabled_overrides
-    return _configs_to_api_response(all_configs)
+    return _configs_to_api_response(effective)
 
 
 @router.put("/api/agents/{agent_id}")
 async def update_agent(request: Request, agent_id: str, user: dict = Depends(require_auth)):
-    """Update an agent config override."""
+    """Update the single agent's config override."""
     db = get_db(request)
     user_id = get_user_id(request)
     body = await request.json()
 
-    # Build the full AgentConfig to validate
-    defaults_by_id = get_default_configs_by_id()
-    base = defaults_by_id.get(agent_id)
-    if base:
-        config_data = base.model_dump()
-    else:
-        # Check if it's a custom agent override
-        existing = await db.get_user_agent_config(user_id, agent_id)
-        if not existing:
-            raise HTTPException(status_code=404, detail="Agent not found")
-        config_data = json.loads(existing["config_json"])
+    if agent_id != SINGLE_AGENT_ID:
+        raise HTTPException(status_code=404, detail="Agent not found")
 
-    # Apply the update fields
-    for field in ("name", "system_prompt", "model", "tools", "enabled", "vectorstore_ids"):
+    config_data = get_default_configs_by_id()[SINGLE_AGENT_ID].model_dump()
+
+    # Apply the update fields. `enabled` is intentionally not editable: the
+    # platform runs one agent and it is always on (disabling it would leave no
+    # buildable graph).
+    for field in ("name", "system_prompt", "model", "tools", "vectorstore_ids"):
         if field in body:
             config_data[field] = body[field]
     config_data["id"] = agent_id
+    if not str(config_data.get("model") or "").strip():
+        raise HTTPException(status_code=400, detail="model must not be empty")
 
     # Validate
     config = AgentConfig(**config_data)
-
-    # Prevent disabling supervisor
-    if config.type == "supervisor" and not config.enabled:
-        raise HTTPException(status_code=400, detail="Cannot disable the supervisor agent")
-
-    await db.save_user_agent_config(user_id, agent_id, config.model_dump())
-    invalidate_graph_cache()
-
-    effective = await _get_effective_configs(request, user_id)
-    override_rows = await db.get_user_agent_configs(user_id)
-    effective_ids = {c.id for c in effective}
-    disabled = []
-    for row in override_rows:
-        parsed = json.loads(row["config_json"])
-        if parsed.get("id") not in effective_ids:
-            disabled.append(AgentConfig(**parsed))
-    return _configs_to_api_response(list(effective) + disabled)
-
-
-@router.post("/api/agents")
-async def create_agent(request: Request, user: dict = Depends(require_auth)):
-    """Create a new custom agent."""
-    db = get_db(request)
-    user_id = get_user_id(request)
-    body = await request.json()
-
-    agent_id = body.get("id", "")
-    if not agent_id or not _AGENT_ID_PATTERN.match(agent_id):
-        raise HTTPException(
-            status_code=400, detail="Agent ID must be alphanumeric with underscores, starting with a letter"
-        )
-
-    # Check uniqueness
-    defaults_by_id = get_default_configs_by_id()
-    if agent_id in defaults_by_id:
-        raise HTTPException(status_code=400, detail="Agent ID conflicts with a default agent")
-    existing = await db.get_user_agent_config(user_id, agent_id)
-    if existing:
-        raise HTTPException(status_code=400, detail="Agent ID already exists")
-
-    config = AgentConfig(
-        id=agent_id,
-        name=body.get("name", agent_id),
-        type="worker",
-        system_prompt=body.get("system_prompt", ""),
-        model=body.get("model", "claude-sonnet-4-20250514"),
-        tools=body.get("tools", []),
-    )
 
     await db.save_user_agent_config(user_id, agent_id, config.model_dump())
     invalidate_graph_cache()
@@ -140,40 +88,18 @@ async def create_agent(request: Request, user: dict = Depends(require_auth)):
     return _configs_to_api_response(effective)
 
 
+@router.post("/api/agents")
+async def create_agent(request: Request, user: dict = Depends(require_auth)):
+    """Creating agents is not supported: the platform runs a single fixed agent."""
+    raise HTTPException(
+        status_code=405, detail="The platform runs a single agent; creating new agents is not supported"
+    )
+
+
 @router.delete("/api/agents/{agent_id}")
 async def delete_agent(request: Request, agent_id: str, user: dict = Depends(require_auth)):
-    """Disable a default agent or delete a custom agent."""
-    db = get_db(request)
-    user_id = get_user_id(request)
-    defaults_by_id = get_default_configs_by_id()
-
-    # Cannot delete supervisor
-    default = defaults_by_id.get(agent_id)
-    if default and default.type == "supervisor":
-        raise HTTPException(status_code=400, detail="Cannot disable the supervisor agent")
-
-    if agent_id in defaults_by_id:
-        # Default agent: save override with enabled=false
-        config = defaults_by_id[agent_id].model_copy(update={"enabled": False})
-        await db.save_user_agent_config(user_id, agent_id, config.model_dump())
-    else:
-        # Custom agent: delete the row entirely
-        existing = await db.get_user_agent_config(user_id, agent_id)
-        if not existing:
-            raise HTTPException(status_code=404, detail="Agent not found")
-        await db.delete_user_agent_config(user_id, agent_id)
-
-    invalidate_graph_cache()
-
-    effective = await _get_effective_configs(request, user_id)
-    override_rows = await db.get_user_agent_configs(user_id)
-    effective_ids = {c.id for c in effective}
-    disabled = []
-    for row in override_rows:
-        parsed = json.loads(row["config_json"])
-        if parsed.get("id") not in effective_ids:
-            disabled.append(AgentConfig(**parsed))
-    return _configs_to_api_response(list(effective) + disabled)
+    """Deleting the agent is not supported: the platform runs a single fixed agent."""
+    raise HTTPException(status_code=405, detail="The platform runs a single agent; deleting the agent is not supported")
 
 
 @router.post("/api/agents/reset")

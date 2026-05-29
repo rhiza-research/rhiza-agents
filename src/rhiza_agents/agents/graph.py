@@ -4,7 +4,7 @@ import hashlib
 import json
 import logging
 from collections.abc import Sequence
-from typing import Annotated, NotRequired, TypedDict
+from typing import Annotated, TypedDict
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import (
@@ -16,8 +16,6 @@ from langchain.agents.middleware import (
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AnyMessage
 from langgraph.graph.message import add_messages
-from langgraph.managed.is_last_step import RemainingStepsManager
-from langgraph_supervisor import create_supervisor
 
 from ..db.models import AgentConfig
 
@@ -42,21 +40,9 @@ def _merge_files(current: dict, update: dict) -> dict:
 
 
 class AgentGraphState(TypedDict):
-    """State schema for worker agents (used by create_agent)."""
+    """State schema for the agent (used by create_agent)."""
 
     messages: Annotated[Sequence[AnyMessage], add_messages]
-    files: Annotated[dict, _merge_files]
-
-
-class SupervisorGraphState(TypedDict):
-    """State schema for the supervisor graph (used by create_supervisor).
-
-    create_supervisor internally uses create_react_agent which requires
-    remaining_steps. create_agent rejects it. So we need separate schemas.
-    """
-
-    messages: Annotated[Sequence[AnyMessage], add_messages]
-    remaining_steps: NotRequired[Annotated[int, RemainingStepsManager]]
     files: Annotated[dict, _merge_files]
 
 
@@ -87,19 +73,6 @@ def _build_worker_middleware(tools: list) -> list:
         )
 
     return middleware
-
-
-def _build_supervisor_middleware() -> list:
-    """Build the middleware stack for the supervisor agent."""
-    return [
-        SummarizationMiddleware(
-            model="anthropic:claude-haiku-3-20240307",
-            trigger=("tokens", 100_000),
-            keep=("messages", 10),
-        ),
-        ModelRetryMiddleware(max_retries=3),
-        ModelCallLimitMiddleware(run_limit=50),
-    ]
 
 
 def _config_hash(
@@ -184,212 +157,7 @@ async def _resolve_tools(
     return tools
 
 
-async def build_graph(
-    configs: list[AgentConfig],
-    mcp_tools: list,
-    checkpointer,
-    vectorstore_manager=None,
-    db=None,
-    mcp_tools_by_server: dict[str, list] | None = None,
-    mcp_server_names: dict[str, str] | None = None,
-    skill_tools: dict | None = None,
-    user_id: str | None = None,
-):
-    """Build a compiled LangGraph StateGraph from AgentConfig objects."""
-    supervisor_config = None
-    worker_configs = []
-
-    for c in configs:
-        if not c.enabled:
-            continue
-        if c.type == "supervisor":
-            supervisor_config = c
-        else:
-            worker_configs.append(c)
-
-    if not supervisor_config:
-        raise ValueError("No supervisor config found")
-
-    # Log the full graph configuration for debugging
-    all_mcp = mcp_tools_by_server or {}
-    logger.info(
-        "Building graph: agents=%s, mcp_servers=%s (%s), vectorstore_manager=%s",
-        [c.id for c in configs if c.enabled],
-        list(all_mcp.keys()),
-        {k: len(v) for k, v in all_mcp.items()},
-        vectorstore_manager is not None,
-    )
-
-    # Load the user's available credential names so each worker that has
-    # the sandbox tool can be told what's available. Names only — never
-    # values. The list is captured at graph build time; the graph cache
-    # already invalidates when configs change, and the credentials route
-    # invalidates when secrets are added/removed.
-    credential_names: list[str] = []
-    if user_id and db is not None:
-        try:
-            credential_names = await db.list_credential_names(user_id)
-        except Exception:  # pragma: no cover - DB errors logged elsewhere
-            logger.warning("Failed to load credential names for user %s", user_id, exc_info=True)
-
-    worker_agents = []
-    agent_tool_descriptions = []
-    for wc in worker_configs:
-        tools = await _resolve_tools(wc, mcp_tools, vectorstore_manager, db, mcp_tools_by_server, skill_tools)
-        middleware = _build_worker_middleware(tools)
-        model = ChatAnthropic(
-            model=wc.model,
-            max_tokens=16000,
-            thinking={"type": "enabled", "budget_tokens": 10000},
-        )
-
-        # Augment the worker's system prompt with available credential
-        # names if it has the sandbox tool. The LLM uses these names to
-        # populate the `credentials` argument of execute_python_code.
-        worker_prompt = wc.system_prompt
-        has_sandbox_tool = any(getattr(t, "name", None) == "execute_python_code" for t in tools)
-        if has_sandbox_tool and credential_names:
-            worker_prompt += (
-                "\n\nAvailable credential names (values are never visible to you):\n"
-                + "\n".join(f"  - {n}" for n in credential_names)
-                + "\n\nWhen calling execute_python_code, reference these names in the"
-                " `credentials` argument to make values available to the script. Never"
-                " print, log, echo, or otherwise expose credential values."
-            )
-
-        worker = create_agent(
-            model,
-            tools,
-            system_prompt=worker_prompt,
-            middleware=middleware,
-            name=wc.id,
-            state_schema=AgentGraphState,
-        )
-        worker_agents.append(worker)
-
-        tool_names = [getattr(t, "name", "?") for t in tools]
-        logger.info(
-            "Created worker: %s model=%s tools=[%s] vectorstores=%s middleware=%d",
-            wc.id,
-            wc.model,
-            ", ".join(tool_names),
-            wc.vectorstore_ids or [],
-            len(middleware),
-        )
-        if tool_names:
-            agent_tool_descriptions.append(f"- {wc.id} ({wc.name}): tools=[{', '.join(tool_names)}]")
-
-    # Build supervisor prompt with dynamic tool info so it knows which agent has what
-    supervisor_prompt = supervisor_config.system_prompt
-    if agent_tool_descriptions:
-        supervisor_prompt += "\n\nCurrent agent tool assignments:\n" + "\n".join(agent_tool_descriptions)
-
-    # Include MCP server names and their tools so supervisor can answer questions about them
-    if mcp_tools_by_server:
-        names = mcp_server_names or {}
-        mcp_info = []
-        for server_id, tools in mcp_tools_by_server.items():
-            display = names.get(server_id, server_id)
-            tool_names = [getattr(t, "name", "?") for t in tools]
-            mcp_info.append(f'- "{display}": tools=[{", ".join(tool_names)}]')
-        supervisor_prompt += "\n\nConnected MCP servers:\n" + "\n".join(mcp_info)
-        supervisor_prompt += (
-            "\n\nIf a user asks about MCP servers or their tools,"
-            " answer directly from this information. Do not delegate."
-        )
-
-    # Include available skills info so supervisor knows about skill capabilities
-    if skill_tools:
-        skill_info = []
-        for skill_id, tool in skill_tools.items():
-            desc = tool.description.removeprefix("Skill: ") if tool.description else ""
-            # Find which agents have this skill assigned
-            assigned_agents = [wc.name for wc in worker_configs if f"skill:{skill_id}" in wc.tools]
-            if assigned_agents:
-                agents_str = ", ".join(assigned_agents)
-                skill_info.append(f"- {tool.name} (assigned to {agents_str}): {desc}")
-        if skill_info:
-            supervisor_prompt += "\n\nAvailable skills:\n" + "\n".join(skill_info)
-
-    supervisor = create_supervisor(
-        model=ChatAnthropic(
-            model=supervisor_config.model,
-            max_tokens=16000,
-            thinking={"type": "enabled", "budget_tokens": 10000},
-        ),
-        agents=worker_agents,
-        prompt=supervisor_prompt,
-        state_schema=SupervisorGraphState,
-        output_mode="full_history",
-        add_handoff_back_messages=True,
-    )
-
-    compiled = supervisor.compile(checkpointer=checkpointer)
-    logger.info("Compiled supervisor graph with %d workers", len(worker_agents))
-    return compiled
-
-
-async def get_or_build_graph(
-    configs: list[AgentConfig],
-    mcp_tools: list,
-    checkpointer,
-    vectorstore_manager=None,
-    db=None,
-    mcp_tools_by_server: dict[str, list] | None = None,
-    mcp_server_names: dict[str, str] | None = None,
-    skill_tools: dict | None = None,
-    user_id: str | None = None,
-):
-    """Get a cached graph or build a new one.
-
-    The cache key includes the user_id and the user's current set of
-    credential names so that adding/removing a credential transparently
-    rebuilds the affected user's graph (the new credential name needs to
-    appear in the worker system prompt).
-    """
-    credential_names: list[str] = []
-    if user_id and db is not None:
-        try:
-            credential_names = await db.list_credential_names(user_id)
-        except Exception:  # pragma: no cover
-            credential_names = []
-
-    h = _config_hash(
-        configs,
-        list((mcp_tools_by_server or {}).keys()),
-        list((skill_tools or {}).keys()),
-        user_id=user_id,
-        credential_names=credential_names,
-    )
-    if h not in _graph_cache:
-        _graph_cache[h] = await build_graph(
-            configs,
-            mcp_tools,
-            checkpointer,
-            vectorstore_manager,
-            db,
-            mcp_tools_by_server,
-            mcp_server_names,
-            skill_tools,
-            user_id=user_id,
-        )
-    return _graph_cache[h]
-
-
-def invalidate_graph_cache(config_hash: str | None = None):
-    """Invalidate cached graph. If config_hash is None, clear all.
-
-    Pops both the supervisor entry and the matching single-agent entry
-    (``single:`` prefix) so a config change evicts the Slack graph too.
-    """
-    if config_hash is None:
-        _graph_cache.clear()
-    else:
-        _graph_cache.pop(config_hash, None)
-        _graph_cache.pop("single:" + config_hash, None)
-
-
-async def build_single_agent_graph(
+async def build_agent_graph(
     configs: list[AgentConfig],
     mcp_tools: list,
     checkpointer,
@@ -398,17 +166,17 @@ async def build_single_agent_graph(
     mcp_tools_by_server: dict[str, list] | None = None,
     skill_tools: dict | None = None,
     user_id: str | None = None,
+    skills_only: bool = False,
 ):
-    """Build a compiled single-agent graph (used by the Slack connector).
+    """Build a compiled single-agent graph from AgentConfig objects.
 
-    One agent holds the union of every enabled worker's resolved tools,
-    deduplicated by tool name, minus ``execute_python_code``. The agent is
-    skills-only: it keeps ``run_file`` (skill-script execution) but never the
-    ad-hoc Python tool. HITL interrupts on ``run_file`` still fire — the Slack
-    consumer auto-approves them. The web UI's supervisor graph is unaffected.
-
-    Skills-only is the structural guard that makes auto-approve safe: the two
-    move together. Do not reintroduce ``execute_python_code`` on this path.
+    One agent holds the union of every enabled config's resolved tools,
+    deduplicated by tool name. When ``skills_only=True`` the ad-hoc
+    ``execute_python_code`` tool is dropped while ``run_file`` (skill-script
+    execution) is kept — this is the Slack path, where HITL interrupts on
+    ``run_file`` are auto-approved and curated skills are the trust boundary.
+    When ``skills_only=False`` (the web path) ``execute_python_code`` is kept
+    and its HITL approval gate still fires.
     """
     from .registry import get_single_agent_prompt
 
@@ -417,25 +185,27 @@ async def build_single_agent_graph(
     for c in configs:
         if not c.enabled:
             continue
-        if c.type == "supervisor":
+        if model_name is None:
             model_name = c.model
-            continue
         tools = await _resolve_tools(c, mcp_tools, vectorstore_manager, db, mcp_tools_by_server, skill_tools)
         for t in tools:
             name = getattr(t, "name", None)
-            if name == "execute_python_code":
+            if skills_only and name == "execute_python_code":
                 continue
             if name and name not in union:
                 union[name] = t
 
     tool_list = list(union.values())
     if model_name is None:
-        model_name = next((c.model for c in configs if c.enabled and c.type != "supervisor"), None)
+        raise ValueError("No enabled agent configuration; cannot build a graph")
+    if not tool_list:
+        logger.warning("Building agent graph with no tools (MCP unloaded or sandbox unavailable)")
 
     # Tell the agent which credential names exist (values never shown) when it
-    # has run_file — the web workers get the same hint for their sandbox tool.
+    # has a tool that consumes them (run_file or execute_python_code).
     prompt = get_single_agent_prompt()
-    if user_id and db is not None and any(getattr(t, "name", None) == "run_file" for t in tool_list):
+    has_credential_tool = any(getattr(t, "name", None) in ("run_file", "execute_python_code") for t in tool_list)
+    if user_id and db is not None and has_credential_tool:
         try:
             credential_names = await db.list_credential_names(user_id)
         except Exception:  # pragma: no cover - DB errors logged elsewhere
@@ -444,8 +214,8 @@ async def build_single_agent_graph(
             prompt += (
                 "\n\nAvailable credential names (values are never visible to you):\n"
                 + "\n".join(f"  - {n}" for n in credential_names)
-                + "\n\nWhen running a skill that needs a secret, reference these names in"
-                " run_file's `credentials` argument. Never print, log, or echo the values."
+                + "\n\nWhen running a skill or script that needs a secret, reference these"
+                " names in the `credentials` argument. Never print, log, or echo the values."
             )
 
     model = ChatAnthropic(
@@ -463,14 +233,15 @@ async def build_single_agent_graph(
         checkpointer=checkpointer,
     )
     logger.info(
-        "Compiled single-agent graph: %d tools (skills-only) [%s]",
+        "Compiled agent graph: %d tools (skills_only=%s) [%s]",
         len(tool_list),
+        skills_only,
         ", ".join(sorted(union.keys())),
     )
     return agent
 
 
-async def get_or_build_single_agent_graph(
+async def get_or_build_agent_graph(
     configs: list[AgentConfig],
     mcp_tools: list,
     checkpointer,
@@ -479,11 +250,15 @@ async def get_or_build_single_agent_graph(
     mcp_tools_by_server: dict[str, list] | None = None,
     skill_tools: dict | None = None,
     user_id: str | None = None,
+    skills_only: bool = False,
 ):
-    """Cached variant of ``build_single_agent_graph``.
+    """Get a cached graph or build a new one.
 
-    Keyed separately from the supervisor graph cache (``single:`` prefix) so a
-    user's web (supervisor) and Slack (single-agent) graphs never collide.
+    The cache key includes ``skills_only`` so the web (``False``) and Slack
+    (``True``) graphs for the same user never collide. It also includes the
+    user_id and the user's current set of credential names so that
+    adding/removing a credential transparently rebuilds the affected graph
+    (the new credential name needs to appear in the system prompt).
     """
     credential_names: list[str] = []
     if user_id and db is not None:
@@ -492,7 +267,7 @@ async def get_or_build_single_agent_graph(
         except Exception:  # pragma: no cover
             credential_names = []
 
-    h = "single:" + _config_hash(
+    h = f"{skills_only}:" + _config_hash(
         configs,
         list((mcp_tools_by_server or {}).keys()),
         list((skill_tools or {}).keys()),
@@ -500,7 +275,7 @@ async def get_or_build_single_agent_graph(
         credential_names=credential_names,
     )
     if h not in _graph_cache:
-        _graph_cache[h] = await build_single_agent_graph(
+        _graph_cache[h] = await build_agent_graph(
             configs,
             mcp_tools,
             checkpointer,
@@ -509,5 +284,20 @@ async def get_or_build_single_agent_graph(
             mcp_tools_by_server,
             skill_tools,
             user_id=user_id,
+            skills_only=skills_only,
         )
     return _graph_cache[h]
+
+
+def invalidate_graph_cache(config_hash: str | None = None):
+    """Invalidate cached graph. If config_hash is None, clear all.
+
+    The build path is keyed by ``skills_only``, so a bare config hash is
+    stored under both the ``True:`` (Slack) and ``False:`` (web) prefixes.
+    Pop both so a config change evicts both graphs for the user.
+    """
+    if config_hash is None:
+        _graph_cache.clear()
+    else:
+        _graph_cache.pop(f"True:{config_hash}", None)
+        _graph_cache.pop(f"False:{config_hash}", None)

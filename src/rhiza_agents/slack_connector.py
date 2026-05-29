@@ -26,7 +26,7 @@ from datetime import UTC, datetime
 from langchain_core.messages import HumanMessage, ToolMessage
 from langgraph.types import Command
 
-from .agents.graph import get_or_build_single_agent_graph
+from .agents.graph import get_or_build_agent_graph
 from .agents.tools.files import fetch_file_content
 from .config import Config
 from .db.sqlite import Database
@@ -208,7 +208,7 @@ class SlackConnector:
         mcp_by_server, _ = await mcp_tools_for_user(self.db, self.system_mcp_tools_by_server, user_id)
         skills = await skill_tools_for_user(self.db, user_id)
         configs = await effective_agent_configs(self.db, user_id)
-        return await get_or_build_single_agent_graph(
+        return await get_or_build_agent_graph(
             configs,
             self.system_mcp_tools,
             self.checkpointer,
@@ -217,6 +217,7 @@ class SlackConnector:
             mcp_by_server,
             skills,
             user_id=user_id,
+            skills_only=True,
         )
 
     async def _files_dict(self, graph, run_config) -> dict:
