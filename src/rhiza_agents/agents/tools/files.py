@@ -324,12 +324,12 @@ async def fetch_file_content(
     writes them via the privileged path (toolbox-api as root) and
     proceeds as if the file had been there.
     """
-    from .sandbox import _get_or_create_sandbox, write_workspace_file
+    from .sandbox import _assert_realpath_contained, _get_or_create_sandbox, write_workspace_file
 
-    # workspace_path rejects traversal (paths escaping /workspace or
-    # /data) with ValueError. Map it to FileNotFoundError so the route
-    # returns 404 and no stat/read/migration-write runs as root against a
-    # path outside the permitted roots.
+    # workspace_path rejects lexical traversal (paths escaping /workspace
+    # or /data via ``..``) with ValueError. Map it to FileNotFoundError so
+    # the route returns 404 and no stat/read/migration-write runs as root
+    # against a path outside the permitted roots.
     try:
         abs_path = workspace_path(_normalize_logical_path(logical_path))
     except ValueError as e:
@@ -339,6 +339,13 @@ async def fetch_file_content(
         sandbox = _get_or_create_sandbox(thread_id)
 
         def _stat_and_read():
+            # Symlink-escape guard: resolve the real path in-sandbox and
+            # confirm it stays under /workspace or /data before any stat
+            # or read. The lexical workspace_path check can't see a symlink
+            # the agent planted in the sandbox FS; this can. An escape
+            # raises ValueError, mapped to FileNotFoundError below so the
+            # route returns 404 and no root-level read fires.
+            _assert_realpath_contained(sandbox, abs_path, resolve_parent=False)
             stat_cmd = f"stat -c '%s|%Y' {shlex.quote(abs_path)}"
             stat_resp = sandbox.process.exec(stat_cmd)
             if stat_resp.exit_code != 0:
@@ -357,7 +364,14 @@ async def fetch_file_content(
             content = read_workspace_file(sandbox, abs_path)
             return content, datetime.fromtimestamp(mtime, tz=UTC).isoformat()
 
-        result = _stat_and_read()
+        # A symlink-escape (ValueError from the realpath guard inside
+        # _stat_and_read) is mapped to FileNotFoundError so the route
+        # returns 404 and no escaped path is read. FileTooLargeError is
+        # let through so the route can map it to 413.
+        try:
+            result = _stat_and_read()
+        except ValueError as e:
+            raise FileNotFoundError(logical_path) from e
         if result is None and legacy_fallback is not None:
             # Don't migrate an oversized fallback onto the volume just to
             # reject it on re-stat — reject up front.
@@ -368,7 +382,10 @@ async def fetch_file_content(
                 logger.info("Lazy-migrated legacy file %s to workspace volume", logical_path)
             except Exception as e:
                 raise FileNotFoundError(logical_path) from e
-            result = _stat_and_read()
+            try:
+                result = _stat_and_read()
+            except ValueError as e:
+                raise FileNotFoundError(logical_path) from e
 
         if result is None:
             raise FileNotFoundError(logical_path)
