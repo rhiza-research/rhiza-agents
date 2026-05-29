@@ -79,6 +79,39 @@ def test_dot_segments_within_data_allowed():
 
 
 # ---------------------------------------------------------------------------
+# Cross-volume aliasing: a /data input must stay under /data, a workspace
+# input must stay under /workspace. A path that lexically normalizes into
+# the other root must be rejected, not silently re-rooted, so the
+# state["files"] key namespace stays consistent.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "logical",
+    [
+        "/data/../workspace/x",
+        "/data/../../workspace/x",
+        "/data/sub/../../workspace/y",
+    ],
+)
+def test_data_input_resolving_into_workspace_rejected(logical):
+    with pytest.raises(ValueError):
+        workspace_path(logical)
+
+
+@pytest.mark.parametrize(
+    "logical",
+    [
+        "/../data/x",
+        "/sub/../../data/y",
+    ],
+)
+def test_workspace_input_resolving_into_data_rejected(logical):
+    with pytest.raises(ValueError):
+        workspace_path(logical)
+
+
+# ---------------------------------------------------------------------------
 # Symlink-escape guard (in-sandbox realpath check).
 #
 # workspace_path's normpath is lexical; it cannot see a symlink the agent

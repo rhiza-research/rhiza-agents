@@ -128,26 +128,40 @@ def workspace_path(logical_path: str) -> str:
     ``ValueError`` so the caller can map it to a 4xx without performing
     any filesystem access. This is the single choke point feeding both
     the stat/read and the migration write.
+
+    Cross-volume aliasing is also rejected: a ``/data``-prefixed logical
+    input must resolve under SANDBOX_DATA, and a non-``/data`` input must
+    resolve under SANDBOX_WORKSPACE. A path like ``/data/../workspace/x``
+    would lexically normalize into /workspace, silently moving a
+    "/data"-keyed file into the workspace namespace and breaking the
+    state["files"] key invariant. The resolved root must match the root
+    implied by the logical prefix; a mismatch raises ``ValueError``.
     """
     if logical_path == SANDBOX_DATA or logical_path.startswith(SANDBOX_DATA + "/"):
         candidate = logical_path
+        expects_data = True
     else:
         rel = logical_path.lstrip("/")
         candidate = f"{SANDBOX_WORKSPACE}/{rel}"
+        expects_data = False
 
     # Collapse ``..``/``.`` and redundant separators, then confirm the
     # result still lives under one of the two permitted roots. normpath
-    # is enough because there are no symlinks in the logical namespace;
-    # the symlink concern is moot since these roots are mountpoint-s3.
+    # is enough for the lexical traversal check here; the symlink-escape
+    # concern is handled separately by the in-sandbox realpath guard in
+    # the read/write helpers.
     resolved = os.path.normpath(candidate)
-    allowed = (
-        resolved == SANDBOX_WORKSPACE
-        or resolved.startswith(SANDBOX_WORKSPACE + "/")
-        or resolved == SANDBOX_DATA
-        or resolved.startswith(SANDBOX_DATA + "/")
-    )
-    if not allowed:
+    under_data = resolved == SANDBOX_DATA or resolved.startswith(SANDBOX_DATA + "/")
+    under_workspace = resolved == SANDBOX_WORKSPACE or resolved.startswith(SANDBOX_WORKSPACE + "/")
+    if not (under_data or under_workspace):
         raise ValueError(f"path escapes workspace/data roots: {logical_path!r}")
+    # Cross-volume aliasing: the resolved root must match the root the
+    # logical prefix implied. A /data input that normalizes into
+    # /workspace (or vice versa) is rejected, not silently re-rooted.
+    if expects_data and not under_data:
+        raise ValueError(f"/data path resolves outside the data root: {logical_path!r}")
+    if not expects_data and not under_workspace:
+        raise ValueError(f"workspace path resolves outside the workspace root: {logical_path!r}")
     return resolved
 
 
