@@ -400,8 +400,10 @@ def _inotify_daemon_alive(sandbox) -> bool:
 
     Uses ``pgrep`` via the daytona-wrapped exec so the check sees the
     same process table the daemon was launched into. ``pgrep`` exits 0
-    when at least one match is found, 1 when none match. Any other
-    failure (pgrep missing, exec error) is treated as "unknown" and
+    when at least one match is found, 1 when none match. procps (which
+    provides pgrep) is installed in the sandbox image so the probe is a
+    real signal rather than a no-op exit 127. Any other outcome (probe
+    raised, or an unexpected exit code) is treated as "unknown" and
     reported as alive so we don't churn-restart on a transient probe
     failure — best-effort, never raises.
     """
@@ -410,10 +412,15 @@ def _inotify_daemon_alive(sandbox) -> bool:
     except Exception:
         logger.warning("inotify liveness probe failed; assuming daemon alive", exc_info=True)
         return True
-    # exit 1 = no matching process; exit 0 = found. Treat any other
-    # exit code (e.g. pgrep absent → 127) as "can't tell, leave it".
+    # exit 0 = at least one inotifywait process found → alive.
+    # exit 1 = no matching process → dead, restart.
+    # any other code (e.g. pgrep somehow absent → 127) = can't tell;
+    # log at debug and treat as alive so we don't thrash on restarts.
+    if response.exit_code == 0:
+        return True
     if response.exit_code == 1:
         return False
+    logger.debug("inotify liveness probe returned unexpected exit %s; assuming alive", response.exit_code)
     return True
 
 
@@ -448,26 +455,34 @@ def drain_inotify_journal(sandbox, default_source: str = "agent") -> dict[str, d
     drain ran) are silently dropped — stat writes them to stderr (which
     we discard) and continues with the rest.
     """
-    # The daemon is only started on first sandbox create. A reused
-    # sandbox may have lost it (process killed, sandbox restarted).
-    # Probe and restart before draining so tracking resumes; the events
-    # that fired while it was dead are simply missed, which is acceptable
-    # for "did this tool call touch a file." Best-effort — never raises.
-    if not _inotify_daemon_alive(sandbox):
-        logger.warning("inotify daemon not running; restarting before drain")
-        try:
-            start_inotify_daemon(sandbox)
-        except Exception:
-            logger.warning("Failed to restart inotify daemon before drain", exc_info=True)
-
     journal = shlex.quote(INOTIFY_JOURNAL_PATH)
-    # cat-then-truncate. Works correctly because the daemon writes
-    # with O_APPEND, so post-truncate writes seek to the new EOF (0)
-    # rather than the daemon's stale FD offset.
+    # Drain the existing journal FIRST (cat then truncate-in-place),
+    # before probing/restarting the daemon. A dead daemon may have left
+    # events in the journal from before it died; restarting first would
+    # run ``: > journal`` (in start_inotify_daemon) and wipe those events
+    # before we read them. Draining first captures them, then the restart
+    # below resumes tracking.
+    #
+    # cat-then-truncate works correctly because the daemon writes with
+    # O_APPEND, so post-truncate writes seek to the new EOF (0) rather
+    # than the daemon's stale FD offset.
     drain_cmd = f"if [ -f {journal} ]; then cat {journal} 2>/dev/null; : > {journal}; fi"
     response = exec_as_daytona(sandbox, drain_cmd)
     if response.exit_code != 0:
         return {}
+
+    # The daemon is only started on first sandbox create. A reused
+    # sandbox may have lost it (process killed, sandbox restarted).
+    # Probe and restart now that the pre-death journal has been drained;
+    # the events that fired while it was dead are simply missed, which is
+    # acceptable for "did this tool call touch a file." Best-effort —
+    # never raises.
+    if not _inotify_daemon_alive(sandbox):
+        logger.warning("inotify daemon not running; restarting after drain")
+        try:
+            start_inotify_daemon(sandbox)
+        except Exception:
+            logger.warning("Failed to restart inotify daemon after drain", exc_info=True)
 
     # Aggregate events per path. The daemon format is
     # ``<event>\t<path>\t<timestamp>``; the path field can itself contain
@@ -812,6 +827,8 @@ def _build_sandbox_image():
     - git installed (uv/pip can fetch VCS dependencies)
     - inotify-tools installed (the inotifywait binary the per-sandbox
       session-tracking daemon runs)
+    - procps installed (pgrep, used by the inotify liveness probe to
+      decide whether the daemon needs restarting)
     - uv installed via pip
     - daytona user created (the non-root identity all agent tool calls
       execute as via su -l wrapping)
@@ -828,7 +845,11 @@ def _build_sandbox_image():
     return (
         Image.debian_slim("3.12")
         .run_commands(
-            "apt-get update && apt-get install -y --no-install-recommends git inotify-tools "
+            # procps provides pgrep, which the inotify liveness probe
+            # (_inotify_daemon_alive) relies on. Without it the probe
+            # exits 127 and the daemon is reported alive forever, so a
+            # dead daemon would never be restarted.
+            "apt-get update && apt-get install -y --no-install-recommends git inotify-tools procps "
             "&& rm -rf /var/lib/apt/lists/*",
             # Non-root user the agent's tool calls execute as. -m creates
             # /home/daytona; -s sets the login shell; -r marks it a

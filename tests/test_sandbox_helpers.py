@@ -138,13 +138,21 @@ def _drain_with_responses(*responses: tuple[int, str], **kwargs):
     """Invoke drain_inotify_journal with ``exec_as_daytona`` returning the
     given (exit_code, result) responses in order.
 
-    The first exec_as_daytona call drain makes is the liveness probe
-    (``pgrep -x inotifywait``); we prepend a success response for it so
-    the daemon is reported alive and no restart fires. The supplied
-    responses then map to the drain (cat + truncate) and the stat batch.
+    drain_inotify_journal now drains the journal FIRST, then runs the
+    liveness probe (``pgrep -x inotifywait``), then the stat batch. The
+    first supplied response maps to the drain (cat + truncate); we splice
+    an alive-probe success response in after it so the daemon is reported
+    alive and no restart fires; the remaining supplied responses map to
+    the stat batch. Tests that need the dead-probe / restart branch use
+    ``_drain_with_dead_probe`` instead.
     """
+    supplied = [SimpleNamespace(exit_code=ec, result=res) for ec, res in responses]
     probe = SimpleNamespace(exit_code=0, result="")
-    fake_responses = [probe] + [SimpleNamespace(exit_code=ec, result=res) for ec, res in responses]
+    if supplied:
+        # drain response, then probe (alive), then any stat response.
+        fake_responses = [supplied[0], probe, *supplied[1:]]
+    else:
+        fake_responses = [probe]
     with mock.patch(
         "rhiza_agents.agents.tools.sandbox.exec_as_daytona",
         side_effect=fake_responses,
@@ -273,6 +281,54 @@ def test_drain_handles_tab_in_filename():
     # Logical key strips the /workspace prefix but keeps the embedded tab.
     assert "/odd\tname.py" in result
     assert result["/odd\tname.py"]["size"] == 7
+
+
+def test_drain_restarts_daemon_when_probe_reports_dead():
+    """When the liveness probe reports the daemon dead, the drain must
+    restart it AND must drain the pre-death journal first. The reorder
+    guarantees events recorded before the daemon died are captured
+    before ``start_inotify_daemon`` truncates the journal on restart.
+
+    Exec response order under the reordered drain: (1) drain cat+truncate
+    returns the populated journal, (2) liveness probe reports dead
+    (exit 1), (3) stat batch. ``start_inotify_daemon`` is mocked so its
+    own truncate doesn't run; we assert it was called and that the
+    already-populated journal still produced its entry.
+    """
+    journal = "CREATE\t/workspace/pre_death.py\t1700000000\n"
+    stat_out = "/workspace/pre_death.py|128|1700000000"
+    call_order: list[str] = []
+
+    drain_resp = SimpleNamespace(exit_code=0, result=journal)
+    probe_dead = SimpleNamespace(exit_code=1, result="")
+    stat_resp = SimpleNamespace(exit_code=0, result=stat_out)
+    fake_responses = iter([drain_resp, probe_dead, stat_resp])
+
+    def _fake_exec(_sandbox, _cmd, **_kwargs):
+        call_order.append("exec")
+        return next(fake_responses)
+
+    def _fake_start(_sandbox):
+        call_order.append("start")
+
+    with (
+        mock.patch("rhiza_agents.agents.tools.sandbox.exec_as_daytona", side_effect=_fake_exec),
+        mock.patch("rhiza_agents.agents.tools.sandbox.start_inotify_daemon", side_effect=_fake_start) as start,
+    ):
+        result = drain_inotify_journal(sandbox=object(), default_source="agent")
+
+    # The daemon was restarted because the probe reported it dead.
+    start.assert_called_once()
+    # The pre-death event survived: the drain (cat) ran and was parsed
+    # before the restart would have truncated the journal.
+    assert "/pre_death.py" in result
+    assert result["/pre_death.py"]["size"] == 128
+    # Ordering: the first exec (the drain cat) ran before start_inotify_daemon.
+    assert call_order[0] == "exec"
+    assert call_order.index("start") > 0
+    # start fired before the stat exec (it sits between probe and stat).
+    # exec calls: [drain, probe], then start, then [stat].
+    assert call_order == ["exec", "exec", "start", "exec"]
 
 
 # ---------------------------------------------------------------------------
