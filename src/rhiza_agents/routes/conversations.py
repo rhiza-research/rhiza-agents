@@ -11,7 +11,7 @@ from fastapi.responses import Response
 
 from ..agents.registry import get_default_configs, merge_configs
 from ..agents.supervisor import get_agent_graph
-from ..agents.tools.files import fetch_file_content, list_thread_files
+from ..agents.tools.files import FileTooLargeError, fetch_file_content, list_thread_files
 from ..agents.tools.sandbox import cleanup_sandbox, cleanup_thread_workspace_async
 from ..db.models import AgentConfig
 from ..deps import (
@@ -366,6 +366,8 @@ async def get_conversation_file(
         content_bytes, modified_at = await fetch_file_content(conversation_id, lookup_path, legacy_fallback)
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail="File not found") from e
+    except FileTooLargeError as e:
+        raise HTTPException(status_code=413, detail=f"File too large to view ({e.size} bytes)") from e
     except Exception as e:
         logger.warning("Failed to fetch file %s for conversation %s", lookup_path, conversation_id, exc_info=True)
         raise HTTPException(status_code=502, detail=f"Failed to fetch file: {e}") from e
@@ -413,6 +415,8 @@ async def download_conversation_file(
         content_bytes, _ = await fetch_file_content(conversation_id, lookup_path)
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail="File not found") from e
+    except FileTooLargeError as e:
+        raise HTTPException(status_code=413, detail=f"File too large to download ({e.size} bytes)") from e
     except Exception as e:
         logger.warning("Failed to fetch file %s for conversation %s", lookup_path, conversation_id, exc_info=True)
         raise HTTPException(status_code=502, detail=f"Failed to fetch file: {e}") from e
