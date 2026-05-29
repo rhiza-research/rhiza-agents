@@ -41,6 +41,12 @@ export class FilesWidget extends Widget {
     private _sessionBtn!: HTMLButtonElement;
     private _workspaceBtn!: HTMLButtonElement;
     private _scope: FileScope = 'session';
+    // Monotonic token identifying the most recent loadFiles call. A slow
+    // response (e.g. the workspace listing that lazy-starts a sandbox) must
+    // not overwrite the list after the user toggled back to session and a
+    // newer load already ran. Each load captures the token at issue time
+    // and discards its result if a newer load has since started.
+    private _loadToken = 0;
 
     constructor(options: FilesWidgetOptions) {
         super();
@@ -91,27 +97,35 @@ export class FilesWidget extends Widget {
     }
 
     async loadFiles(): Promise<void> {
+        const token = ++this._loadToken;
+        const requestedScope = this._scope;
         const convId = this._getConversationId();
         if (!convId) {
             this._filesList.innerHTML = '<div class="files-empty">No conversation selected</div>';
             return;
         }
 
-        const url = `/api/conversations/${convId}/files?scope=${this._scope}`;
+        // Drop this response if a newer load has started since it was
+        // issued (the user toggled scope while this request was in flight).
+        const isStale = (): boolean => token !== this._loadToken;
+
+        const url = `/api/conversations/${convId}/files?scope=${requestedScope}`;
         try {
-            if (this._scope === 'workspace') {
+            if (requestedScope === 'workspace') {
                 this._filesList.innerHTML = '<div class="files-empty">Loading workspace…</div>';
             }
             const response = await fetch(url);
+            if (isStale()) return;
             if (!response.ok) {
                 this._filesList.innerHTML = `<div class="files-empty">Failed to load files (${response.status})</div>`;
                 return;
             }
 
             const files: any[] = await response.json();
+            if (isStale()) return;
             // Streamed-file overlay only applies in session view (the
             // workspace view comes from the live filesystem already).
-            if (this._scope === 'session') {
+            if (requestedScope === 'session') {
                 const apiPaths = new Set(files.map((f: any) => f.path));
                 for (const [path, content] of Object.entries(this._streamedFiles)) {
                     if (!apiPaths.has(path)) {
@@ -120,7 +134,7 @@ export class FilesWidget extends Widget {
                 }
             }
             if (files.length === 0) {
-                const empty = this._scope === 'workspace'
+                const empty = requestedScope === 'workspace'
                     ? 'Workspace is empty'
                     : 'No files yet';
                 this._filesList.innerHTML = `<div class="files-empty">${empty}</div>`;
@@ -136,6 +150,7 @@ export class FilesWidget extends Widget {
             }
         } catch (e) {
             console.error('Failed to load files:', e);
+            if (isStale()) return;
             this._filesList.innerHTML = '<div class="files-empty">Error loading files</div>';
         }
     }
