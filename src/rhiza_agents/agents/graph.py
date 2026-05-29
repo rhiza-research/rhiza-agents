@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 _graph_cache: dict = {}
 
 # Tools that require human approval before execution
-_HITL_TOOLS = {"execute_python_code", "run_file"}
+_HITL_TOOLS = {"run_file"}
 
 
 def _merge_files(current: dict, update: dict) -> dict:
@@ -129,10 +129,9 @@ async def _resolve_tools(
                 logger.info("Skill %s not loaded, skipping", skill_id)
         elif tool_id == "sandbox:daytona":
             from .tools.files import make_run_file
-            from .tools.sandbox import is_sandbox_available, make_execute_python_code
+            from .tools.sandbox import is_sandbox_available
 
             if is_sandbox_available():
-                tools.append(make_execute_python_code(db=db))
                 tools.append(make_run_file(db=db))
             # If no API key, silently skip sandbox tools -- agent works without them
         else:
@@ -166,17 +165,13 @@ async def build_agent_graph(
     mcp_tools_by_server: dict[str, list] | None = None,
     skill_tools: dict | None = None,
     user_id: str | None = None,
-    skills_only: bool = False,
 ):
     """Build a compiled single-agent graph from AgentConfig objects.
 
     One agent holds the union of every enabled config's resolved tools,
-    deduplicated by tool name. When ``skills_only=True`` the ad-hoc
-    ``execute_python_code`` tool is dropped while ``run_file`` (skill-script
-    execution) is kept — this is the Slack path, where HITL interrupts on
-    ``run_file`` are auto-approved and curated skills are the trust boundary.
-    When ``skills_only=False`` (the web path) ``execute_python_code`` is kept
-    and its HITL approval gate still fires.
+    deduplicated by tool name. The only execution tool is ``run_file``
+    (skill-script execution); its HITL approval gate fires before any
+    script runs. Curated, installed skills are the trust boundary.
     """
     from .registry import get_single_agent_prompt
 
@@ -190,8 +185,6 @@ async def build_agent_graph(
         tools = await _resolve_tools(c, mcp_tools, vectorstore_manager, db, mcp_tools_by_server, skill_tools)
         for t in tools:
             name = getattr(t, "name", None)
-            if skills_only and name == "execute_python_code":
-                continue
             if name and name not in union:
                 union[name] = t
 
@@ -202,9 +195,9 @@ async def build_agent_graph(
         logger.warning("Building agent graph with no tools (MCP unloaded or sandbox unavailable)")
 
     # Tell the agent which credential names exist (values never shown) when it
-    # has a tool that consumes them (run_file or execute_python_code).
+    # has a tool that consumes them (run_file).
     prompt = get_single_agent_prompt()
-    has_credential_tool = any(getattr(t, "name", None) in ("run_file", "execute_python_code") for t in tool_list)
+    has_credential_tool = any(getattr(t, "name", None) == "run_file" for t in tool_list)
     if user_id and db is not None and has_credential_tool:
         try:
             credential_names = await db.list_credential_names(user_id)
@@ -233,9 +226,8 @@ async def build_agent_graph(
         checkpointer=checkpointer,
     )
     logger.info(
-        "Compiled agent graph: %d tools (skills_only=%s) [%s]",
+        "Compiled agent graph: %d tools [%s]",
         len(tool_list),
-        skills_only,
         ", ".join(sorted(union.keys())),
     )
     return agent
@@ -250,15 +242,13 @@ async def get_or_build_agent_graph(
     mcp_tools_by_server: dict[str, list] | None = None,
     skill_tools: dict | None = None,
     user_id: str | None = None,
-    skills_only: bool = False,
 ):
     """Get a cached graph or build a new one.
 
-    The cache key includes ``skills_only`` so the web (``False``) and Slack
-    (``True``) graphs for the same user never collide. It also includes the
-    user_id and the user's current set of credential names so that
-    adding/removing a credential transparently rebuilds the affected graph
-    (the new credential name needs to appear in the system prompt).
+    The cache key includes the user_id and the user's current set of
+    credential names so that adding/removing a credential transparently
+    rebuilds the affected graph (the new credential name needs to appear in
+    the system prompt).
     """
     credential_names: list[str] = []
     if user_id and db is not None:
@@ -267,7 +257,7 @@ async def get_or_build_agent_graph(
         except Exception:  # pragma: no cover
             credential_names = []
 
-    h = f"{skills_only}:" + _config_hash(
+    h = _config_hash(
         configs,
         list((mcp_tools_by_server or {}).keys()),
         list((skill_tools or {}).keys()),
@@ -284,7 +274,6 @@ async def get_or_build_agent_graph(
             mcp_tools_by_server,
             skill_tools,
             user_id=user_id,
-            skills_only=skills_only,
         )
     return _graph_cache[h]
 
@@ -292,12 +281,10 @@ async def get_or_build_agent_graph(
 def invalidate_graph_cache(config_hash: str | None = None):
     """Invalidate cached graph. If config_hash is None, clear all.
 
-    The build path is keyed by ``skills_only``, so a bare config hash is
-    stored under both the ``True:`` (Slack) and ``False:`` (web) prefixes.
-    Pop both so a config change evicts both graphs for the user.
+    Otherwise pop the entry keyed by the bare config hash so a config change
+    evicts the user's graph.
     """
     if config_hash is None:
         _graph_cache.clear()
     else:
-        _graph_cache.pop(f"True:{config_hash}", None)
-        _graph_cache.pop(f"False:{config_hash}", None)
+        _graph_cache.pop(config_hash, None)

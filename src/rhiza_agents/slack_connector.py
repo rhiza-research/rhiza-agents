@@ -13,8 +13,8 @@ conversation's ``updated_at`` (refreshed each turn via ``touch_conversation`` â€
 no separate registry). A re-mention in an aged-out thread resumes the same
 conversation with full prior context (the checkpointer replays history).
 
-Over Slack the agent is skills-only (no ``execute_python_code``) and HITL
-interrupts are auto-approved. Those two are coupled: curated, installed skills
+The agent's only execution tool is ``run_file`` (skill-script execution).
+Over Slack its HITL interrupts are auto-approved: curated, installed skills
 are the trust boundary that makes unattended execution acceptable.
 """
 
@@ -217,7 +217,6 @@ class SlackConnector:
             mcp_by_server,
             skills,
             user_id=user_id,
-            skills_only=True,
         )
 
     async def _files_dict(self, graph, run_config) -> dict:

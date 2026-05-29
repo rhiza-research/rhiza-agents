@@ -19,7 +19,7 @@ async def get_agent_graph(
     mcp_server_names: dict[str, str] | None = None,
     skill_tools: dict | None = None,
 ):
-    """Get the compiled agent graph for the web path (``skills_only=False``).
+    """Get the compiled agent graph for the web path.
 
     If user_configs is provided directly, uses those (callers that have
     already computed the merged effective configs should prefer this path
@@ -48,5 +48,4 @@ async def get_agent_graph(
         mcp_tools_by_server,
         skill_tools,
         user_id=user_id,
-        skills_only=False,
     )

@@ -77,7 +77,7 @@ def test_new_image_paths_new_overwrite_excludes_data():
     assert SlackConnector._new_image_paths(before, after) == {"/workspace/a.png", "/workspace/b.png"}
 
 
-# --- single-agent tool policy (skills-only: keeps run_file, drops execute_python_code) ---
+# --- single-agent tool policy (skills-only: run_file is the only execution tool) ---
 
 
 class _Tool:
@@ -86,61 +86,26 @@ class _Tool:
 
 
 @pytest.mark.asyncio
-async def test_single_agent_excludes_execute_python_code(monkeypatch):
+async def test_resolve_tools_yields_run_file_not_execute_python_code(monkeypatch):
+    """The real _resolve_tools for a sandbox:daytona config yields run_file and
+    never an execute_python_code tool — the tool no longer exists."""
     from rhiza_agents.agents import graph as g
+    from rhiza_agents.agents.tools import sandbox
 
-    async def fake_resolve(config, *a, **k):
-        return [_Tool("execute_python_code"), _Tool("run_file"), _Tool("query_forecast")]
+    # The removed factory must be gone entirely.
+    assert not hasattr(sandbox, "make_execute_python_code")
 
-    captured = {}
+    monkeypatch.setattr(sandbox, "is_sandbox_available", lambda: True)
+    monkeypatch.setattr(
+        "rhiza_agents.agents.tools.files.make_run_file",
+        lambda db=None: _Tool("run_file"),
+    )
 
-    monkeypatch.setattr(g, "_resolve_tools", fake_resolve)
-    monkeypatch.setattr(g, "_build_worker_middleware", lambda tools: [])
-    monkeypatch.setattr(g, "create_agent", lambda model, tools, **k: captured.update(tools=tools) or "COMPILED")
-    monkeypatch.setattr(g, "ChatAnthropic", lambda **k: object())
-
-    configs = [
-        AgentConfig(id="assistant", name="W", type="worker", system_prompt="w", tools=["sandbox:daytona"]),
-    ]
-    result = await g.build_agent_graph(configs, [], checkpointer=None, skills_only=True)
-
-    names = {t.name for t in captured["tools"]}
-    assert result == "COMPILED"
-    assert "execute_python_code" not in names
+    config = AgentConfig(id="assistant", name="W", type="worker", system_prompt="w", tools=["sandbox:daytona"])
+    tools = await g._resolve_tools(config, [])
+    names = {t.name for t in tools}
     assert "run_file" in names
-    assert "query_forecast" in names
-
-
-@pytest.mark.asyncio
-async def test_web_agent_includes_execute_python_code(monkeypatch):
-    """The web path (skills_only=False) keeps execute_python_code; the Slack
-    path (skills_only=True) drops it while keeping run_file."""
-    from rhiza_agents.agents import graph as g
-
-    async def fake_resolve(config, *a, **k):
-        return [_Tool("execute_python_code"), _Tool("run_file"), _Tool("query_forecast")]
-
-    monkeypatch.setattr(g, "_resolve_tools", fake_resolve)
-    monkeypatch.setattr(g, "_build_worker_middleware", lambda tools: [])
-    monkeypatch.setattr(g, "ChatAnthropic", lambda **k: object())
-
-    configs = [
-        AgentConfig(id="assistant", name="W", type="worker", system_prompt="w", tools=["sandbox:daytona"]),
-    ]
-
-    web_captured = {}
-    monkeypatch.setattr(g, "create_agent", lambda model, tools, **k: web_captured.update(tools=tools))
-    await g.build_agent_graph(configs, [], checkpointer=None, skills_only=False)
-    web_names = {t.name for t in web_captured["tools"]}
-    assert "execute_python_code" in web_names
-    assert "run_file" in web_names
-
-    slack_captured = {}
-    monkeypatch.setattr(g, "create_agent", lambda model, tools, **k: slack_captured.update(tools=tools))
-    await g.build_agent_graph(configs, [], checkpointer=None, skills_only=True)
-    slack_names = {t.name for t in slack_captured["tools"]}
-    assert "execute_python_code" not in slack_names
-    assert "run_file" in slack_names
+    assert "execute_python_code" not in names
 
 
 @pytest.mark.asyncio
@@ -161,7 +126,7 @@ async def test_single_agent_dedups_tools_across_workers(monkeypatch):
         AgentConfig(id="assistant", name="W1", type="worker", system_prompt="w", tools=["mcp:sheerwater"]),
         AgentConfig(id="w2", name="W2", type="worker", system_prompt="w", tools=["mcp:sheerwater"]),
     ]
-    await g.build_agent_graph(configs, [], checkpointer=None, skills_only=True)
+    await g.build_agent_graph(configs, [], checkpointer=None)
 
     names = [t.name for t in captured["tools"]]
     assert names.count("query_forecast") == 1

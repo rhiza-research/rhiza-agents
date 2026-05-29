@@ -52,7 +52,6 @@ async def _build_eval_graph():
         mcp_tools=mcp_tools,
         checkpointer=InMemorySaver(),
         mcp_tools_by_server=mcp_tools_by_server,
-        skills_only=False,
     )
 
 
