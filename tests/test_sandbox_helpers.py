@@ -23,6 +23,7 @@ from rhiza_agents.agents.tools.sandbox import (
     drain_inotify_journal,
     exec_as_daytona,
     list_workspace_files,
+    start_inotify_daemon,
 )
 
 # ---------------------------------------------------------------------------
@@ -329,6 +330,56 @@ def test_drain_restarts_daemon_when_probe_reports_dead():
     # start fired before the stat exec (it sits between probe and stat).
     # exec calls: [drain, probe], then start, then [stat].
     assert call_order == ["exec", "exec", "start", "exec"]
+
+
+# ---------------------------------------------------------------------------
+# start_inotify_daemon — watch-limit detection parsing (log-only branch)
+# ---------------------------------------------------------------------------
+
+
+def _run_start_with_result(result_text: str):
+    """Invoke start_inotify_daemon with ``exec_as_daytona`` returning a
+    single response whose ``result`` is ``result_text`` (exit 0)."""
+    resp = SimpleNamespace(exit_code=0, result=result_text)
+    with mock.patch(
+        "rhiza_agents.agents.tools.sandbox.exec_as_daytona",
+        return_value=resp,
+    ):
+        start_inotify_daemon(sandbox=object())
+
+
+def test_start_logs_watch_limit_when_detected(caplog):
+    """A daemon-dead result whose stderr mentions the inotify watch limit
+    triggers the specific max_user_watches warning."""
+    dead_with_limit = (
+        "INOTIFY_DEAD\n"
+        "Failed to watch /data; upgrade the inotify watch limit "
+        "(see max_user_watches) or use a smaller tree.\n"
+    )
+    with caplog.at_level("WARNING", logger="rhiza_agents.agents.tools.sandbox"):
+        _run_start_with_result(dead_with_limit)
+    joined = "\n".join(r.getMessage() for r in caplog.records)
+    assert "max_user_watches" in joined
+    assert "watch limit" in joined
+
+
+def test_start_does_not_log_watch_limit_for_clean_start(caplog):
+    """A clean INOTIFY_RUNNING result emits no watch-limit warning."""
+    with caplog.at_level("WARNING", logger="rhiza_agents.agents.tools.sandbox"):
+        _run_start_with_result("INOTIFY_RUNNING\n")
+    joined = "\n".join(r.getMessage() for r in caplog.records)
+    assert "max_user_watches" not in joined
+    assert "session tracking disabled" not in joined
+
+
+def test_start_logs_generic_dead_without_watch_limit(caplog):
+    """A daemon-dead result with no watch-limit wording logs the generic
+    'exited at startup' warning, not the watch-limit one."""
+    with caplog.at_level("WARNING", logger="rhiza_agents.agents.tools.sandbox"):
+        _run_start_with_result("INOTIFY_DEAD\nsome other failure\n")
+    joined = "\n".join(r.getMessage() for r in caplog.records)
+    assert "exited at startup" in joined
+    assert "max_user_watches" not in joined
 
 
 # ---------------------------------------------------------------------------
