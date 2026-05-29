@@ -362,6 +362,12 @@ async def fetch_file_content(
             if size > MAX_FETCH_FILE_BYTES:
                 raise FileTooLargeError(logical_path, size)
             content = read_workspace_file(sandbox, abs_path)
+            # TOCTOU guard: the stat above and this read are separate
+            # exec calls, so the file could have grown past the cap in
+            # between (defeating the stat-based check). Bound on the
+            # actual bytes read, not just the earlier stat size.
+            if len(content) > MAX_FETCH_FILE_BYTES:
+                raise FileTooLargeError(logical_path, len(content))
             return content, datetime.fromtimestamp(mtime, tz=UTC).isoformat()
 
         # A symlink-escape (ValueError from the realpath guard inside
