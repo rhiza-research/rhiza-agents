@@ -53,6 +53,25 @@ from .sandbox import (
 
 logger = logging.getLogger(__name__)
 
+# Upper bound on a single file fetch/download. The endpoint reads the
+# whole file into memory (base64 for the JSON view, raw bytes for the
+# download), so an unbounded read of a multi-GB artifact on /data would
+# OOM the server. Files above this size are rejected before any read.
+MAX_FETCH_FILE_BYTES = 50 * 1024 * 1024  # 50 MiB
+
+
+class FileTooLargeError(Exception):
+    """Raised when a fetched file exceeds MAX_FETCH_FILE_BYTES.
+
+    Carries the offending size so the route can surface it. Routes map
+    this to HTTP 413 (Payload Too Large).
+    """
+
+    def __init__(self, logical_path: str, size: int):
+        self.logical_path = logical_path
+        self.size = size
+        super().__init__(f"{logical_path} is {size} bytes (limit {MAX_FETCH_FILE_BYTES})")
+
 
 def _build_uv_run_cmd(filename: str, script_args: list[str] | None) -> str:
     """Build the ``uv run ...`` shell command with each arg shell-quoted.
@@ -325,15 +344,25 @@ async def fetch_file_content(
             if stat_resp.exit_code != 0:
                 return None
             try:
-                _, mtime_s = stat_resp.result.strip().split("|")
+                size_s, mtime_s = stat_resp.result.strip().split("|")
+                size = int(size_s)
                 mtime = float(mtime_s)
             except ValueError:
                 return None
+            # Reject oversized files BEFORE read_workspace_file pulls the
+            # whole content into memory — a multi-GB artifact would
+            # otherwise OOM the server.
+            if size > MAX_FETCH_FILE_BYTES:
+                raise FileTooLargeError(logical_path, size)
             content = read_workspace_file(sandbox, abs_path)
             return content, datetime.fromtimestamp(mtime, tz=UTC).isoformat()
 
         result = _stat_and_read()
         if result is None and legacy_fallback is not None:
+            # Don't migrate an oversized fallback onto the volume just to
+            # reject it on re-stat — reject up front.
+            if len(legacy_fallback) > MAX_FETCH_FILE_BYTES:
+                raise FileTooLargeError(logical_path, len(legacy_fallback))
             try:
                 write_workspace_file(sandbox, abs_path, legacy_fallback)
                 logger.info("Lazy-migrated legacy file %s to workspace volume", logical_path)
