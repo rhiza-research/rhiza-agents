@@ -347,6 +347,28 @@ def start_inotify_daemon(sandbox) -> None:
         )
 
 
+def _inotify_daemon_alive(sandbox) -> bool:
+    """Return True if an inotifywait process is running in the sandbox.
+
+    Uses ``pgrep`` via the daytona-wrapped exec so the check sees the
+    same process table the daemon was launched into. ``pgrep`` exits 0
+    when at least one match is found, 1 when none match. Any other
+    failure (pgrep missing, exec error) is treated as "unknown" and
+    reported as alive so we don't churn-restart on a transient probe
+    failure — best-effort, never raises.
+    """
+    try:
+        response = exec_as_daytona(sandbox, "pgrep -x inotifywait")
+    except Exception:
+        logger.warning("inotify liveness probe failed; assuming daemon alive", exc_info=True)
+        return True
+    # exit 1 = no matching process; exit 0 = found. Treat any other
+    # exit code (e.g. pgrep absent → 127) as "can't tell, leave it".
+    if response.exit_code == 1:
+        return False
+    return True
+
+
 def drain_inotify_journal(sandbox, default_source: str = "agent") -> dict[str, dict]:
     """Read and truncate the inotify journal, return aggregated path metadata.
 
@@ -378,6 +400,18 @@ def drain_inotify_journal(sandbox, default_source: str = "agent") -> dict[str, d
     drain ran) are silently dropped — stat writes them to stderr (which
     we discard) and continues with the rest.
     """
+    # The daemon is only started on first sandbox create. A reused
+    # sandbox may have lost it (process killed, sandbox restarted).
+    # Probe and restart before draining so tracking resumes; the events
+    # that fired while it was dead are simply missed, which is acceptable
+    # for "did this tool call touch a file." Best-effort — never raises.
+    if not _inotify_daemon_alive(sandbox):
+        logger.warning("inotify daemon not running; restarting before drain")
+        try:
+            start_inotify_daemon(sandbox)
+        except Exception:
+            logger.warning("Failed to restart inotify daemon before drain", exc_info=True)
+
     journal = shlex.quote(INOTIFY_JOURNAL_PATH)
     # cat-then-truncate. Works correctly because the daemon writes
     # with O_APPEND, so post-truncate writes seek to the new EOF (0)
