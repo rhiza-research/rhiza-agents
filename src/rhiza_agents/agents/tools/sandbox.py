@@ -187,21 +187,27 @@ def list_workspace_files(sandbox, abs_dir: str) -> list[dict]:
     recursively. Returns empty list if the directory does not exist or is empty.
     """
     quoted = shlex.quote(abs_dir)
-    # Use find + stat, format as TSV for safe parsing
-    cmd = f"test -d {quoted} || exit 0; find {quoted} -type f -printf '%p\\t%s\\t%T@\\n' 2>/dev/null"
+    # NUL-separated records: find emits ``<path>\0<size>\0<mtime>\0`` per
+    # file. NUL is the one byte that cannot appear in a POSIX filename, so
+    # this parses correctly even when a filename contains tabs or newlines
+    # (which a TSV/line-based scheme would silently drop or corrupt).
+    cmd = f"test -d {quoted} || exit 0; find {quoted} -type f -printf '%p\\0%s\\0%T@\\0' 2>/dev/null"
     response = sandbox.process.exec(cmd)
     if response.exit_code != 0:
         return []
     out: list[dict] = []
-    for line in response.result.splitlines():
-        parts = line.split("\t")
-        if len(parts) != 3:
+    # Split on NUL and consume in groups of three; the trailing
+    # separator leaves an empty final element we ignore.
+    fields = response.result.split("\0")
+    for i in range(0, len(fields) - 2, 3):
+        path, size_s, mtime_s = fields[i], fields[i + 1], fields[i + 2]
+        if not path:
             continue
-        path, size_s, mtime_s = parts
         try:
             size = int(size_s)
             mtime = float(mtime_s)
         except ValueError:
+            logger.warning("Skipping unparseable find record for %r in %s", path, abs_dir)
             continue
         out.append(
             {
@@ -463,13 +469,25 @@ def drain_inotify_journal(sandbox, default_source: str = "agent") -> dict[str, d
     if response.exit_code != 0:
         return {}
 
-    # Aggregate events per path.
+    # Aggregate events per path. The daemon format is
+    # ``<event>\t<path>\t<timestamp>``; the path field can itself contain
+    # tabs, so peel off the event (first field) and timestamp (last field)
+    # and treat everything between as the path rather than requiring
+    # exactly three tab-separated fields. An embedded NEWLINE in a
+    # filename still splits the record across lines (inotifywait's
+    # --format has no NUL option), so those lines are logged as dropped
+    # rather than silently skipped.
     by_path: dict[str, dict] = {}
     for line in response.result.splitlines():
-        parts = line.split("\t")
-        if len(parts) != 3:
+        head, sep, rest = line.partition("\t")
+        if not sep:
+            logger.warning("Dropping malformed inotify journal line (no field separator): %r", line)
             continue
-        event, path, ts_s = parts
+        path, sep2, ts_s = rest.rpartition("\t")
+        if not sep2:
+            logger.warning("Dropping malformed inotify journal line (missing timestamp field): %r", line)
+            continue
+        event = head
         if not path or not path.startswith("/"):
             continue
         # Filter skill-internal paths.
