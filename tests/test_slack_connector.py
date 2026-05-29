@@ -77,7 +77,7 @@ def test_new_image_paths_new_overwrite_excludes_data():
     assert SlackConnector._new_image_paths(before, after) == {"/workspace/a.png", "/workspace/b.png"}
 
 
-# --- single-agent tool policy (skills-only: run_file is the only execution tool) ---
+# --- agent tool policy (skills-only: run_file is the only execution tool) ---
 
 
 class _Tool:

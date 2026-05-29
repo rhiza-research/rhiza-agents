@@ -1,4 +1,4 @@
-"""Slack Socket Mode connector that drives the single-agent graph.
+"""Slack Socket Mode connector that drives the agent graph.
 
 Each Slack channel is bound to one configured rhiza-agents user (via
 ``config.slack_channel_user_map``); that user's skills, MCP servers, and

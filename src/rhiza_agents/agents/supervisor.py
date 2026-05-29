@@ -28,7 +28,7 @@ async def get_agent_graph(
     Otherwise uses defaults.
 
     ``mcp_server_names`` is accepted for call-site compatibility but the
-    single-agent graph does not embed per-server descriptions in its prompt.
+    agent graph does not embed per-server descriptions in its prompt.
     """
     if user_configs is not None:
         configs = user_configs

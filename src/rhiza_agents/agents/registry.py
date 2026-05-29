@@ -1,15 +1,11 @@
-"""Default agent definition.
-
-The platform runs a single agent. The supervisor + multi-worker topology was
-removed; one agent holds the union of the configured tools.
-"""
+"""Default agent configuration and system prompt."""
 
 from ..db.models import AgentConfig
 
-# Fixed id for the single agent. Used as the agent_id key in user_agent_configs.
-SINGLE_AGENT_ID = "assistant"
+# Fixed id for the agent. Used as the agent_id key in user_agent_configs.
+AGENT_ID = "assistant"
 
-_SINGLE_AGENT_PROMPT = """\
+_AGENT_PROMPT = """\
 You are a helpful data and research assistant. You answer questions and produce \
 results — including charts and other files — by calling the tools available to \
 you: weather/forecast data queries, knowledge-base search, and trusted skills.
@@ -40,19 +36,19 @@ resolves the skill author's declared dependencies — you don't manage them.
 """
 
 
-def get_single_agent_prompt() -> str:
-    """Return the single agent's system prompt."""
-    return _SINGLE_AGENT_PROMPT
+def get_agent_prompt() -> str:
+    """Return the agent's system prompt."""
+    return _AGENT_PROMPT
 
 
 def get_default_configs() -> list[AgentConfig]:
-    """Return the default configuration: a single agent holding all tools."""
+    """Return the default configuration: the agent and its tools."""
     return [
         AgentConfig(
-            id=SINGLE_AGENT_ID,
+            id=AGENT_ID,
             name="Assistant",
             type="worker",
-            system_prompt=_SINGLE_AGENT_PROMPT,
+            system_prompt=_AGENT_PROMPT,
             tools=["mcp:sheerwater", "sandbox:daytona"],
         ),
     ]
@@ -79,9 +75,8 @@ def merge_configs(
     configs_by_id = {c.id: c for c in defaults}
     for override in overrides:
         agent_id = override.get("id")
-        # Ignore overrides for unknown ids — e.g. stale per-worker rows
-        # (data_analyst/code_runner/...) left in user_agent_configs from the
-        # pre-collapse multi-agent topology.
+        # Only known default config ids are editable; ignore overrides for any
+        # other id (e.g. obsolete rows in user_agent_configs).
         if not agent_id or agent_id not in configs_by_id:
             continue
         configs_by_id[agent_id] = AgentConfig(**override)

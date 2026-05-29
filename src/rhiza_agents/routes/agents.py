@@ -1,8 +1,7 @@
 """Agent config CRUD API routes.
 
-The platform runs a single agent (``SINGLE_AGENT_ID``). These routes expose
-read/edit/reset for that one config. Create and delete are rejected: there is
-no multi-agent topology to add to or remove from.
+Read, edit, and reset the agent's configuration (keyed by ``AGENT_ID``).
+Create and delete are not supported.
 """
 
 import json
@@ -11,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from ..agents.graph import invalidate_graph_cache
 from ..agents.registry import (
-    SINGLE_AGENT_ID,
+    AGENT_ID,
     get_default_configs,
     get_default_configs_by_id,
     merge_configs,
@@ -47,7 +46,7 @@ def _configs_to_api_response(configs: list[AgentConfig]) -> list[dict]:
 
 @router.get("/api/agents")
 async def get_agents(request: Request, user: dict = Depends(require_auth)):
-    """Get the effective single-agent config for the current user.
+    """Get the effective agent config for the current user.
 
     Returned as a one-element list for frontend compatibility.
     """
@@ -58,19 +57,18 @@ async def get_agents(request: Request, user: dict = Depends(require_auth)):
 
 @router.put("/api/agents/{agent_id}")
 async def update_agent(request: Request, agent_id: str, user: dict = Depends(require_auth)):
-    """Update the single agent's config override."""
+    """Update the agent's config override."""
     db = get_db(request)
     user_id = get_user_id(request)
     body = await request.json()
 
-    if agent_id != SINGLE_AGENT_ID:
+    if agent_id != AGENT_ID:
         raise HTTPException(status_code=404, detail="Agent not found")
 
-    config_data = get_default_configs_by_id()[SINGLE_AGENT_ID].model_dump()
+    config_data = get_default_configs_by_id()[AGENT_ID].model_dump()
 
     # Apply the update fields. `enabled` is intentionally not editable: the
-    # platform runs one agent and it is always on (disabling it would leave no
-    # buildable graph).
+    # agent is always on (disabling it would leave no buildable graph).
     for field in ("name", "system_prompt", "model", "tools", "vectorstore_ids"):
         if field in body:
             config_data[field] = body[field]
@@ -90,16 +88,14 @@ async def update_agent(request: Request, agent_id: str, user: dict = Depends(req
 
 @router.post("/api/agents")
 async def create_agent(request: Request, user: dict = Depends(require_auth)):
-    """Creating agents is not supported: the platform runs a single fixed agent."""
-    raise HTTPException(
-        status_code=405, detail="The platform runs a single agent; creating new agents is not supported"
-    )
+    """Creating agents is not supported."""
+    raise HTTPException(status_code=405, detail="Creating agents is not supported")
 
 
 @router.delete("/api/agents/{agent_id}")
 async def delete_agent(request: Request, agent_id: str, user: dict = Depends(require_auth)):
-    """Deleting the agent is not supported: the platform runs a single fixed agent."""
-    raise HTTPException(status_code=405, detail="The platform runs a single agent; deleting the agent is not supported")
+    """Deleting the agent is not supported."""
+    raise HTTPException(status_code=405, detail="Deleting the agent is not supported")
 
 
 @router.post("/api/agents/reset")

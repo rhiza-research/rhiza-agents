@@ -166,14 +166,14 @@ async def build_agent_graph(
     skill_tools: dict | None = None,
     user_id: str | None = None,
 ):
-    """Build a compiled single-agent graph from AgentConfig objects.
+    """Build the compiled agent graph from AgentConfig objects.
 
-    One agent holds the union of every enabled config's resolved tools,
+    The agent holds the union of every enabled config's resolved tools,
     deduplicated by tool name. The only execution tool is ``run_file``
     (skill-script execution); its HITL approval gate fires before any
     script runs. Curated, installed skills are the trust boundary.
     """
-    from .registry import get_single_agent_prompt
+    from .registry import get_agent_prompt
 
     union: dict[str, object] = {}
     model_name: str | None = None
@@ -196,7 +196,7 @@ async def build_agent_graph(
 
     # Tell the agent which credential names exist (values never shown) when it
     # has a tool that consumes them (run_file).
-    prompt = get_single_agent_prompt()
+    prompt = get_agent_prompt()
     has_credential_tool = any(getattr(t, "name", None) == "run_file" for t in tool_list)
     if user_id and db is not None and has_credential_tool:
         try:

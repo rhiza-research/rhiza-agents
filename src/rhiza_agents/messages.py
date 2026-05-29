@@ -76,8 +76,8 @@ def extract_content_blocks_from_token(token) -> tuple[str, str]:
     return "", ""
 
 
-# Internal handoff/transfer artifacts emitted by the former supervisor topology;
-# filtered out when replaying historical (pre-collapse) conversations.
+# Internal handoff/transfer tool artifacts that can appear in stored conversation
+# history; filtered out so they do not render as ordinary messages.
 _HANDOFF_PREFIXES = ("transfer_to_", "transfer_back_to_")
 
 
@@ -107,7 +107,7 @@ def process_messages(raw_messages) -> list[dict]:
 
         elif isinstance(msg, ToolMessage):
             if msg.name and msg.name.startswith(_HANDOFF_PREFIXES):
-                continue  # internal supervisor handoff result (historical threads)
+                continue  # internal handoff tool result; not a user-facing message
             content = msg.content
             # Extract text from content block lists
             if isinstance(content, list):
