@@ -23,25 +23,22 @@ import logging
 import os
 from datetime import UTC, datetime
 
-from langchain_core.messages import HumanMessage, ToolMessage
-from langgraph.types import Command
+from langchain_core.messages import HumanMessage
 
-from .agents.graph import get_or_build_agent_graph
+from .agents.supervisor import get_agent_graph
 from .agents.tools.files import fetch_file_content
+from .agents.turn import MAX_AUTO_RESUMES, run_agent_turn  # noqa: F401  (MAX_AUTO_RESUMES re-exported)
 from .config import Config
 from .db.sqlite import Database
 from .deps import effective_agent_configs, mcp_tools_for_user, skill_tools_for_user
 from .logging_config import chat_event_logger
-from .messages import extract_content_blocks, extract_content_blocks_from_token
+from .messages import extract_content_blocks
+from .observability import sync_user_prompts
 
 logger = logging.getLogger(__name__)
 
 # Sliding idle window: a thread stops being watched after this much inactivity.
 THREAD_IDLE_SECONDS = 24 * 60 * 60
-
-# Bound the HITL auto-approve loop so a tool that interrupts on every round
-# cannot spin forever (runaway model spend).
-MAX_AUTO_RESUMES = 25
 
 _IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".webp")
 
@@ -205,19 +202,30 @@ class SlackConnector:
         chat_event_logger.info(event, extra={"conversation_id": conversation_id, "user_id": user_id, **data})
 
     async def _build_graph(self, user_id: str):
-        mcp_by_server, _ = await mcp_tools_for_user(self.db, self.system_mcp_tools_by_server, user_id)
+        """Build the per-user graph and register the user's prompts for tracing.
+
+        Returns ``(graph, prompt_refs, prompt_objects)``. Prompt registration
+        mirrors the web path so Slack turns get the same Langfuse prompt linkage
+        (no-ops when Langfuse is disabled). The mapped rhiza-agents user id is
+        used as the Langfuse prompt-folder name — there is no Slack display name
+        available at this layer.
+        """
+        mcp_by_server, mcp_names = await mcp_tools_for_user(self.db, self.system_mcp_tools_by_server, user_id)
         skills = await skill_tools_for_user(self.db, user_id)
         configs = await effective_agent_configs(self.db, user_id)
-        return await get_or_build_agent_graph(
-            configs,
+        prompt_refs, prompt_objects = sync_user_prompts(user_id, configs)
+        graph = await get_agent_graph(
             self.system_mcp_tools,
             self.checkpointer,
-            self.vectorstore_manager,
-            self.db,
-            mcp_by_server,
-            skills,
+            user_configs=configs,
+            db=self.db,
+            vectorstore_manager=self.vectorstore_manager,
+            mcp_tools_by_server=mcp_by_server,
+            mcp_server_names=mcp_names,
+            skill_tools=skills,
             user_id=user_id,
         )
+        return graph, prompt_refs, prompt_objects
 
     async def _files_dict(self, graph, run_config) -> dict:
         return self._files_from_state(await graph.aget_state(run_config))
@@ -276,46 +284,26 @@ class SlackConnector:
         lock = self._lock_for(conversation_id)
         await lock.acquire()
         try:
-            graph = await self._build_graph(user_id)
+            graph, prompt_refs, prompt_objects = await self._build_graph(user_id)
             files_before = await self._files_dict(graph, run_config)
 
-            stream_input = {"messages": [HumanMessage(content=text)]}
+            # The shared turn driver owns the astream loop, auto-resume, and
+            # Langfuse tracing. Slack auto-approves interrupts (skills-only path,
+            # no approval modal), so it runs in "auto" mode. The final reply text
+            # comes from the persisted state below; the accumulated token text is
+            # only a fallback when the last assistant message can't be read back.
             text_parts: list[str] = []
-            for _resume_round in range(MAX_AUTO_RESUMES + 1):
-                auto_resume = False
-                # version="v2" makes astream yield dict chunks ({"type","ns","data"});
-                # without it astream returns positional tuples and the
-                # chunk["type"]/chunk["data"] access below fails. Mirrors chat.py.
-                async for chunk in graph.astream(
-                    stream_input,
-                    config=run_config,
-                    stream_mode=["messages", "updates"],
-                    version="v2",
-                    subgraphs=True,
-                ):
-                    ctype = chunk["type"]
-                    if ctype == "messages":
-                        token, metadata = chunk["data"]
-                        if isinstance(token, ToolMessage):
-                            continue
-                        if metadata.get("langgraph_node", "") == "tools":
-                            continue
-                        piece, _reasoning = extract_content_blocks_from_token(token)
-                        if piece:
-                            text_parts.append(piece)
-                    elif ctype == "updates":
-                        update_data = chunk["data"]
-                        if "__interrupt__" in update_data:
-                            if chunk.get("ns"):
-                                continue
-                            # Skills-only path: auto-approve (no Slack approval modal).
-                            stream_input = Command(resume={"decisions": [{"type": "approve"}]})
-                            auto_resume = True
-                            break
-                if not auto_resume:
-                    break
-            else:
-                logger.warning("Auto-resume cap (%d) reached for conversation %s", MAX_AUTO_RESUMES, conversation_id)
+            async for ev in run_agent_turn(
+                graph,
+                thread_id=conversation_id,
+                stream_input={"messages": [HumanMessage(content=text)]},
+                execution_mode="auto",
+                prompt_refs=prompt_refs,
+                prompt_objects=prompt_objects,
+                user_id=user_id,
+            ):
+                if ev["type"] == "token":
+                    text_parts.append(ev["content"])
 
             final_state = await graph.aget_state(run_config)
             reply = self._final_text_from_state(final_state) or "".join(text_parts).strip()

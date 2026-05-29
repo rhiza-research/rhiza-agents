@@ -325,8 +325,9 @@ async def test_run_turn_streams_resumes_and_uploads_image(monkeypatch):
         rounds=[[_msg_chunk("Working "), _INTERRUPT_CHUNK], [_msg_chunk("Done: plot ready.")]],
         snapshots=[_FakeState({}), _FakeState({"/workspace/plot.png": {}})],
     )
-    monkeypatch.setattr(conn, "_build_graph", AsyncMock(return_value=graph))
-    monkeypatch.setattr("rhiza_agents.slack_connector.extract_content_blocks_from_token", lambda t: (t, ""))
+    monkeypatch.setattr(conn, "_build_graph", AsyncMock(return_value=(graph, {}, {})))
+    monkeypatch.setattr("rhiza_agents.agents.turn.extract_content_blocks_from_token", lambda t: (t, ""))
+    monkeypatch.setattr("rhiza_agents.agents.turn.make_langfuse_handler", lambda **k: None)
     monkeypatch.setattr("rhiza_agents.slack_connector.fetch_file_content", AsyncMock(return_value=(b"PNGBYTES", "iso")))
     client = AsyncMock()
 
@@ -350,8 +351,9 @@ async def test_run_turn_caps_auto_resume(monkeypatch):
     conn, _ = _make_connector(monkeypatch, {"C1": "u1"}, {})
     del conn._run_turn
     graph = _FakeGraph(rounds=[[_INTERRUPT_CHUNK]], snapshots=[_FakeState({}), _FakeState({})])
-    monkeypatch.setattr(conn, "_build_graph", AsyncMock(return_value=graph))
-    monkeypatch.setattr("rhiza_agents.slack_connector.extract_content_blocks_from_token", lambda t: (t, ""))
+    monkeypatch.setattr(conn, "_build_graph", AsyncMock(return_value=(graph, {}, {})))
+    monkeypatch.setattr("rhiza_agents.agents.turn.extract_content_blocks_from_token", lambda t: (t, ""))
+    monkeypatch.setattr("rhiza_agents.agents.turn.make_langfuse_handler", lambda **k: None)
     client = AsyncMock()
 
     await conn._run_turn(channel="C1", thread_root="9.9", user_id="u1", text="loop", client=client)

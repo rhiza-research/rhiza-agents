@@ -6,13 +6,14 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from langchain_core.messages import HumanMessage, ToolMessage
+from langchain_core.messages import HumanMessage
 from langgraph.types import Command
 from pydantic import BaseModel
 
 from ..agents.registry import get_default_configs, merge_configs
 from ..agents.supervisor import get_agent_graph
 from ..agents.tools.sandbox import _collect_referenced_names
+from ..agents.turn import run_agent_turn
 from ..db.models import AgentConfig
 from ..deps import (
     get_checkpointer,
@@ -27,15 +28,8 @@ from ..deps import (
     require_auth,
 )
 from ..logging_config import chat_event_logger
-from ..messages import (
-    extract_chart_url,
-    extract_content_blocks,
-    extract_content_blocks_from_token,
-)
 from ..observability import (
     get_langfuse_client,
-    make_langfuse_handler,
-    new_trace_id,
     sync_user_prompts,
 )
 
@@ -181,9 +175,6 @@ async def stream_chat_message(
         yield f"event: conversation_id\ndata: {json.dumps({'conversation_id': conversation_id})}\n\n"
 
         accumulated_text = []
-        seen_tool_call_ids = set()
-        seen_tool_result_ids = set()
-        stream_input = {"messages": [HumanMessage(content=body.message)]}
 
         def _flush_accumulated():
             nonlocal accumulated_text
@@ -197,142 +188,38 @@ async def stream_chat_message(
         _log_event("user_message", content=body.message[:500])
 
         try:
-            while True:
-                auto_resume = False
-                trace_id = new_trace_id()
-                stream_config = {
-                    "configurable": {"thread_id": conversation_id},
-                    "metadata": {
-                        "langfuse_user_id": user_id,
-                        "langfuse_session_id": conversation_id,
-                        "rhiza_prompts": prompt_refs,
-                    },
-                }
-                lf_handler = make_langfuse_handler(trace_id=trace_id, prompt_objects=prompt_objects)
-                if lf_handler:
-                    stream_config["callbacks"] = [lf_handler]
-                    yield f"event: trace_id\ndata: {json.dumps({'trace_id': trace_id})}\n\n"
-                async for chunk in graph.astream(
-                    stream_input,
-                    config=stream_config,
-                    stream_mode=["messages", "updates", "custom"],
-                    version="v2",
-                    subgraphs=True,
-                ):
-                    chunk_type = chunk["type"]
-
-                    if chunk_type == "messages":
-                        token, metadata = chunk["data"]
-                        # Only process AI model output, not tool results
-                        if isinstance(token, ToolMessage):
-                            continue
-                        node_name = metadata.get("langgraph_node", "")
-                        if node_name == "tools":
-                            continue
-                        text, reasoning = extract_content_blocks_from_token(token)
-                        if not text and not reasoning:
-                            continue
-
-                        if reasoning:
-                            yield f"event: thinking\ndata: {json.dumps({'content': reasoning})}\n\n"
-                        if text:
-                            yield f"event: token\ndata: {json.dumps({'content': text})}\n\n"
-                            accumulated_text.append(text)
-
-                    elif chunk_type == "updates":
-                        update_data = chunk["data"]
-
-                        # HITL interrupts appear as __interrupt__ in updates.
-                        # Only handle top-level (empty ns) to avoid duplicates
-                        # from subgraphs.
-                        if "__interrupt__" in update_data:
-                            if chunk.get("ns"):
-                                continue
-                            if body.execution_mode == "auto":
-                                # Auto-approve: resume immediately without user interaction
-                                stream_input = Command(resume={"decisions": [{"type": "approve"}]})
-                                auto_resume = True
-                                break
-                            else:
-                                for intr in update_data["__interrupt__"]:
-                                    intr_data = getattr(intr, "value", intr)
-                                    enriched = await _enrich_interrupt_payload(intr_data, db, user_id)
-                                    yield f"event: interrupt\ndata: {json.dumps(enriched, default=str)}\n\n"
-                                    _log_event("interrupt", data=str(enriched)[:500])
-                                continue
-
-                        # Extract tool call/result info from node updates.
-                        # Deduplicate by tool call ID since subgraphs=True
-                        # surfaces the same event from both subgraph and parent.
-                        for _node_name, node_data in update_data.items():
-                            if not isinstance(node_data, dict):
-                                continue
-                            for msg in node_data.get("messages", []):
-                                # Tool calls from AI messages
-                                if hasattr(msg, "tool_calls") and msg.tool_calls:
-                                    for tc in msg.tool_calls:
-                                        tc_id = tc.get("id")
-                                        if tc_id:
-                                            if tc_id in seen_tool_call_ids:
-                                                continue
-                                            seen_tool_call_ids.add(tc_id)
-                                        data = json.dumps(
-                                            {"name": tc["name"], "args": tc["args"]},
-                                            default=str,
-                                        )
-                                        yield f"event: tool_start\ndata: {data}\n\n"
-                                        _log_event(
-                                            "tool_start",
-                                            tool=tc["name"],
-                                            tool_args=str(tc["args"])[:500],
-                                        )
-                                # Tool results from ToolMessages
-                                if isinstance(msg, ToolMessage):
-                                    result_id = getattr(msg, "tool_call_id", None)
-                                    if result_id:
-                                        if result_id in seen_tool_result_ids:
-                                            continue
-                                        seen_tool_result_ids.add(result_id)
-                                    tool_content = msg.content
-                                    # Extract text from content block lists
-                                    if isinstance(tool_content, list):
-                                        text, _ = extract_content_blocks(tool_content)
-                                        tool_content = text or tool_content
-                                    if isinstance(tool_content, str):
-                                        try:
-                                            tool_content = json.loads(tool_content)
-                                        except (json.JSONDecodeError, TypeError):
-                                            pass
-                                    tool_output_str = str(tool_content)[:1000]
-                                    yield (
-                                        f"event: tool_end\ndata: "
-                                        f"{json.dumps({'name': msg.name, 'output': tool_output_str})}\n\n"
-                                    )
-                                    _log_event(
-                                        "tool_end",
-                                        tool=msg.name,
-                                        output=tool_output_str,
-                                    )
-                                    # Emit chart event for plotly renders
-                                    if msg.name in (
-                                        "tool_render_plotly",
-                                        "tool_generate_comparison_chart",
-                                    ):
-                                        html_url = extract_chart_url(msg.content)
-                                        if html_url:
-                                            yield f"event: chart\ndata: {json.dumps({'url': html_url})}\n\n"
-                                    # Emit files_changed after run_file so the
-                                    # client refetches the file list.
-                                    if msg.name == "run_file":
-                                        yield f"event: files_changed\ndata: {json.dumps({})}\n\n"
-
-                    elif chunk_type == "custom":
-                        custom_data = chunk["data"]
-                        if isinstance(custom_data, dict) and custom_data.get("type") == "files_changed":
-                            yield f"event: files_changed\ndata: {json.dumps({})}\n\n"
-
-                if not auto_resume:
-                    break
+            async for ev in run_agent_turn(
+                graph,
+                thread_id=conversation_id,
+                stream_input={"messages": [HumanMessage(content=body.message)]},
+                execution_mode=body.execution_mode,
+                prompt_refs=prompt_refs,
+                prompt_objects=prompt_objects,
+                user_id=user_id,
+            ):
+                ev_type = ev["type"]
+                if ev_type == "trace_id":
+                    yield f"event: trace_id\ndata: {json.dumps({'trace_id': ev['trace_id']})}\n\n"
+                elif ev_type == "thinking":
+                    yield f"event: thinking\ndata: {json.dumps({'content': ev['content']})}\n\n"
+                elif ev_type == "token":
+                    yield f"event: token\ndata: {json.dumps({'content': ev['content']})}\n\n"
+                    accumulated_text.append(ev["content"])
+                elif ev_type == "tool_start":
+                    data = json.dumps({"name": ev["name"], "args": ev["args"]}, default=str)
+                    yield f"event: tool_start\ndata: {data}\n\n"
+                    _log_event("tool_start", tool=ev["name"], tool_args=str(ev["args"])[:500])
+                elif ev_type == "tool_end":
+                    yield (f"event: tool_end\ndata: {json.dumps({'name': ev['name'], 'output': ev['output']})}\n\n")
+                    _log_event("tool_end", tool=ev["name"], output=ev["output"])
+                elif ev_type == "chart":
+                    yield f"event: chart\ndata: {json.dumps({'url': ev['url']})}\n\n"
+                elif ev_type == "files_changed":
+                    yield f"event: files_changed\ndata: {json.dumps({})}\n\n"
+                elif ev_type == "interrupt":
+                    enriched = await _enrich_interrupt_payload(ev["value"], db, user_id)
+                    yield f"event: interrupt\ndata: {json.dumps(enriched, default=str)}\n\n"
+                    _log_event("interrupt", data=str(enriched)[:500])
 
         except Exception as e:
             logger.exception("Streaming error")
@@ -409,8 +296,6 @@ async def resume_chat(
 
     async def event_generator():
         accumulated_text = []
-        seen_tool_call_ids = set()
-        seen_tool_result_ids = set()
 
         def _flush_accumulated():
             nonlocal accumulated_text
@@ -424,123 +309,40 @@ async def resume_chat(
         _log_event("resume", decision=body.decision)
 
         try:
-            trace_id = new_trace_id()
-            resume_config = {
-                "configurable": {"thread_id": body.conversation_id},
-                "metadata": {
-                    "langfuse_user_id": user_id,
-                    "langfuse_session_id": body.conversation_id,
-                    "rhiza_prompts": prompt_refs,
-                },
-            }
-            lf_handler = make_langfuse_handler(trace_id=trace_id, prompt_objects=prompt_objects)
-            if lf_handler:
-                resume_config["callbacks"] = [lf_handler]
-                yield f"event: trace_id\ndata: {json.dumps({'trace_id': trace_id})}\n\n"
-            async for chunk in graph.astream(
-                Command(resume={"decisions": [decision]}),
-                config=resume_config,
-                stream_mode=["messages", "updates", "custom"],
-                version="v2",
-                subgraphs=True,
+            # Resume streams a single round to completion. "review" mode means a
+            # further interrupt surfaces to the user rather than auto-resuming.
+            async for ev in run_agent_turn(
+                graph,
+                thread_id=body.conversation_id,
+                stream_input=Command(resume={"decisions": [decision]}),
+                execution_mode="review",
+                prompt_refs=prompt_refs,
+                prompt_objects=prompt_objects,
+                user_id=user_id,
             ):
-                chunk_type = chunk["type"]
-
-                if chunk_type == "messages":
-                    token, metadata = chunk["data"]
-                    if isinstance(token, ToolMessage):
-                        continue
-                    if metadata.get("langgraph_node", "") == "tools":
-                        continue
-                    text, reasoning = extract_content_blocks_from_token(token)
-                    if not text and not reasoning:
-                        continue
-
-                    if reasoning:
-                        yield f"event: thinking\ndata: {json.dumps({'content': reasoning})}\n\n"
-                    if text:
-                        yield f"event: token\ndata: {json.dumps({'content': text})}\n\n"
-                        accumulated_text.append(text)
-
-                elif chunk_type == "updates":
-                    update_data = chunk["data"]
-
-                    # Interrupts: only from top-level to avoid duplicates
-                    if "__interrupt__" in update_data:
-                        if chunk.get("ns"):
-                            continue
-                        for intr in update_data["__interrupt__"]:
-                            intr_data = getattr(intr, "value", intr)
-                            enriched = await _enrich_interrupt_payload(intr_data, db, user_id)
-                            yield f"event: interrupt\ndata: {json.dumps(enriched, default=str)}\n\n"
-                            _log_event("interrupt", data=str(enriched)[:500])
-                        continue
-
-                    # Extract tool call/result info from node updates.
-                    # Deduplicate by tool call ID since subgraphs=True
-                    # surfaces the same event from both subgraph and parent.
-                    for _node_name, node_data in update_data.items():
-                        if not isinstance(node_data, dict):
-                            continue
-                        for msg in node_data.get("messages", []):
-                            if hasattr(msg, "tool_calls") and msg.tool_calls:
-                                for tc in msg.tool_calls:
-                                    tc_id = tc.get("id")
-                                    if tc_id:
-                                        if tc_id in seen_tool_call_ids:
-                                            continue
-                                        seen_tool_call_ids.add(tc_id)
-                                    data = json.dumps(
-                                        {"name": tc["name"], "args": tc["args"]},
-                                        default=str,
-                                    )
-                                    yield f"event: tool_start\ndata: {data}\n\n"
-                                    _log_event(
-                                        "tool_start",
-                                        tool=tc["name"],
-                                        tool_args=str(tc["args"])[:500],
-                                    )
-                            if isinstance(msg, ToolMessage):
-                                result_id = getattr(msg, "tool_call_id", None)
-                                if result_id:
-                                    if result_id in seen_tool_result_ids:
-                                        continue
-                                    seen_tool_result_ids.add(result_id)
-                                tool_content = msg.content
-                                # Extract text from content block lists
-                                if isinstance(tool_content, list):
-                                    text, _ = extract_content_blocks(tool_content)
-                                    tool_content = text or tool_content
-                                if isinstance(tool_content, str):
-                                    try:
-                                        tool_content = json.loads(tool_content)
-                                    except (json.JSONDecodeError, TypeError):
-                                        pass
-                                tool_output_str = str(tool_content)[:1000]
-                                yield (
-                                    f"event: tool_end\ndata: "
-                                    f"{json.dumps({'name': msg.name, 'output': tool_output_str})}\n\n"
-                                )
-                                _log_event(
-                                    "tool_end",
-                                    tool=msg.name,
-                                    output=tool_output_str,
-                                )
-                                # Emit chart event for plotly renders
-                                if msg.name in (
-                                    "tool_render_plotly",
-                                    "tool_generate_comparison_chart",
-                                ):
-                                    html_url = extract_chart_url(msg.content)
-                                    if html_url:
-                                        yield f"event: chart\ndata: {json.dumps({'url': html_url})}\n\n"
-                                if msg.name == "run_file":
-                                    yield f"event: files_changed\ndata: {json.dumps({})}\n\n"
-
-                elif chunk_type == "custom":
-                    custom_data = chunk["data"]
-                    if isinstance(custom_data, dict) and custom_data.get("type") == "files_changed":
-                        yield f"event: files_changed\ndata: {json.dumps({})}\n\n"
+                ev_type = ev["type"]
+                if ev_type == "trace_id":
+                    yield f"event: trace_id\ndata: {json.dumps({'trace_id': ev['trace_id']})}\n\n"
+                elif ev_type == "thinking":
+                    yield f"event: thinking\ndata: {json.dumps({'content': ev['content']})}\n\n"
+                elif ev_type == "token":
+                    yield f"event: token\ndata: {json.dumps({'content': ev['content']})}\n\n"
+                    accumulated_text.append(ev["content"])
+                elif ev_type == "tool_start":
+                    data = json.dumps({"name": ev["name"], "args": ev["args"]}, default=str)
+                    yield f"event: tool_start\ndata: {data}\n\n"
+                    _log_event("tool_start", tool=ev["name"], tool_args=str(ev["args"])[:500])
+                elif ev_type == "tool_end":
+                    yield (f"event: tool_end\ndata: {json.dumps({'name': ev['name'], 'output': ev['output']})}\n\n")
+                    _log_event("tool_end", tool=ev["name"], output=ev["output"])
+                elif ev_type == "chart":
+                    yield f"event: chart\ndata: {json.dumps({'url': ev['url']})}\n\n"
+                elif ev_type == "files_changed":
+                    yield f"event: files_changed\ndata: {json.dumps({})}\n\n"
+                elif ev_type == "interrupt":
+                    enriched = await _enrich_interrupt_payload(ev["value"], db, user_id)
+                    yield f"event: interrupt\ndata: {json.dumps(enriched, default=str)}\n\n"
+                    _log_event("interrupt", data=str(enriched)[:500])
 
         except Exception as e:
             logger.exception("Resume streaming error")
