@@ -1,19 +1,19 @@
-"""Daytona sandbox tool for code execution.
+"""Daytona sandbox primitives for skill-script execution.
 
-The ``execute_python_code`` tool is built as a factory
-(``make_execute_python_code``) so it can close over the application
-database. The tool needs the database to look up the conversation's
-owner and resolve credential references at tool-call time.
+This module owns the sandbox lifecycle (create/idle-cleanup), the
+inotify session-tracking daemon, the workspace/data file helpers, and
+the credential-materialization helpers used by ``run_file`` (the
+skill-script execution tool defined in ``files.py``).
 
 Credential model: the LLM passes a list of materialization plans on each
 call (``credentials=[{kind: env_vars, names: [...]}, {kind: file, ...}]``).
 Each plan tells the system which stored secret names to inject and how.
 The system validates that every referenced name exists in the user's
 store, then the existing HITL approval middleware interrupts so the
-user can review the code AND the credential names before anything runs.
+user can review the skill AND the credential names before anything runs.
 On approval, decrypted secret values are injected into the sandbox via
-``CodeRunParams.env`` (env vars) or ``fs.upload_file`` (files), the code
-runs, and verbatim secret values are scrubbed from output as a backstop.
+env vars or ``fs.upload_file`` (files), the script runs, and verbatim
+secret values are scrubbed from output as a backstop.
 """
 
 import asyncio
@@ -25,14 +25,11 @@ from datetime import UTC, datetime
 from typing import Any
 
 from langchain_core.messages import ToolMessage
-from langchain_core.tools import tool
-from langgraph.prebuilt import ToolRuntime
 from langgraph.types import Command
 
 from ...credentials import (
     decrypt_value,
     extract_placeholders,
-    redact_output,
     substitute_placeholders,
 )
 
@@ -186,8 +183,8 @@ def _assert_realpath_contained(sandbox, abs_path: str, *, resolve_parent: bool) 
 
     ``workspace_path``'s ``normpath`` check is lexical only: it cannot see
     symlinks, which live in the sandbox filesystem. The agent can write to
-    /workspace and /data (HITL-approved ``execute_python_code``), so it
-    could plant a symlink whose target escapes the roots; a root-level
+    /workspace and /data via HITL-approved skill scripts (``run_file``), so
+    it could plant a symlink whose target escapes the roots; a root-level
     read/write would then follow it. This resolves the REAL path inside
     the sandbox and verifies it still lands under /workspace or /data,
     raising ``ValueError`` on escape so the caller performs no read/write.
@@ -515,8 +512,7 @@ def drain_inotify_journal(sandbox, default_source: str = "agent") -> dict[str, d
     Path-to-source mapping:
       - Paths under /data → source = "data" regardless of caller.
       - Paths under /workspace → source = ``default_source`` (caller
-        passes "agent" for write_file / execute_python_code, "output"
-        for run_file, etc).
+        passes "output" for run_file, etc).
       - Paths under /skills/ are filtered out — skill files are
         runtime plumbing, not user-visible content. They never appear
         in state["files"].
@@ -1178,8 +1174,8 @@ async def resolve_credentials_or_error(
 ) -> tuple[dict[str, str], dict[str, str], list[str]] | Command:
     """Validate, resolve, and decrypt the credentials for one tool call.
 
-    Shared by ``execute_python_code`` and ``run_file`` so both tools have
-    the exact same credential semantics.
+    Used by ``run_file`` to apply the credential materialization plans the
+    LLM supplied for a skill-script run.
 
     Returns ``(env_vars, file_uploads, redaction_list)`` on success, or a
     ``Command`` carrying a tool-error message on any failure (bad shape,
@@ -1261,241 +1257,3 @@ async def resolve_credentials_or_error(
     redaction_list = list(secret_values.values())
     secret_values.clear()
     return env_vars, file_uploads, redaction_list
-
-
-def make_execute_python_code(db=None):
-    """Build the ``execute_python_code`` tool with credential support.
-
-    SECURITY NOTE — residual tamper surface:
-
-    This tool is the only agent-controlled path to arbitrary code
-    execution. Under the zero-trust model:
-
-      - The agent runs as the ``daytona`` user via ``exec_as_daytona``,
-        so it cannot tamper with /skills/ (root-owned, mode 0644).
-        POSIX permissions enforce skill-script integrity.
-      - However, /workspace and /data are mountpoint-s3 volumes. The
-        ownership probe (/tmp/daytona_ownership_probe.py) confirmed that
-        chown/chmod return EPERM on those mounts even from root, and
-        mountpoint-s3 reports them as world-writable regardless of the
-        underlying user. **Filesystem permissions do not enforce
-        read-only on /workspace or /data.** The daytona user CAN write,
-        modify, or delete files there via ``execute_python_code``.
-      - HITL approval is the only defense for /workspace / /data write
-        attempts. Every ``execute_python_code`` invocation is in
-        ``_HITL_TOOLS`` (graph.py) and the user reviews the code before
-        it runs. A sufficiently subtle tamper that the user approves
-        without noticing would succeed.
-
-    The /skills/ trust story is strict (enforced by the OS); the
-    /workspace / /data integrity story is HITL-mediated. If this
-    tool is ever extended, removed, or replaced, revisit how skill
-    outputs in /workspace are protected from agent post-processing.
-
-    Args:
-        db: Application database. Required for credential resolution.
-            When None, the tool still runs but rejects any non-empty
-            ``credentials`` argument.
-
-    Returns the configured ``execute_python_code`` tool.
-    """
-
-    @tool
-    async def execute_python_code(
-        code: str,
-        credentials: list[dict] | None = None,
-        *,
-        runtime: ToolRuntime,
-    ) -> Command:
-        """Execute Python code in a sandboxed environment and return the output.
-
-        Use this tool to run data analysis, computations, or any Python code.
-        The sandbox persists across calls within the same conversation, so
-        you can build on previous code executions.
-
-        Args:
-            code: Python code to execute.
-            credentials: Optional list of materialization plans describing
-                which stored secrets to make available to this run. When a
-                skill activation lists required credential names (from a
-                ``metadata.openclaw.requires.env`` block in its SKILL.md),
-                use those names here — wrap them in an ``env_vars`` plan.
-
-                Each entry has a ``kind`` of either ``env_vars`` or ``file``,
-                and an explicit ``names`` list enumerating the stored secrets
-                it touches.
-
-                ``env_vars`` entries set environment variables. The env var
-                name is the same as the stored secret name:
-
-                    {"kind": "env_vars", "names": ["TAHMO_USERNAME", "TAHMO_PASSWORD"]}
-
-                ``file`` entries write a file with templated content. Use
-                ``{NAME}`` placeholders in ``content`` to inject stored
-                secret values; the same names must also appear in the
-                ``names`` list:
-
-                    {"kind": "file", "path": "~/.netrc",
-                     "names": ["NASA_USERNAME", "NASA_PASSWORD"],
-                     "content": "machine x login {NASA_USERNAME} password {NASA_PASSWORD}\\n"}
-
-                The user must approve the run before any credential is
-                injected. Do not print, log, or echo credential values
-                from your script — the system will redact verbatim
-                occurrences from output as a backstop, and the user can see
-                which secret names you requested in the approval card.
-        """
-        thread_id = runtime.config.get("configurable", {}).get("thread_id", "default")
-        materializations = credentials or []
-
-        # 1. Structural validation. Bad shapes get rejected with a
-        #    tool-error message that the LLM can read and correct from.
-        shape_error = _validate_materializations(materializations)
-        if shape_error:
-            return Command(
-                update={
-                    "messages": [
-                        ToolMessage(
-                            content=f"Credential error: {shape_error}",
-                            tool_call_id=runtime.tool_call_id,
-                            status="error",
-                        )
-                    ]
-                }
-            )
-
-        # 2. Resolve referenced names against the user's store. If any name
-        #    is missing, reject before running anything.
-        referenced_names = _collect_referenced_names(materializations)
-        secret_values: dict[str, str] = {}
-        if referenced_names:
-            if db is None:
-                return Command(
-                    update={
-                        "messages": [
-                            ToolMessage(
-                                content="Credential error: credentials feature is not configured",
-                                tool_call_id=runtime.tool_call_id,
-                                status="error",
-                            )
-                        ]
-                    }
-                )
-            convo = await db.get_conversation_by_id(thread_id)
-            if not convo:
-                return Command(
-                    update={
-                        "messages": [
-                            ToolMessage(
-                                content="Credential error: cannot resolve conversation owner",
-                                tool_call_id=runtime.tool_call_id,
-                                status="error",
-                            )
-                        ]
-                    }
-                )
-            user_id = convo["user_id"]
-            secret_values, missing, err = await _resolve_secrets(db, user_id, referenced_names)
-            if missing:
-                logger.info("Credential names not configured (skipped): %s", ", ".join(missing))
-            if err:
-                return Command(
-                    update={
-                        "messages": [
-                            ToolMessage(
-                                content=f"Credential error: {err}",
-                                tool_call_id=runtime.tool_call_id,
-                                status="error",
-                            )
-                        ]
-                    }
-                )
-
-        # 3. Build the per-execution env vars and file uploads from the
-        #    decrypted values. Drop the values dict immediately after.
-        env_vars, file_uploads = _build_runtime_injection(materializations, secret_values)
-        redaction_list = list(secret_values.values())
-        secret_values.clear()
-
-        def _run():
-            sandbox = _get_or_create_sandbox(thread_id)
-
-            # Apply credential file materializations before running.
-            # fs.upload_file goes through the Daytona toolbox-api as
-            # root, so files land owned root:root. After upload, chown
-            # to daytona and chmod 0600 so the daytona-context script
-            # can read them; without the chown, daytona would EACCES
-            # on a 0600 root-owned file.
-            for path, content in file_uploads.items():
-                upload_path = _normalize_sandbox_upload_path(path)
-                try:
-                    sandbox.fs.upload_file(content.encode("utf-8"), upload_path)
-                except Exception:
-                    logger.warning("Failed to upload credential file %s", path, exc_info=True)
-                # chown + chmod via the unwrapped exec path (root) so
-                # daytona ends up able to read the file.
-                try:
-                    sandbox.process.exec(
-                        f"chown {SANDBOX_DAYTONA_USER}:{SANDBOX_DAYTONA_USER} {shlex.quote(path)}; "
-                        f"chmod 0600 {shlex.quote(path)}"
-                    )
-                except Exception:
-                    pass
-
-            # Run the agent's code as daytona via su -l wrapping. The
-            # code is base64-encoded to avoid shell-quoting hazards from
-            # the agent's source (which may contain quotes, $-expansions,
-            # etc.). The wrapped command pipes the decoded source into
-            # python on stdin so the bytes never appear in argv (would
-            # be visible in /proc/<pid>/cmdline).
-            #
-            # Drain any pre-existing inotify events first so this run's
-            # session-file delta starts from a clean slate.
-            drain_inotify_journal(sandbox, default_source="agent")
-
-            code_b64 = base64.b64encode(code.encode("utf-8")).decode("ascii")
-            run_cmd = f"echo {shlex.quote(code_b64)} | base64 -d | python3"
-            # Run in /workspace so relative-path writes (e.g. open("out.csv"))
-            # land on the persistent volume and show up in the session view,
-            # matching run_file/exec_skill. Without cwd, su -l starts the
-            # shell at daytona's $HOME and outputs land off the volume.
-            response = exec_as_daytona(sandbox, run_cmd, cwd=SANDBOX_WORKSPACE, env=env_vars or None)
-
-            # Pick up any new files the script wrote, via the inotify
-            # journal. The drain returns logical paths with proper
-            # source labels (/data → "data", /workspace → "agent").
-            new_files = drain_inotify_journal(sandbox, default_source="agent")
-
-            # Best-effort cleanup of credential files. Run as root via
-            # the unwrapped path so we can rm files we chowned to
-            # daytona (root can rm regardless).
-            for path in file_uploads:
-                try:
-                    sandbox.process.exec(f"rm -f {shlex.quote(path)}")
-                except Exception:
-                    pass
-
-            if response.exit_code != 0:
-                return f"Error (exit code {response.exit_code}):\n{response.result}", new_files
-            return response.result, new_files
-
-        result, new_files = await asyncio.to_thread(_run)
-
-        # Backstop: scrub verbatim secret values from anything we return.
-        result = redact_output(result, redaction_list)
-
-        update_dict: dict = {
-            "messages": [
-                ToolMessage(
-                    content=result,
-                    tool_call_id=runtime.tool_call_id,
-                )
-            ],
-        }
-
-        if new_files:
-            update_dict["files"] = new_files
-
-        return Command(update=update_dict)
-
-    return execute_python_code

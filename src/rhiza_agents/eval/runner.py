@@ -1,9 +1,9 @@
 """CLI entrypoint for running a Langfuse dataset experiment.
 
-Builds the rhiza-agents supervisor graph from default agent configs (no
-per-user overrides), then uses Langfuse's `dataset.run_experiment` to invoke
-the graph against every dataset item, automatically creating a dataset run
-in Langfuse with linked traces and any evaluator scores.
+Builds the rhiza-agents agent graph from default agent configs (no per-user
+overrides), then uses Langfuse's `dataset.run_experiment` to invoke the graph
+against every dataset item, automatically creating a dataset run in Langfuse
+with linked traces and any evaluator scores.
 
 Each item runs in an isolated in-memory checkpointer thread so items don't
 share conversation state. The runner does not load vectorstores or per-user
@@ -27,7 +27,7 @@ from langchain_core.messages import HumanMessage
 from langfuse import Evaluation, get_client
 from langgraph.checkpoint.memory import InMemorySaver
 
-from ..agents.graph import build_graph
+from ..agents.graph import build_agent_graph
 from ..agents.registry import get_default_configs
 from ..agents.tools.mcp import load_mcp_tools_for_server
 
@@ -35,26 +35,23 @@ logger = logging.getLogger(__name__)
 
 
 async def _build_eval_graph():
-    """Build a supervisor graph wired with default configs and system MCP tools.
+    """Build an agent graph wired with default configs and system MCP tools.
 
     Uses an in-memory checkpointer so eval runs never touch the dev DB.
     """
     mcp_url = os.environ.get("MCP_SERVER_URL", "")
     mcp_tools: list = []
     mcp_tools_by_server: dict[str, list] = {}
-    mcp_server_names: dict[str, str] = {}
     if mcp_url:
         mcp_tools = await load_mcp_tools_for_server(mcp_url, "sse")
         if mcp_tools:
             mcp_tools_by_server = {"sheerwater": mcp_tools}
-            mcp_server_names = {"sheerwater": "Sheerwater"}
 
-    return await build_graph(
+    return await build_agent_graph(
         configs=get_default_configs(),
         mcp_tools=mcp_tools,
         checkpointer=InMemorySaver(),
         mcp_tools_by_server=mcp_tools_by_server,
-        mcp_server_names=mcp_server_names,
     )
 
 
@@ -116,7 +113,7 @@ async def _run(dataset_name: str, run_name: str | None, max_concurrency: int) ->
     # datasets have no need for parallelism. Bump --concurrency for larger
     # datasets if the downstream services can take it.
     experiment = dataset.run_experiment(
-        name="rhiza-agents-supervisor",
+        name="rhiza-agents",
         run_name=run_name,
         task=task,
         evaluators=[_has_output_evaluator],
@@ -133,7 +130,7 @@ async def _run(dataset_name: str, run_name: str | None, max_concurrency: int) ->
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run a Langfuse dataset experiment against the supervisor graph.")
+    parser = argparse.ArgumentParser(description="Run a Langfuse dataset experiment against the agent graph.")
     parser.add_argument("--dataset", required=True, help="Langfuse dataset name")
     parser.add_argument(
         "--label",

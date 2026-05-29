@@ -8,11 +8,10 @@ Trust model:
     /tmp/daytona_ownership_probe.py confirmed mountpoint-s3 rejects
     chown/chmod, so /workspace and /data are world-writable from inside
     the sandbox. Filesystem permissions cannot enforce read-only on
-    those volumes; HITL approval on execute_python_code is the only
-    defense for write-from-agent attempts there.
+    those volumes; HITL approval on run_file is the only defense for
+    write-from-agent attempts there.
   - The agent has no direct file-write tool. Side-effecting file writes
-    happen only via skill execution (run_file with /skills/<...> paths)
-    or via execute_python_code (HITL-approved arbitrary code).
+    happen only via skill execution (run_file with /skills/<...> paths).
   - run_file is restricted to /skills/<name>/scripts/<file> paths only.
     Anything else returns an error.
   - File metadata in state["files"] is populated by the per-sandbox

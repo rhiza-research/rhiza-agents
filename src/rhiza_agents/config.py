@@ -1,7 +1,38 @@
 """Environment-based configuration."""
 
+import json
+import logging
 import os
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
+
+
+def _parse_channel_user_map(raw: str) -> dict[str, str]:
+    """Parse SLACK_CHANNEL_USER_MAP (a JSON object of Slack channel id -> user id).
+
+    Empty or invalid input yields an empty map, which makes the Slack
+    connector match no channels (and logs a warning so the operator gets a
+    signal rather than a silently dead bot). Only scalar (str/int) values are
+    accepted; non-scalar values are skipped to avoid stringified garbage ids.
+    """
+    if not raw.strip():
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        logger.warning("SLACK_CHANNEL_USER_MAP is not valid JSON; ignoring (Slack will match no channels)")
+        return {}
+    if not isinstance(data, dict):
+        logger.warning("SLACK_CHANNEL_USER_MAP must be a JSON object; ignoring")
+        return {}
+    result: dict[str, str] = {}
+    for k, v in data.items():
+        if isinstance(v, (str, int)) and not isinstance(v, bool):
+            result[str(k)] = str(v)
+        else:
+            logger.warning("SLACK_CHANNEL_USER_MAP entry %r has a non-scalar value; skipping", k)
+    return result
 
 
 @dataclass
@@ -47,6 +78,11 @@ class Config:
     # Credential encryption (feature is disabled if unset)
     credential_encryption_key: str
 
+    # Slack connector (disabled if bot/app tokens unset)
+    slack_bot_token: str
+    slack_app_token: str
+    slack_channel_user_map: dict[str, str]
+
     @classmethod
     def from_env(cls) -> "Config":
         """Load configuration from environment variables."""
@@ -73,4 +109,7 @@ class Config:
             langfuse_secret_key=os.environ.get("LANGFUSE_SECRET_KEY", ""),
             langfuse_base_url=os.environ.get("LANGFUSE_BASE_URL", ""),
             credential_encryption_key=os.environ.get("CREDENTIAL_ENCRYPTION_KEY", ""),
+            slack_bot_token=os.environ.get("SLACK_BOT_TOKEN", ""),
+            slack_app_token=os.environ.get("SLACK_APP_TOKEN", ""),
+            slack_channel_user_map=_parse_channel_user_map(os.environ.get("SLACK_CHANNEL_USER_MAP", "")),
         )

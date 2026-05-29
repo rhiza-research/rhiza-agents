@@ -1,4 +1,4 @@
-"""Message processing and agent name resolution.
+"""Message processing.
 
 This module is the single source of truth for converting raw LangGraph messages
 into structured output, used by both the streaming path and the message loading path.
@@ -7,11 +7,6 @@ into structured output, used by both the streaming path and the message loading 
 import json
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-
-from .db.models import AgentConfig
-
-_HANDOFF_BACK_KEY = "__is_handoff_back"
-_TRANSFER_PREFIX = "transfer_to_"
 
 
 def extract_chart_url(content) -> str | None:
@@ -81,105 +76,38 @@ def extract_content_blocks_from_token(token) -> tuple[str, str]:
     return "", ""
 
 
-def build_name_mappings(configs: list[AgentConfig], mcp_tools: list) -> tuple[dict[str, str], dict[str, str]]:
-    """Build agent_names and tool_to_agent mappings from a config list."""
-    agent_names = {c.id: c.name for c in configs}
-    tool_to_agent = {}
-    for c in configs:
-        for tool_id in c.tools:
-            if tool_id.startswith("mcp:"):
-                for t in mcp_tools:
-                    tool_to_agent[t.name] = c.id
-        if "sandbox:daytona" in c.tools:
-            tool_to_agent["execute_python_code"] = c.id
-            tool_to_agent["write_file"] = c.id
-            tool_to_agent["run_file"] = c.id
-    return agent_names, tool_to_agent
+# Internal handoff/transfer tool artifacts that can appear in stored conversation
+# history; filtered out so they do not render as ordinary messages.
+_HANDOFF_PREFIXES = ("transfer_to_", "transfer_back_to_")
 
 
-def resolve_agent_name(
-    agent_names: dict[str, str],
-    node_name: str | None = None,
-    ns: list | tuple = (),
-    fallback: str | None = None,
-) -> str | None:
-    """Resolve an agent display name from a node name or namespace.
-
-    This is the single source of truth for agent name resolution, used by both
-    the streaming path and the message loading path.
-
-    Args:
-        agent_names: mapping of agent_id -> display_name
-        node_name: LangGraph node name (e.g. "research_assistant", "agent")
-        ns: subgraph namespace tuple/list (e.g. ("research_assistant:uuid",))
-        fallback: fallback display name if nothing resolves
-
-    Returns:
-        Resolved display name, or fallback
-    """
-    # Try namespace first — strip UUID suffixes
-    # e.g. "research_assistant:76a5e5c1-..." -> "research_assistant"
-    for ns_part in ns:
-        bare = ns_part.split(":")[0] if ":" in str(ns_part) else str(ns_part)
-        if bare in agent_names:
-            return agent_names[bare]
-
-    # Try node name directly
-    if node_name and node_name in agent_names:
-        return agent_names[node_name]
-
-    return fallback
-
-
-def process_messages(raw_messages, agent_names: dict[str, str]) -> list[dict]:
+def process_messages(raw_messages) -> list[dict]:
     """Process raw LangGraph messages into a single ordered list.
 
     Each item has a "type" field: "human", "ai", "thinking", "tool_call", "tool_result".
-    AI responses include "agent_name" when known. Handoff messages are filtered out.
     """
     messages = []
-    current_agent = None  # track which worker agent is active
 
     for msg in raw_messages:
         if isinstance(msg, HumanMessage):
-            current_agent = None
             messages.append({"type": "human", "content": msg.content})
 
         elif isinstance(msg, AIMessage):
-            # Skip handoff-back messages
-            if msg.response_metadata.get(_HANDOFF_BACK_KEY, False):
-                continue
-
             text, reasoning = extract_content_blocks(msg.content)
-            tool_calls = msg.tool_calls or []
-
-            agent_name = resolve_agent_name(agent_names, node_name=msg.name, fallback=agent_names.get(current_agent))
-
-            # Track current agent from explicit transfers only.
-            for tc in tool_calls:
-                if tc["name"].startswith(_TRANSFER_PREFIX):
-                    agent_id = tc["name"][len(_TRANSFER_PREFIX) :]
-                    if agent_id in agent_names:
-                        current_agent = agent_id
+            tool_calls = [tc for tc in (msg.tool_calls or []) if not tc.get("name", "").startswith(_HANDOFF_PREFIXES)]
 
             if reasoning:
                 messages.append({"type": "thinking", "content": reasoning})
 
             if text:
-                entry = {"type": "ai", "content": text}
-                if agent_name:
-                    entry["agent_name"] = agent_name
-                messages.append(entry)
+                messages.append({"type": "ai", "content": text})
 
             for tc in tool_calls:
-                if tc["name"].startswith(("transfer_to_", "transfer_back_to_")):
-                    continue
                 messages.append({"type": "tool_call", "name": tc["name"], "args": tc["args"]})
 
         elif isinstance(msg, ToolMessage):
-            # Skip handoff tool messages
-            if msg.response_metadata.get(_HANDOFF_BACK_KEY, False):
-                continue
+            if msg.name and msg.name.startswith(_HANDOFF_PREFIXES):
+                continue  # internal handoff tool result; not a user-facing message
             content = msg.content
             # Extract text from content block lists
             if isinstance(content, list):

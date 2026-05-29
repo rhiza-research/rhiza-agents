@@ -115,7 +115,7 @@ def test_workspace_input_resolving_into_data_rejected(logical):
 # Symlink-escape guard (in-sandbox realpath check).
 #
 # workspace_path's normpath is lexical; it cannot see a symlink the agent
-# planted in the sandbox FS via HITL-approved execute_python_code. The
+# planted in the sandbox FS via a HITL-approved skill script (run_file). The
 # read/write helpers resolve the real path in-sandbox via ``realpath -m``
 # and reject anything that resolves outside /workspace or /data, before
 # any read or write runs.

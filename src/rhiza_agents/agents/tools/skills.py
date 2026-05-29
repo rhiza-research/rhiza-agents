@@ -208,7 +208,7 @@ def has_scripts(skill_record: dict) -> bool:
 _EXECUTABLE_LANGS = {"bash", "sh", "shell", "python", "python3", "py", "zsh", "fish", "powershell", "ruby", "perl"}
 
 # allowed-tools values that imply execution capability
-_EXECUTION_TOOLS = {"bash", "shell", "terminal", "code_execution", "run_file", "execute_python_code"}
+_EXECUTION_TOOLS = {"bash", "shell", "terminal", "code_execution", "run_file"}
 
 
 def requires_sandbox(skill_record: dict) -> bool:

@@ -43,6 +43,14 @@ postgres = [
 ]
 sandbox = [
     "daytona-sdk>=0.166.0",
+    # Shell-AST parser for the read-only bash inspection tool's validator.
+    "bashlex==0.18",
+]
+slack = [
+    "slack-bolt>=1.28.0",
+    "slack-sdk>=3.42.0",
+    # slack_bolt's async app imports aiohttp at module load
+    "aiohttp>=3.13.5",
 ]
 vectorstore = [
     "langchain-chroma>=1.1.0",

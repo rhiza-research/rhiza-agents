@@ -1,10 +1,10 @@
-"""Supervisor convenience module tying together registry + graph."""
+"""Convenience module tying together registry + graph for the web path."""
 
 import json
 
 from ..db.models import AgentConfig
 from ..db.sqlite import Database
-from .graph import get_or_build_graph
+from .graph import get_or_build_agent_graph
 from .registry import get_default_configs, merge_configs
 
 
@@ -19,13 +19,16 @@ async def get_agent_graph(
     mcp_server_names: dict[str, str] | None = None,
     skill_tools: dict | None = None,
 ):
-    """Get the compiled agent graph.
+    """Get the compiled agent graph for the web path.
 
     If user_configs is provided directly, uses those (callers that have
     already computed the merged effective configs should prefer this path
     to avoid re-fetching them from the database).
     If user_id and db are provided, loads overrides from the database.
     Otherwise uses defaults.
+
+    ``mcp_server_names`` is accepted for call-site compatibility but the
+    agent graph does not embed per-server descriptions in its prompt.
     """
     if user_configs is not None:
         configs = user_configs
@@ -36,14 +39,13 @@ async def get_agent_graph(
         configs = merge_configs(defaults, overrides)
     else:
         configs = get_default_configs()
-    return await get_or_build_graph(
+    return await get_or_build_agent_graph(
         configs,
         mcp_tools,
         checkpointer,
         vectorstore_manager,
         db,
         mcp_tools_by_server,
-        mcp_server_names,
         skill_tools,
         user_id=user_id,
     )

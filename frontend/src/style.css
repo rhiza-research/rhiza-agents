@@ -94,11 +94,6 @@ body { height: 100vh; margin: 0; }
 .message-content th { background: var(--jp-layout-color2); }
 .message-content hr { border: none; border-top: 1px solid var(--jp-border-color1); margin: 1.5em 0; }
 .message-content img { max-width: 100%; border-radius: 4px; }
-.agent-badge {
-    font-size: 0.75rem; color: var(--jp-brand-color2);
-    background: rgba(33,150,243,0.15);
-    padding: 0.15rem 0.5rem; border-radius: 3px; margin-bottom: 0.5rem; display: inline-block;
-}
 
 /* Per-message thumbs feedback (sent to Langfuse as scores) */
 .feedback-buttons {
@@ -123,7 +118,6 @@ body { height: 100vh; margin: 0; }
     color: white; opacity: 1;
 }
 .feedback-status { font-size: 0.75rem; color: var(--jp-ui-font-color3); }
-.agent-badge-container { margin-bottom: 0.25rem; }
 .message.streaming .message-content::after { content: "\25ca"; animation: blink 1s infinite; color: var(--jp-brand-color1); }
 @keyframes blink { 0%,50% { opacity:1; } 51%,100% { opacity:0; } }
 
@@ -313,16 +307,6 @@ body { height: 100vh; margin: 0; }
 .config-form-header { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1.5rem; }
 .config-form-actions { display: flex; gap: 0.75rem; margin-top: 1.5rem; justify-content: flex-end; }
 .custom-badge { font-size: 0.7rem; color: var(--md-orange-300); background: rgba(255,152,0,0.15); padding: 0.15rem 0.5rem; border-radius: 3px; }
-.agent-list { display: flex; flex-direction: column; gap: 2px; }
-.agent-list-item {
-    display: flex; justify-content: space-between; align-items: center; padding: 0.5rem;
-    background: none; border: none; border-radius: 4px; cursor: pointer; font-size: 0.85rem;
-    text-align: left; width: 100%; font-family: inherit; color: var(--jp-ui-font-color2);
-}
-.agent-list-item:hover { background: var(--jp-layout-color2); }
-.agent-list-item.active { background: var(--jp-layout-color2); color: var(--jp-ui-font-color0); }
-.agent-list-item.disabled .agent-list-name { text-decoration: line-through; color: var(--jp-ui-font-color3); }
-.agent-list-type { font-size: 0.7rem; color: var(--jp-ui-font-color3); text-transform: uppercase; }
 .config-btn {
     padding: 0.5rem; border: 1px solid var(--jp-border-color1); border-radius: 4px;
     background: none; cursor: pointer; font-size: 0.8rem; font-family: inherit;
