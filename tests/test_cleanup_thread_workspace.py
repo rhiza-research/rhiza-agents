@@ -135,3 +135,33 @@ def test_uses_custom_homes_mount_path(monkeypatch):
         sbx.cleanup_thread_workspace("thread-w")
 
     assert "find /persist -mindepth 1 -delete" in active.exec_calls[0]
+
+
+@pytest.mark.parametrize("bad_path", ["/", "/etc", "/var", "/home", "/root", "/usr", "/.."])
+def test_refuses_unsafe_homes_mount_path(monkeypatch, bad_path):
+    """A misconfigured homes mount path that resolves to a system tree
+    must not run the recursive delete — no exec, no temp sandbox."""
+    monkeypatch.setenv("DAYTONA_HOMES_MOUNT_PATH", bad_path)
+    active = _RecordingSandbox()
+    sbx._sandboxes["thread-bad"] = active
+
+    with mock.patch.object(sbx, "_get_daytona") as mock_daytona:
+        sbx.cleanup_thread_workspace("thread-bad")
+
+    # Guard fired before any filesystem-touching command ran.
+    assert active.exec_calls == []
+    mock_daytona.assert_not_called()
+
+
+def test_is_safe_cleanup_path_guard():
+    """Direct check of the guard predicate: dedicated mounts allowed,
+    system trees and empty/relative paths refused."""
+    assert sbx._is_safe_cleanup_path("/workspace") is True
+    assert sbx._is_safe_cleanup_path("/persist") is True
+    assert sbx._is_safe_cleanup_path("/data/homes") is True
+    assert sbx._is_safe_cleanup_path("/") is False
+    assert sbx._is_safe_cleanup_path("") is False
+    assert sbx._is_safe_cleanup_path("relative/path") is False
+    assert sbx._is_safe_cleanup_path("/etc") is False
+    # Normalization collapses traversal back to "/".
+    assert sbx._is_safe_cleanup_path("/..") is False

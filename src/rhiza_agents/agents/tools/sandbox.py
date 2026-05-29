@@ -607,6 +607,53 @@ def _build_volume_mounts(thread_id: str):
     return mounts or None
 
 
+# Top-level directories that must never be the target of the recursive
+# workspace delete. A misconfigured DAYTONA_HOMES_MOUNT_PATH (e.g. "/"
+# or unset-to-empty resolving somewhere unexpected) would otherwise turn
+# `find <path> -mindepth 1 -delete` into a wipe of a system tree.
+_FORBIDDEN_CLEANUP_PATHS = frozenset(
+    {
+        "/",
+        "/bin",
+        "/boot",
+        "/dev",
+        "/etc",
+        "/home",
+        "/lib",
+        "/lib64",
+        "/proc",
+        "/root",
+        "/run",
+        "/sbin",
+        "/srv",
+        "/sys",
+        "/tmp",
+        "/usr",
+        "/var",
+    }
+)
+
+
+def _is_safe_cleanup_path(homes_path: str) -> bool:
+    """Return True only if ``homes_path`` is safe to recursively empty.
+
+    Refuses an empty/relative path, ``/``, and any well-known system
+    directory. The delete is ``find <path> -mindepth 1 -delete``; pointing
+    it at one of these would wipe a system tree. A dedicated workspace
+    mount is an absolute path at least two levels deep (e.g. ``/workspace``
+    is one level but explicitly allowed via the not-forbidden check below;
+    anything shallower or system-owned is refused).
+    """
+    if not homes_path:
+        return False
+    resolved = os.path.normpath(homes_path)
+    if not resolved.startswith("/"):
+        return False
+    if resolved in _FORBIDDEN_CLEANUP_PATHS:
+        return False
+    return True
+
+
 def cleanup_thread_workspace(thread_id: str) -> None:
     """Remove a thread's subpath from the homes volume.
 
@@ -633,6 +680,14 @@ def cleanup_thread_workspace(thread_id: str) -> None:
         return
 
     homes_path = os.environ.get(_HOMES_MOUNT_PATH_ENV, "").strip() or SANDBOX_WORKSPACE
+    if not _is_safe_cleanup_path(homes_path):
+        logger.error(
+            "Refusing workspace cleanup for thread %s: homes mount path %r is not a "
+            "dedicated workspace mount (would recursively delete a system tree)",
+            thread_id,
+            homes_path,
+        )
+        return
     rm_cmd = f"find {shlex.quote(homes_path)} -mindepth 1 -delete"
 
     # Path 1: reuse the active per-thread sandbox if alive.
