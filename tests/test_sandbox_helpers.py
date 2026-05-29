@@ -22,6 +22,7 @@ from unittest import mock
 from rhiza_agents.agents.tools.sandbox import (
     drain_inotify_journal,
     exec_as_daytona,
+    list_workspace_files,
 )
 
 # ---------------------------------------------------------------------------
@@ -137,10 +138,13 @@ def _drain_with_responses(*responses: tuple[int, str], **kwargs):
     """Invoke drain_inotify_journal with ``exec_as_daytona`` returning the
     given (exit_code, result) responses in order.
 
-    First call is the drain (cat then truncate); second is the stat
-    batch over the surviving paths.
+    The first exec_as_daytona call drain makes is the liveness probe
+    (``pgrep -x inotifywait``); we prepend a success response for it so
+    the daemon is reported alive and no restart fires. The supplied
+    responses then map to the drain (cat + truncate) and the stat batch.
     """
-    fake_responses = [SimpleNamespace(exit_code=ec, result=res) for ec, res in responses]
+    probe = SimpleNamespace(exit_code=0, result="")
+    fake_responses = [probe] + [SimpleNamespace(exit_code=ec, result=res) for ec, res in responses]
     with mock.patch(
         "rhiza_agents.agents.tools.sandbox.exec_as_daytona",
         side_effect=fake_responses,
@@ -256,3 +260,58 @@ def test_drain_failed_drain_exec_returns_empty():
     return an empty dict rather than blowing up the calling tool."""
     result, _ = _drain_with_responses((1, ""))
     assert result == {}
+
+
+def test_drain_handles_tab_in_filename():
+    """A filename with an embedded tab must still be tracked. The path is
+    everything between the event field and the timestamp field, so the
+    tab inside the name does not split the record into the wrong shape."""
+    weird = "/workspace/odd\tname.py"
+    journal = f"CREATE\t{weird}\t1700000000\n"
+    stat_out = f"{weird}|7|1700000000"
+    result, _ = _drain_with_responses((0, journal), (0, stat_out))
+    # Logical key strips the /workspace prefix but keeps the embedded tab.
+    assert "/odd\tname.py" in result
+    assert result["/odd\tname.py"]["size"] == 7
+
+
+# ---------------------------------------------------------------------------
+# list_workspace_files — NUL-separated find parsing
+# ---------------------------------------------------------------------------
+
+
+def _list_with_response(exit_code: int, result: str):
+    class _P:
+        def exec(self, _cmd, **_kwargs):
+            return SimpleNamespace(exit_code=exit_code, result=result)
+
+    sandbox = SimpleNamespace(process=_P())
+    return list_workspace_files(sandbox, "/workspace")
+
+
+def test_list_parses_nul_separated_records():
+    out = "/workspace/a.py\x0010\x001700000000\x00/workspace/b.txt\x0020\x001700000001\x00"
+    files = _list_with_response(0, out)
+    paths = {f["path"] for f in files}
+    assert paths == {"/workspace/a.py", "/workspace/b.txt"}
+
+
+def test_list_handles_tab_in_filename():
+    """A tab in a filename used to be dropped by the TSV split. With
+    NUL-separated records the file is parsed correctly."""
+    weird = "/workspace/odd\tname.py"
+    out = f"{weird}\x00512\x001700000000\x00"
+    files = _list_with_response(0, out)
+    assert len(files) == 1
+    assert files[0]["path"] == weird
+    assert files[0]["size"] == 512
+
+
+def test_list_handles_newline_in_filename():
+    """A newline in a filename also survives — line-based parsing would
+    corrupt it, NUL-separated parsing does not."""
+    weird = "/workspace/two\nlines.py"
+    out = f"{weird}\x001\x001700000000\x00"
+    files = _list_with_response(0, out)
+    assert len(files) == 1
+    assert files[0]["path"] == weird
