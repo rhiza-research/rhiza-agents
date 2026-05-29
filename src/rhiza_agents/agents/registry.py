@@ -33,6 +33,10 @@ need, say so.
 `/data` is a shared read-only cache populated by skills; `/workspace` is the \
 per-conversation output area. Scripts run via `run_file` use `uv run`, which \
 resolves the skill author's declared dependencies — you don't manage them.
+
+Use the read-only `bash` tool to inspect the sandbox filesystem — list, \
+search, check sizes/ages, and peek at file contents under `/workspace` and \
+`/data` — before and between skill runs; it cannot write files or run code.
 """
 
 

@@ -43,6 +43,8 @@ postgres = [
 ]
 sandbox = [
     "daytona-sdk>=0.166.0",
+    # Shell-AST parser for the read-only bash inspection tool's validator.
+    "bashlex==0.18",
 ]
 slack = [
     "slack-bolt>=1.28.0",

@@ -128,11 +128,15 @@ async def _resolve_tools(
             else:
                 logger.info("Skill %s not loaded, skipping", skill_id)
         elif tool_id == "sandbox:daytona":
+            from .tools.bash_inspect import make_bash
             from .tools.files import make_run_file
             from .tools.sandbox import is_sandbox_available
 
             if is_sandbox_available():
                 tools.append(make_run_file(db=db))
+                # Read-only inspection shell. Not in _HITL_TOOLS — it cannot
+                # write, execute, or fetch, so it auto-approves.
+                tools.append(make_bash())
             # If no API key, silently skip sandbox tools -- agent works without them
         else:
             logger.info("Tool type %s not yet implemented, skipping", tool_id)
