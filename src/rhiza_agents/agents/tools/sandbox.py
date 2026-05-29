@@ -1195,7 +1195,11 @@ def make_execute_python_code(db=None):
 
             code_b64 = base64.b64encode(code.encode("utf-8")).decode("ascii")
             run_cmd = f"echo {shlex.quote(code_b64)} | base64 -d | python3"
-            response = exec_as_daytona(sandbox, run_cmd, env=env_vars or None)
+            # Run in /workspace so relative-path writes (e.g. open("out.csv"))
+            # land on the persistent volume and show up in the session view,
+            # matching run_file/exec_skill. Without cwd, su -l starts the
+            # shell at daytona's $HOME and outputs land off the volume.
+            response = exec_as_daytona(sandbox, run_cmd, cwd=SANDBOX_WORKSPACE, env=env_vars or None)
 
             # Pick up any new files the script wrote, via the inotify
             # journal. The drain returns logical paths with proper
