@@ -377,8 +377,137 @@ async def get_or_build_graph(
 
 
 def invalidate_graph_cache(config_hash: str | None = None):
-    """Invalidate cached graph. If config_hash is None, clear all."""
+    """Invalidate cached graph. If config_hash is None, clear all.
+
+    Pops both the supervisor entry and the matching single-agent entry
+    (``single:`` prefix) so a config change evicts the Slack graph too.
+    """
     if config_hash is None:
         _graph_cache.clear()
     else:
         _graph_cache.pop(config_hash, None)
+        _graph_cache.pop("single:" + config_hash, None)
+
+
+async def build_single_agent_graph(
+    configs: list[AgentConfig],
+    mcp_tools: list,
+    checkpointer,
+    vectorstore_manager=None,
+    db=None,
+    mcp_tools_by_server: dict[str, list] | None = None,
+    skill_tools: dict | None = None,
+    user_id: str | None = None,
+):
+    """Build a compiled single-agent graph (used by the Slack connector).
+
+    One agent holds the union of every enabled worker's resolved tools,
+    deduplicated by tool name, minus ``execute_python_code``. The agent is
+    skills-only: it keeps ``run_file`` (skill-script execution) but never the
+    ad-hoc Python tool. HITL interrupts on ``run_file`` still fire — the Slack
+    consumer auto-approves them. The web UI's supervisor graph is unaffected.
+
+    Skills-only is the structural guard that makes auto-approve safe: the two
+    move together. Do not reintroduce ``execute_python_code`` on this path.
+    """
+    from .registry import get_single_agent_prompt
+
+    union: dict[str, object] = {}
+    model_name: str | None = None
+    for c in configs:
+        if not c.enabled:
+            continue
+        if c.type == "supervisor":
+            model_name = c.model
+            continue
+        tools = await _resolve_tools(c, mcp_tools, vectorstore_manager, db, mcp_tools_by_server, skill_tools)
+        for t in tools:
+            name = getattr(t, "name", None)
+            if name == "execute_python_code":
+                continue
+            if name and name not in union:
+                union[name] = t
+
+    tool_list = list(union.values())
+    if model_name is None:
+        model_name = next((c.model for c in configs if c.enabled and c.type != "supervisor"), None)
+
+    # Tell the agent which credential names exist (values never shown) when it
+    # has run_file — the web workers get the same hint for their sandbox tool.
+    prompt = get_single_agent_prompt()
+    if user_id and db is not None and any(getattr(t, "name", None) == "run_file" for t in tool_list):
+        try:
+            credential_names = await db.list_credential_names(user_id)
+        except Exception:  # pragma: no cover - DB errors logged elsewhere
+            credential_names = []
+        if credential_names:
+            prompt += (
+                "\n\nAvailable credential names (values are never visible to you):\n"
+                + "\n".join(f"  - {n}" for n in credential_names)
+                + "\n\nWhen running a skill that needs a secret, reference these names in"
+                " run_file's `credentials` argument. Never print, log, or echo the values."
+            )
+
+    model = ChatAnthropic(
+        model=model_name,
+        max_tokens=16000,
+        thinking={"type": "enabled", "budget_tokens": 10000},
+    )
+    agent = create_agent(
+        model,
+        tool_list,
+        system_prompt=prompt,
+        middleware=_build_worker_middleware(tool_list),
+        name="assistant",
+        state_schema=AgentGraphState,
+        checkpointer=checkpointer,
+    )
+    logger.info(
+        "Compiled single-agent graph: %d tools (skills-only) [%s]",
+        len(tool_list),
+        ", ".join(sorted(union.keys())),
+    )
+    return agent
+
+
+async def get_or_build_single_agent_graph(
+    configs: list[AgentConfig],
+    mcp_tools: list,
+    checkpointer,
+    vectorstore_manager=None,
+    db=None,
+    mcp_tools_by_server: dict[str, list] | None = None,
+    skill_tools: dict | None = None,
+    user_id: str | None = None,
+):
+    """Cached variant of ``build_single_agent_graph``.
+
+    Keyed separately from the supervisor graph cache (``single:`` prefix) so a
+    user's web (supervisor) and Slack (single-agent) graphs never collide.
+    """
+    credential_names: list[str] = []
+    if user_id and db is not None:
+        try:
+            credential_names = await db.list_credential_names(user_id)
+        except Exception:  # pragma: no cover
+            credential_names = []
+
+    h = "single:" + _config_hash(
+        configs,
+        list((mcp_tools_by_server or {}).keys()),
+        list((skill_tools or {}).keys()),
+        user_id=user_id,
+        credential_names=credential_names,
+    )
+    if h not in _graph_cache:
+        _graph_cache[h] = await build_single_agent_graph(
+            configs,
+            mcp_tools,
+            checkpointer,
+            vectorstore_manager,
+            db,
+            mcp_tools_by_server,
+            skill_tools,
+            user_id=user_id,
+        )
+    return _graph_cache[h]

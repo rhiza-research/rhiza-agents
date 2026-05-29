@@ -1,5 +1,6 @@
 """Shared FastAPI dependencies for route handlers."""
 
+import json
 import logging
 
 from fastapi import HTTPException, Request
@@ -64,20 +65,19 @@ def get_user_name(request: Request) -> str:
     return request.session.get("user", {}).get("preferred_username", "User")
 
 
-async def get_mcp_tools_for_user(
-    request: Request,
+async def mcp_tools_for_user(
+    db: Database,
+    system_tools_by_server: dict[str, list],
+    user_id: str,
 ) -> tuple[dict[str, list], dict[str, str]]:
-    """Get MCP tools and server names for the current user (system + user servers).
+    """Resolve MCP tools and server names for a user (system + user servers).
 
-    Returns (tools_by_server, server_names) tuple.
+    Request-free core used by both the web wrapper and the Slack connector.
+    Returns (tools_by_server, server_names).
     """
     from .agents.tools.mcp import load_mcp_tools_for_server
 
-    db = get_db(request)
-    user_id = get_user_id(request)
-    system_tools = get_mcp_tools_by_server(request)
-
-    result = dict(system_tools)  # Start with system servers
+    result = dict(system_tools_by_server)  # Start with system servers
     names: dict[str, str] = {}
     user_servers = await db.list_mcp_servers(user_id)
     for server in user_servers:
@@ -94,20 +94,28 @@ async def get_mcp_tools_for_user(
     return result, names
 
 
+async def get_mcp_tools_for_user(
+    request: Request,
+) -> tuple[dict[str, list], dict[str, str]]:
+    """Get MCP tools and server names for the current request's user.
+
+    Returns (tools_by_server, server_names) tuple.
+    """
+    return await mcp_tools_for_user(get_db(request), get_mcp_tools_by_server(request), get_user_id(request))
+
+
 def invalidate_user_mcp_cache(server_id: str):
     """Clear cached tools for a specific user MCP server."""
     _user_mcp_cache.pop(server_id, None)
 
 
-async def get_skill_tools_for_user(request: Request) -> dict[str, "BaseTool"]:  # noqa: F821
-    """Get skill tools for the current user (system + user skills).
+async def skill_tools_for_user(db: Database, user_id: str) -> dict[str, "BaseTool"]:  # noqa: F821
+    """Resolve skill tools for a user (system + user skills), request-free.
 
     Returns a dict of skill_id -> BaseTool.
     """
     from .agents.tools.skills import create_skill_tool
 
-    db = get_db(request)
-    user_id = get_user_id(request)
     skills = await db.list_skills(user_id)
 
     result = {}
@@ -123,6 +131,30 @@ async def get_skill_tools_for_user(request: Request) -> dict[str, "BaseTool"]:  
                 continue
         result[sid] = _skill_cache[sid]
     return result
+
+
+async def get_skill_tools_for_user(request: Request) -> dict[str, "BaseTool"]:  # noqa: F821
+    """Get skill tools for the current request's user.
+
+    Returns a dict of skill_id -> BaseTool.
+    """
+    return await skill_tools_for_user(get_db(request), get_user_id(request))
+
+
+async def effective_agent_configs(db: Database, user_id: str):
+    """Resolve a user's effective agent configs (defaults + DB overrides), request-free.
+
+    Mirrors the web path's per-user config resolution so the Slack connector
+    can build a graph for a mapped user without a request session.
+    """
+    from .agents.registry import get_default_configs, merge_configs
+
+    defaults = get_default_configs()
+    override_rows = await db.get_user_agent_configs(user_id)
+    if not override_rows:
+        return defaults
+    overrides = [json.loads(row["config_json"]) for row in override_rows]
+    return merge_configs(defaults, overrides)
 
 
 def invalidate_skill_cache(skill_id: str | None = None):

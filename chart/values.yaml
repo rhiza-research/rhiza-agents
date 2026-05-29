@@ -45,7 +45,9 @@ persistence:
 #       DAYTONA_SANDBOX_DISK_GIB (optional), SECRET_KEY, CREDENTIAL_ENCRYPTION_KEY,
 #       LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY,
 #       GITHUB_TOKEN (optional — raises GitHub quota for skill install/refresh from
-#       60/hr anonymous to 5000/hr; a read-only PAT with `public_repo` is sufficient)
+#       60/hr anonymous to 5000/hr; a read-only PAT with `public_repo` is sufficient),
+#       SLACK_BOT_TOKEN (optional — bot token xoxb-..., needs chat:write + files:write),
+#       SLACK_APP_TOKEN (optional — app-level token xapp-..., needs connections:write)
 secretName: rhiza-agents-secrets
 
 # Non-secret environment variables
@@ -75,3 +77,7 @@ env:
   DAYTONA_HOMES_MOUNT_PATH: ""
   DAYTONA_DATA_VOLUME: ""
   DAYTONA_DATA_MOUNT_PATH: ""
+  # Slack connector: JSON mapping Slack channel id -> rhiza user id (Keycloak
+  # sub). Non-secret. The xoxb-/xapp- tokens are secret and live in the
+  # Terraform-created secret above. Empty disables Slack channel routing.
+  SLACK_CHANNEL_USER_MAP: ""

@@ -1,6 +1,7 @@
 """FastAPI application creation, lifespan, and router registration."""
 
 import asyncio
+import contextlib
 import logging
 import os
 import time
@@ -22,6 +23,19 @@ from .db.sqlite import Database
 from .logging_config import setup_logging
 
 logger = logging.getLogger(__name__)
+
+
+def _log_slack_task_result(task: asyncio.Task):
+    """Surface a detached Slack connector task that exited with an error.
+
+    Without this, a failed start() (bad token, network) would only surface as
+    an 'exception was never retrieved' warning at GC.
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error("Slack connector task exited with an error", exc_info=exc)
 
 
 async def _load_system_skills(db):
@@ -156,8 +170,36 @@ async def lifespan(app: FastAPI):
         logger.info("Supervisor graph ready (built on first request)")
 
         cleanup_task = asyncio.create_task(_sandbox_cleanup_loop())
+
+        # Optional Slack connector — enabled only when both Socket Mode tokens
+        # are configured. Runs in this process so it shares the live
+        # checkpointer and app-state MCP tools.
+        slack_connector = None
+        slack_task = None
+        if config.slack_bot_token and config.slack_app_token:
+            from .slack_connector import SlackConnector
+
+            slack_connector = SlackConnector(
+                config=config,
+                db=db,
+                checkpointer=cp,
+                system_mcp_tools=app.state.mcp_tools,
+                system_mcp_tools_by_server=app.state.mcp_tools_by_server,
+                vectorstore_manager=app.state.vectorstore_manager,
+            )
+            slack_task = asyncio.create_task(slack_connector.start())
+            slack_task.add_done_callback(_log_slack_task_result)
+            logger.info("Slack connector enabled")
+
         yield
+
         cleanup_task.cancel()
+        if slack_connector is not None:
+            await slack_connector.stop()
+        if slack_task is not None:
+            slack_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await slack_task
 
     await db.disconnect()
 

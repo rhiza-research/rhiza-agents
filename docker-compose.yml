@@ -102,6 +102,14 @@ services:
       # — useful for bulk install or repeated refreshes. A read-only `public_repo`
       # PAT is enough for public skill repos.
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      # Slack connector (Socket Mode). Leave both tokens empty to disable it.
+      #   SLACK_BOT_TOKEN: bot token (xoxb-...); needs chat:write + files:write.
+      #   SLACK_APP_TOKEN: app-level token (xapp-...) with connections:write.
+      #   SLACK_CHANNEL_USER_MAP: JSON mapping Slack channel id -> rhiza user id
+      #     (Keycloak sub), e.g. {"C0123ABC":"<keycloak-sub>"}.
+      SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN:-}
+      SLACK_APP_TOKEN: ${SLACK_APP_TOKEN:-}
+      SLACK_CHANNEL_USER_MAP: ${SLACK_CHANNEL_USER_MAP:-}
     depends_on:
       - keycloak
       - sheerwater-mcp
