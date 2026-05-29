@@ -11,16 +11,14 @@ function escapeAttr(str: string): string {
 }
 
 /**
- * Config widget — agent list + detail form + vector stores + settings.
+ * Config widget — single agent detail form + vector stores + settings.
  * Port of config.js into a Lumino widget.
  */
 export class ConfigWidget extends Widget {
-    private _agents: any[] = [];
+    private _agent: any = null;
     private _vectorstores: any[] = [];
     private _toolTypes: Record<string, any> = {};
-    private _selectedAgentId: string | null = null;
 
-    private _agentList!: HTMLDivElement;
     private _detail!: HTMLDivElement;
     private _vectorstoreList!: HTMLDivElement;
     private _skillList!: HTMLDivElement;
@@ -48,27 +46,6 @@ export class ConfigWidget extends Widget {
         // Sidebar
         const sidebar = document.createElement('div');
         sidebar.className = 'config-sidebar';
-
-        const agentsTitle = document.createElement('h3');
-        agentsTitle.className = 'config-sidebar-title';
-        agentsTitle.textContent = 'Agents';
-        sidebar.appendChild(agentsTitle);
-
-        this._agentList = document.createElement('div');
-        this._agentList.className = 'agent-list';
-        sidebar.appendChild(this._agentList);
-
-        const addAgentBtn = document.createElement('button');
-        addAgentBtn.className = 'config-btn';
-        addAgentBtn.textContent = '+ Add Agent';
-        addAgentBtn.addEventListener('click', () => this._showNewAgentModal());
-        sidebar.appendChild(addAgentBtn);
-
-        const resetBtn = document.createElement('button');
-        resetBtn.className = 'config-btn config-btn-danger';
-        resetBtn.textContent = 'Reset All to Defaults';
-        resetBtn.addEventListener('click', () => this._resetAll());
-        sidebar.appendChild(resetBtn);
 
         const kbTitle = document.createElement('h3');
         kbTitle.className = 'config-sidebar-title';
@@ -173,8 +150,15 @@ export class ConfigWidget extends Widget {
         node.appendChild(this._detail);
     }
 
+    /** Return the detail panel to its default view. With a single permanent
+     *  agent the default is the agent's edit form; the loading message only
+     *  shows before the first GET /api/agents resolves. */
     private _renderPlaceholder(): void {
-        this._detail.innerHTML = '<div class="config-placeholder"><p>Select an agent to edit its configuration.</p></div>';
+        if (this._agent) {
+            this._renderAgentForm();
+        } else {
+            this._detail.innerHTML = '<div class="config-placeholder"><p>Loading agent configuration…</p></div>';
+        }
     }
 
     // --- Data Loading ---
@@ -204,13 +188,9 @@ export class ConfigWidget extends Widget {
         ]);
         const res = await fetch('/api/agents');
         if (!res.ok) return;
-        this._agents = await res.json();
-        this._renderAgentList();
-        if (this._selectedAgentId) {
-            const still = this._agents.find(a => a.id === this._selectedAgentId);
-            if (still) this._selectAgent(this._selectedAgentId);
-            else { this._selectedAgentId = null; this._renderPlaceholder(); }
-        }
+        const agents = await res.json();
+        this._agent = Array.isArray(agents) ? agents[0] : agents;
+        this._renderAgentForm();
     }
 
     private async _loadSettings(): Promise<void> {
@@ -231,29 +211,6 @@ export class ConfigWidget extends Widget {
     }
 
     // --- Rendering ---
-
-    private _renderAgentList(): void {
-        this._agentList.innerHTML = '';
-        for (const agent of this._agents) {
-            const item = document.createElement('button');
-            item.className = 'agent-list-item';
-            if (agent.id === this._selectedAgentId) item.classList.add('active');
-            if (!agent.enabled) item.classList.add('disabled');
-
-            const name = document.createElement('span');
-            name.className = 'agent-list-name';
-            name.textContent = agent.name;
-            item.appendChild(name);
-
-            const type = document.createElement('span');
-            type.className = 'agent-list-type';
-            type.textContent = agent.type;
-            item.appendChild(type);
-
-            item.addEventListener('click', () => this._selectAgent(agent.id));
-            this._agentList.appendChild(item);
-        }
-    }
 
     private _renderVectorStoreList(): void {
         this._vectorstoreList.innerHTML = '';
@@ -292,14 +249,9 @@ export class ConfigWidget extends Widget {
         }
     }
 
-    private _selectAgent(agentId: string): void {
-        this._selectedAgentId = agentId;
-        const agent = this._agents.find(a => a.id === agentId);
+    private _renderAgentForm(): void {
+        const agent = this._agent;
         if (!agent) return this._renderPlaceholder();
-
-        this._agentList.querySelectorAll('.agent-list-item').forEach(el => el.classList.remove('active'));
-        const idx = this._agents.indexOf(agent);
-        if (this._agentList.children[idx]) this._agentList.children[idx].classList.add('active');
 
         this._detail.innerHTML = `
             <div class="config-form">
@@ -323,12 +275,6 @@ export class ConfigWidget extends Widget {
                     <label for="edit-prompt">System Prompt</label>
                     <textarea id="edit-prompt" rows="12">${escapeHtml(agent.system_prompt)}</textarea>
                 </div>
-                ${agent.type === 'supervisor' ? `
-                <div class="form-group">
-                    <p style="color: var(--text-secondary); font-size: 0.85rem; margin: 0;">The supervisor routes messages to worker agents — it doesn't use tools, skills, or knowledge bases directly. Assign those to worker agents instead.</p>
-                </div>
-                ` : ''}
-                ${agent.type !== 'supervisor' ? `
                 <div class="form-group">
                     <label>Tools</label>
                     <div class="tools-checkboxes">
@@ -356,19 +302,15 @@ export class ConfigWidget extends Widget {
                         }).join('')}
                     </div>
                 </div>` : ''}
-                ` : ''}
                 <div class="config-form-actions">
-                    ${agent.type !== 'supervisor' ? `<button id="delete-agent-btn" class="config-btn config-btn-danger">${agent.enabled ? 'Disable' : 'Enable'}</button>` : ''}
+                    <button id="reset-agent-btn" class="config-btn config-btn-danger">Reset to Defaults</button>
                     <button id="save-agent-btn" class="config-btn config-btn-primary">Save</button>
                 </div>
             </div>
         `;
 
-        this._detail.querySelector('#save-agent-btn')!.addEventListener('click', () => this._saveAgent(agent));
-        const deleteBtn = this._detail.querySelector('#delete-agent-btn');
-        if (deleteBtn) {
-            deleteBtn.addEventListener('click', () => agent.enabled ? this._deleteAgent(agent) : this._enableAgent(agent));
-        }
+        this._detail.querySelector('#save-agent-btn')!.addEventListener('click', () => this._saveAgent());
+        this._detail.querySelector('#reset-agent-btn')!.addEventListener('click', () => this._resetAgent());
 
         // When sandbox checkbox is toggled, enable/disable skills that require it
         const sandboxCb = this._detail.querySelector('input[value="sandbox:daytona"]') as HTMLInputElement | null;
@@ -395,9 +337,11 @@ export class ConfigWidget extends Widget {
         }
     }
 
-    // --- Agent CRUD ---
+    // --- Agent config ---
 
-    private async _saveAgent(agent: any): Promise<void> {
+    private async _saveAgent(): Promise<void> {
+        const agent = this._agent;
+        if (!agent) return;
         const name = (this._detail.querySelector('#edit-name') as HTMLInputElement).value.trim();
         const model = (this._detail.querySelector('#edit-model') as HTMLSelectElement).value;
         const system_prompt = (this._detail.querySelector('#edit-prompt') as HTMLTextAreaElement).value;
@@ -411,66 +355,24 @@ export class ConfigWidget extends Widget {
         const res = await fetch(`/api/agents/${agent.id}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name, model, system_prompt, tools, vectorstore_ids, enabled: agent.enabled }),
+            body: JSON.stringify({ name, system_prompt, model, tools, vectorstore_ids }),
         });
         if (!res.ok) return;
-        this._agents = await res.json();
-        this._renderAgentList();
-        this._selectAgent(agent.id);
+        const agents = await res.json();
+        this._agent = Array.isArray(agents) ? agents[0] : agents;
+        this._renderAgentForm();
     }
 
-    private async _deleteAgent(agent: any): Promise<void> {
-        if (!confirm(`Are you sure you want to ${agent.is_default ? 'disable' : 'delete'} "${agent.name}"?`)) return;
-        const res = await fetch(`/api/agents/${agent.id}`, { method: 'DELETE' });
-        if (!res.ok) return;
-        this._agents = await res.json();
-        this._renderAgentList();
-        if (agent.is_default) this._selectAgent(agent.id);
-        else { this._selectedAgentId = null; this._renderPlaceholder(); }
-    }
-
-    private async _enableAgent(agent: any): Promise<void> {
-        const res = await fetch(`/api/agents/${agent.id}`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ enabled: true }),
-        });
-        if (!res.ok) return;
-        this._agents = await res.json();
-        this._renderAgentList();
-        this._selectAgent(agent.id);
-    }
-
-    private async _resetAll(): Promise<void> {
-        if (!confirm('Reset all agent configurations to defaults?')) return;
+    private async _resetAgent(): Promise<void> {
+        if (!confirm('Reset agent configuration to defaults?')) return;
         const res = await fetch('/api/agents/reset', { method: 'POST' });
         if (!res.ok) return;
-        this._agents = await res.json();
-        this._selectedAgentId = null;
-        this._renderAgentList();
-        this._renderPlaceholder();
+        const agents = await res.json();
+        this._agent = Array.isArray(agents) ? agents[0] : agents;
+        this._renderAgentForm();
     }
 
     // --- Modals (simple prompt-based for now) ---
-
-    private async _showNewAgentModal(): Promise<void> {
-        const id = prompt('Agent ID (alphanumeric, starts with letter):');
-        if (!id || !/^[a-zA-Z][a-zA-Z0-9_]*$/.test(id)) return;
-        const name = prompt('Display Name:');
-        if (!name) return;
-        const system_prompt = prompt('System Prompt:');
-        if (!system_prompt) return;
-
-        const res = await fetch('/api/agents', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id, name, system_prompt, model: 'claude-sonnet-4-20250514' }),
-        });
-        if (!res.ok) return;
-        this._agents = await res.json();
-        this._renderAgentList();
-        this._selectAgent(id);
-    }
 
     private async _showNewVsModal(): Promise<void> {
         const name = prompt('Knowledge Base Name:');
@@ -484,7 +386,7 @@ export class ConfigWidget extends Widget {
         });
         if (!res.ok) return;
         await this._loadVectorStores();
-        if (this._selectedAgentId) this._selectAgent(this._selectedAgentId);
+        this._renderAgentForm();
     }
 
     private async _deleteVectorStore(vs: any): Promise<void> {
@@ -492,10 +394,14 @@ export class ConfigWidget extends Widget {
         const res = await fetch(`/api/vectorstores/${vs.id}`, { method: 'DELETE' });
         if (!res.ok) return;
         await this._loadVectorStores();
+        // Deleting a knowledge base may drop its id from the agent config
+        // server-side, so re-fetch the agent before re-rendering the form.
         const agentsRes = await fetch('/api/agents');
-        if (agentsRes.ok) this._agents = await agentsRes.json();
-        this._renderAgentList();
-        if (this._selectedAgentId) this._selectAgent(this._selectedAgentId);
+        if (agentsRes.ok) {
+            const agents = await agentsRes.json();
+            this._agent = Array.isArray(agents) ? agents[0] : agents;
+        }
+        this._renderAgentForm();
     }
 
     private _triggerUpload(vsId: string): void {
@@ -514,7 +420,7 @@ export class ConfigWidget extends Widget {
 
         await fetch(`/api/vectorstores/${vsId}/upload`, { method: 'POST', body: formData });
         await this._loadVectorStores();
-        if (this._selectedAgentId) this._selectAgent(this._selectedAgentId);
+        this._renderAgentForm();
     }
 
     // --- Skills ---
@@ -906,7 +812,7 @@ export class ConfigWidget extends Widget {
             alert(lines.join('\n'));
             await this._loadSkills();
             await this._loadToolTypes();
-            if (this._selectedAgentId) this._selectAgent(this._selectedAgentId);
+            this._renderAgentForm();
             this._renderPlaceholder();
         } catch (e) {
             alert(`Install failed: ${e}`);
@@ -958,7 +864,7 @@ export class ConfigWidget extends Widget {
             }
             await this._loadSkills();
             await this._loadToolTypes();
-            if (this._selectedAgentId) this._selectAgent(this._selectedAgentId);
+            this._renderAgentForm();
             this._renderPlaceholder();
         });
     }
@@ -969,7 +875,7 @@ export class ConfigWidget extends Widget {
         if (!res.ok) return;
         await this._loadSkills();
         await this._loadToolTypes();
-        if (this._selectedAgentId) this._selectAgent(this._selectedAgentId);
+        this._renderAgentForm();
     }
 
     // --- MCP Servers ---
@@ -1076,7 +982,7 @@ export class ConfigWidget extends Widget {
             if (!res.ok) return;
             await this._loadMcpServers();
             await this._loadToolTypes();
-            if (this._selectedAgentId) this._selectAgent(this._selectedAgentId);
+            this._renderAgentForm();
             this._renderPlaceholder();
         });
     }
@@ -1087,7 +993,7 @@ export class ConfigWidget extends Widget {
         if (!res.ok) return;
         await this._loadMcpServers();
         await this._loadToolTypes();
-        if (this._selectedAgentId) this._selectAgent(this._selectedAgentId);
+        this._renderAgentForm();
     }
 
     // --- Credentials ---

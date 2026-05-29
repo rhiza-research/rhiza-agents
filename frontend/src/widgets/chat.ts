@@ -27,7 +27,6 @@ export class ChatWidget extends Widget {
     private _activeAbortController: AbortController | null = null;
     private _reviewMode = false;
     private _currentStreamingDiv: HTMLDivElement | null = null;
-    private _currentAgent: string | null = null;
     private _currentTraceId: string | null = null;
 
     private _messagesDiv!: HTMLDivElement;
@@ -176,7 +175,7 @@ export class ChatWidget extends Widget {
                 if (msg.type === 'human') {
                     this._addMessage('user', msg.content);
                 } else if (msg.type === 'ai') {
-                    this._addMessage('assistant', msg.content, false, msg.agent_name);
+                    this._addMessage('assistant', msg.content);
                 } else if (msg.type === 'chart') {
                     this._addChart(msg.url);
                 } else if (msg.type === 'thinking') {
@@ -200,16 +199,9 @@ export class ChatWidget extends Widget {
         }
     }
 
-    private _addMessage(role: string, content: string, loading = false, agentName?: string): HTMLDivElement {
+    private _addMessage(role: string, content: string, loading = false): HTMLDivElement {
         const div = document.createElement('div');
         div.className = `message ${role}` + (loading ? ' loading' : '');
-
-        if (agentName) {
-            const badge = document.createElement('span');
-            badge.className = 'agent-badge';
-            badge.textContent = agentName;
-            div.appendChild(badge);
-        }
 
         const contentDiv = document.createElement('div');
         contentDiv.className = 'message-content';
@@ -242,7 +234,6 @@ export class ChatWidget extends Widget {
         const div = document.createElement('div');
         div.className = 'message assistant streaming';
         div.innerHTML = `
-            <div class="agent-badge-container"></div>
             <div class="message-content"></div>
         `;
         if (this._currentTraceId) {
@@ -308,14 +299,6 @@ export class ChatWidget extends Widget {
         this._messagesDiv.scrollTop = this._messagesDiv.scrollHeight;
     }
 
-    private _updateAgentBadge(msgDiv: HTMLDivElement, agentName: string): void {
-        if (!agentName) return;
-        const container = msgDiv.querySelector('.agent-badge-container')!;
-        const escaped = document.createElement('span');
-        escaped.textContent = agentName;
-        container.innerHTML = `<span class="agent-badge">${escaped.innerHTML}</span>`;
-    }
-
     private _appendChart(msgDiv: HTMLDivElement, url: string): void {
         const iframe = document.createElement('iframe');
         iframe.src = url;
@@ -339,7 +322,6 @@ export class ChatWidget extends Widget {
     }
 
     private _handleStreamEvent(event: any): void {
-        const msgDiv = this._currentStreamingDiv!;
         switch (event.type) {
             case 'conversation_id':
                 if (!this._conversationId) {
@@ -353,23 +335,6 @@ export class ChatWidget extends Widget {
                     this._currentStreamingDiv.dataset.traceId = event.data.trace_id;
                 }
                 break;
-            case 'agent_start': {
-                const newAgent = event.data.agent;
-                if (this._currentAgent && newAgent !== this._currentAgent) {
-                    const cur = this._currentStreamingDiv!;
-                    if (this._streamedContent) {
-                        // Current bubble has content — finalize it
-                        this._finalizeMessage(cur);
-                    } else {
-                        // Empty bubble — remove it
-                        cur.remove();
-                    }
-                    this._currentStreamingDiv = this._addStreamingMessage();
-                }
-                this._currentAgent = newAgent;
-                this._updateAgentBadge(this._currentStreamingDiv!, newAgent);
-                break;
-            }
             case 'token':
                 this._appendToken(this._currentStreamingDiv!, event.data.content);
                 break;
@@ -556,7 +521,6 @@ export class ChatWidget extends Widget {
 
         this._currentTraceId = null;
         this._currentStreamingDiv = this._addStreamingMessage();
-        this._currentAgent = null;
 
         try {
             const response = await fetch('/api/chat/resume', {
@@ -621,7 +585,6 @@ export class ChatWidget extends Widget {
 
         this._currentTraceId = null;
         this._currentStreamingDiv = this._addStreamingMessage();
-        this._currentAgent = null;
 
         try {
             const response = await fetch('/api/chat/stream', {
