@@ -111,7 +111,12 @@ export class FilesWidget extends Widget {
 
         const url = `/api/conversations/${convId}/files?scope=${requestedScope}`;
         try {
-            if (requestedScope === 'workspace') {
+            // Guard the placeholder write with the staleness check: a load
+            // that was superseded before it wrote the placeholder must not
+            // clobber a freshly-rendered list (a rapid toggle could
+            // otherwise leave "Loading workspace…" stuck after the newer
+            // load already rendered).
+            if (requestedScope === 'workspace' && !isStale()) {
                 this._filesList.innerHTML = '<div class="files-empty">Loading workspace…</div>';
             }
             const response = await fetch(url);

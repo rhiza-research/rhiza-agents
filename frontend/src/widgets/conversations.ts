@@ -155,8 +155,10 @@ export class ConversationListWidget extends Widget {
         }
 
         // Remove from local list and re-render. The row (and its disabled
-        // button) is discarded; the _deleting entry is left set since the
-        // conversation is gone and cannot be deleted again.
+        // button) is discarded. Clear the in-flight guard entry too so the
+        // Set does not grow unbounded over a long-lived session; correctness
+        // does not rely on IDs never recurring.
+        this._deleting.delete(conv.id);
         this._conversations = this._conversations.filter((c) => c.id !== conv.id);
         this._renderList();
 
