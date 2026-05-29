@@ -25,6 +25,10 @@ export class ConversationListWidget extends Widget {
     private _conversations: ConversationData[];
     private _currentId: string;
     private _nav: HTMLElement | null = null;
+    // Conversation IDs with a DELETE request in flight. Guards against a
+    // double-click firing a second DELETE (the first removes the row, the
+    // second 404s and pops a spurious "Delete failed" alert).
+    private _deleting = new Set<string>();
 
     constructor(options: ConversationListOptions) {
         super();
@@ -90,14 +94,18 @@ export class ConversationListWidget extends Widget {
         deleteBtn.addEventListener('click', (e) => {
             e.preventDefault();
             e.stopPropagation();
-            void this._handleDelete(conv);
+            void this._handleDelete(conv, deleteBtn);
         });
         row.appendChild(deleteBtn);
 
         return row;
     }
 
-    private async _handleDelete(conv: ConversationData): Promise<void> {
+    private async _handleDelete(conv: ConversationData, deleteBtn: HTMLButtonElement): Promise<void> {
+        // In-flight guard: a rapid second click (before the first request
+        // resolves and the row is removed) must not fire a second DELETE.
+        if (this._deleting.has(conv.id)) return;
+
         const title = conv.title || 'this conversation';
         const ok = await confirmDialog({
             title: 'Delete conversation?',
@@ -110,10 +118,18 @@ export class ConversationListWidget extends Widget {
         });
         if (!ok) return;
 
+        // Re-check after the await: the user could have confirmed a second
+        // dialog opened by a concurrent click before this one resolved.
+        if (this._deleting.has(conv.id)) return;
+        this._deleting.add(conv.id);
+        deleteBtn.disabled = true;
+
         let response: Response;
         try {
             response = await fetch(`/api/conversations/${conv.id}`, { method: 'DELETE' });
         } catch (e) {
+            this._deleting.delete(conv.id);
+            deleteBtn.disabled = false;
             await alertDialog({
                 title: 'Delete failed',
                 message: `Failed to delete: ${(e as Error).message}`,
@@ -122,6 +138,8 @@ export class ConversationListWidget extends Widget {
         }
 
         if (!response.ok) {
+            this._deleting.delete(conv.id);
+            deleteBtn.disabled = false;
             let message = `${response.status} ${response.statusText}`;
             try {
                 const data = await response.json();
@@ -136,7 +154,9 @@ export class ConversationListWidget extends Widget {
             return;
         }
 
-        // Remove from local list and re-render
+        // Remove from local list and re-render. The row (and its disabled
+        // button) is discarded; the _deleting entry is left set since the
+        // conversation is gone and cannot be deleted again.
         this._conversations = this._conversations.filter((c) => c.id !== conv.id);
         this._renderList();
 
