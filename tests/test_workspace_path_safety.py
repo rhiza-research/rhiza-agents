@@ -9,12 +9,16 @@ would otherwise normalize to a root-owned file outside /workspace and
 without any root-level filesystem access.
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 from rhiza_agents.agents.tools.sandbox import (
     SANDBOX_DATA,
     SANDBOX_WORKSPACE,
+    read_workspace_file,
     workspace_path,
+    write_workspace_file,
 )
 
 
@@ -72,3 +76,75 @@ def test_dot_segments_within_workspace_allowed():
 
 def test_dot_segments_within_data_allowed():
     assert workspace_path("/data/sub/../forecast.parquet") == f"{SANDBOX_DATA}/forecast.parquet"
+
+
+# ---------------------------------------------------------------------------
+# Symlink-escape guard (in-sandbox realpath check).
+#
+# workspace_path's normpath is lexical; it cannot see a symlink the agent
+# planted in the sandbox FS via HITL-approved execute_python_code. The
+# read/write helpers resolve the real path in-sandbox via ``realpath -m``
+# and reject anything that resolves outside /workspace or /data, before
+# any read or write runs.
+# ---------------------------------------------------------------------------
+
+
+class _RealpathSandbox:
+    """Sandbox stub: answers ``realpath -m`` with a fixed escaped target,
+    and records every other exec so we can assert no read/write fired."""
+
+    def __init__(self, realpath_result: str, realpath_exit: int = 0):
+        self._realpath_result = realpath_result
+        self._realpath_exit = realpath_exit
+        self.exec_calls: list[str] = []
+
+        class _P:
+            def exec(p_self, cmd, **_kwargs):  # noqa: N805
+                self.exec_calls.append(cmd)
+                if cmd.startswith("realpath"):
+                    return SimpleNamespace(exit_code=self._realpath_exit, result=self._realpath_result)
+                # Any non-realpath exec (the actual read/write) — should
+                # not be reached when the guard rejects.
+                return SimpleNamespace(exit_code=0, result="")
+
+        self.process = _P()
+
+
+def test_read_rejects_symlink_escape_no_read_exec():
+    # realpath resolves the file to a target outside the roots → reject
+    # before the base64 read exec runs.
+    sandbox = _RealpathSandbox(realpath_result="/etc/passwd")
+    with pytest.raises(ValueError):
+        read_workspace_file(sandbox, f"{SANDBOX_WORKSPACE}/evil_link")
+    # Only the realpath probe ran; the read (test -f / base64) never did.
+    assert len(sandbox.exec_calls) == 1
+    assert sandbox.exec_calls[0].startswith("realpath")
+
+
+def test_write_rejects_symlink_escape_no_write_exec():
+    # realpath of the parent dir resolves outside the roots → reject
+    # before mkdir/base64 write runs.
+    sandbox = _RealpathSandbox(realpath_result="/etc")
+    with pytest.raises(ValueError):
+        write_workspace_file(sandbox, f"{SANDBOX_WORKSPACE}/sub/evil", b"data")
+    assert len(sandbox.exec_calls) == 1
+    assert sandbox.exec_calls[0].startswith("realpath")
+
+
+def test_read_allows_contained_realpath():
+    # A realpath that stays under /workspace passes the guard; the read
+    # exec then runs (returns empty here → FileNotFoundError path).
+    sandbox = _RealpathSandbox(realpath_result=f"{SANDBOX_WORKSPACE}/real.py")
+
+    class _OkExec:
+        def exec(self, cmd, **_kwargs):
+            sandbox.exec_calls.append(cmd)
+            if cmd.startswith("realpath"):
+                return SimpleNamespace(exit_code=0, result=f"{SANDBOX_WORKSPACE}/real.py")
+            # base64 read returns content.
+            import base64 as _b64
+
+            return SimpleNamespace(exit_code=0, result=_b64.b64encode(b"hello").decode())
+
+    sandbox.process = _OkExec()
+    assert read_workspace_file(sandbox, f"{SANDBOX_WORKSPACE}/real.py") == b"hello"

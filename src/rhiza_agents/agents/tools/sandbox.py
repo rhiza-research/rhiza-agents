@@ -151,13 +151,74 @@ def workspace_path(logical_path: str) -> str:
     return resolved
 
 
+def _is_contained(real_path: str) -> bool:
+    """True if ``real_path`` is at or under SANDBOX_WORKSPACE / SANDBOX_DATA.
+
+    ``real_path`` is expected to already be a symlink-resolved absolute
+    path (the output of ``realpath`` in the sandbox). The same containment
+    predicate used by ``workspace_path``'s lexical check, applied here to
+    the real resolved path.
+    """
+    return (
+        real_path == SANDBOX_WORKSPACE
+        or real_path.startswith(SANDBOX_WORKSPACE + "/")
+        or real_path == SANDBOX_DATA
+        or real_path.startswith(SANDBOX_DATA + "/")
+    )
+
+
+def _assert_realpath_contained(sandbox, abs_path: str, *, resolve_parent: bool) -> None:
+    """Resolve ``abs_path`` in the sandbox and reject symlink escapes.
+
+    ``workspace_path``'s ``normpath`` check is lexical only: it cannot see
+    symlinks, which live in the sandbox filesystem. The agent can write to
+    /workspace and /data (HITL-approved ``execute_python_code``), so it
+    could plant a symlink whose target escapes the roots; a root-level
+    read/write would then follow it. This resolves the REAL path inside
+    the sandbox and verifies it still lands under /workspace or /data,
+    raising ``ValueError`` on escape so the caller performs no read/write.
+
+    ``resolve_parent`` controls what gets resolved:
+
+      - ``False`` (reads): resolve ``abs_path`` itself with ``realpath -m``.
+        ``-m`` resolves every existing symlink in the chain and treats a
+        missing final component lexically, so it never fails on a not-yet-
+        existing file (the read's own ``test -f`` gates existence) while
+        still following a symlinked file or a symlinked parent to its real
+        target.
+      - ``True`` (writes): resolve the parent directory's real path. The
+        existing components — including any symlinked directory in the
+        chain — determine where the write actually lands.
+
+    ``realpath -m`` does not fail for a missing path, so a non-zero exit
+    here means the resolver itself failed; we treat that as unverifiable
+    and raise rather than letting the path through.
+    """
+    target = os.path.dirname(abs_path) or "/" if resolve_parent else abs_path
+    quoted = shlex.quote(target)
+    response = sandbox.process.exec(f"realpath -m -- {quoted}")
+    if response.exit_code != 0:
+        raise ValueError(f"could not resolve real path for {abs_path!r}")
+    real = response.result.strip()
+    if not real:
+        raise ValueError(f"empty realpath for {abs_path!r}")
+    if not _is_contained(real):
+        raise ValueError(f"path escapes workspace/data roots via symlink: {abs_path!r} -> {real!r}")
+
+
 def write_workspace_file(sandbox, abs_path: str, content: bytes) -> None:
     """Write bytes to an absolute path in the sandbox.
 
     fs.upload_file resolves relative-to-cwd; absolute paths are not
     respected. Use shell + base64 to write to arbitrary absolute paths.
     Caller is responsible for shell-safe ``abs_path`` (this helper quotes it).
+
+    Before writing, the parent directory's real (symlink-resolved) path is
+    verified to stay under /workspace or /data; a symlinked directory in
+    the chain that escapes the roots raises ``ValueError`` and no write
+    runs. Defense in depth on top of ``workspace_path``'s lexical check.
     """
+    _assert_realpath_contained(sandbox, abs_path, resolve_parent=True)
     b64 = base64.b64encode(content).decode("ascii")
     quoted = shlex.quote(abs_path)
     parent = os.path.dirname(abs_path) or "/"
@@ -172,7 +233,13 @@ def read_workspace_file(sandbox, abs_path: str) -> bytes:
 
     fs.download_file is relative-to-cwd; this is the absolute-path equivalent.
     Raises FileNotFoundError if the path does not exist.
+
+    Before reading, the file's real (symlink-resolved) path is verified to
+    stay under /workspace or /data; a symlink whose target escapes the
+    roots raises ``ValueError`` and no read runs. Defense in depth on top
+    of ``workspace_path``'s lexical check.
     """
+    _assert_realpath_contained(sandbox, abs_path, resolve_parent=False)
     quoted = shlex.quote(abs_path)
     response = sandbox.process.exec(f"test -f {quoted} && base64 -w 0 {quoted}")
     if response.exit_code != 0:

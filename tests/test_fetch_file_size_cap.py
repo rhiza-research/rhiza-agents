@@ -20,7 +20,13 @@ from rhiza_agents.agents.tools.files import (
 
 
 class _StatSandbox:
-    """Sandbox stub whose process.exec answers the stat with a fixed size."""
+    """Sandbox stub whose process.exec answers the stat with a fixed size.
+
+    The realpath-containment guard (``_assert_realpath_contained``) runs a
+    ``realpath -m`` before the stat; this stub answers that with a
+    contained /workspace path so the guard passes and the size-cap logic
+    is reached.
+    """
 
     def __init__(self, size: int, mtime: int = 1700000000):
         self._size = size
@@ -29,7 +35,9 @@ class _StatSandbox:
 
         class _P:
             def exec(p_self, cmd, **_kwargs):  # noqa: N805
-                # Only the stat command is exercised in these tests.
+                if cmd.startswith("realpath"):
+                    return SimpleNamespace(exit_code=0, result="/workspace/x")
+                # The stat command for the size cap under test.
                 return SimpleNamespace(exit_code=0, result=f"{self._size}|{self._mtime}")
 
         self.process = _P()
@@ -76,6 +84,10 @@ async def test_oversized_legacy_fallback_rejected_before_write(monkeypatch):
         def __init__(self):
             class _P:
                 def exec(p_self, cmd, **_kwargs):  # noqa: N805
+                    # realpath -m resolves the (contained) path so the
+                    # guard passes; the stat then reports the file missing.
+                    if cmd.startswith("realpath"):
+                        return SimpleNamespace(exit_code=0, result="/workspace/big.bin")
                     return SimpleNamespace(exit_code=1, result="")
 
             self.process = _P()
