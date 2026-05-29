@@ -79,6 +79,12 @@ SANDBOX_SKILLS_DIR = "/skills"
 # log file ownership consistent).
 INOTIFY_JOURNAL_PATH = "/tmp/inotify.log"
 
+# Where inotifywait's own stderr (diagnostics, watch-limit errors) is
+# written. Kept separate from the event journal so error text never
+# pollutes the TSV event stream the drain parses, and so a watch-limit
+# failure can be detected by inspecting this file at startup.
+INOTIFY_STDERR_PATH = "/tmp/inotify.err"
+
 
 def _normalize_sandbox_upload_path(path: str) -> str:
     """Convert a logical credential-file path to the form Daytona's fs.upload_file expects.
@@ -321,23 +327,36 @@ def start_inotify_daemon(sandbox) -> None:
     the per-sandbox file ownership.
     """
     journal = shlex.quote(INOTIFY_JOURNAL_PATH)
+    errlog = shlex.quote(INOTIFY_STDERR_PATH)
     workspace = shlex.quote(SANDBOX_WORKSPACE)
     data = shlex.quote(SANDBOX_DATA)
     # Truncate any previous journal (daemon may have left one if a
     # different conversation reused the same sandbox name — shouldn't
-    # happen with our per-thread sandboxes, but defensive).
+    # happen with our per-thread sandboxes, but defensive). A recursive
+    # ``-mr`` watch installs one watch per directory; a deep /data tree
+    # can exhaust the kernel's per-user max_user_watches limit, on which
+    # inotifywait prints an error to stderr and exits during setup. We
+    # send events (stdout) to the journal and diagnostics (stderr) to a
+    # separate error file, then briefly probe so the watch-limit failure
+    # is detected and logged instead of silently disabling tracking.
     init_cmd = (
-        f": > {journal}; "
+        f": > {journal}; : > {errlog}; "
         # Start the daemon. -m monitor mode (don't exit), -r recursive,
         # -e events. --format produces TSV; --timefmt %s makes the
         # timestamp a unix epoch second so we don't have to parse a
-        # human date string in the drain. >> opens with O_APPEND so
-        # every write atomically seeks to EOF — required for the
+        # human date string in the drain. >> on stdout opens with O_APPEND
+        # so every write atomically seeks to EOF — required for the
         # truncate-in-place drain pattern to work without losing data.
+        # stderr goes to its own file, not the journal.
         f"nohup inotifywait -mr "
         f"-e create -e modify -e close_write -e move -e delete -e open -e access "
         f"--format '%e\\t%w%f\\t%T' --timefmt '%s' "
-        f"{workspace} {data} >> {journal} 2>&1 &"
+        f"{workspace} {data} >> {journal} 2>> {errlog} & "
+        # Give inotifywait a moment to either establish all watches or
+        # fail setting them up, then report what happened on stdout.
+        f"sleep 1; "
+        f"if pgrep -x inotifywait >/dev/null 2>&1; then echo INOTIFY_RUNNING; "
+        f"else echo INOTIFY_DEAD; fi; cat {errlog} 2>/dev/null"
     )
     response = exec_as_daytona(sandbox, init_cmd)
     if response.exit_code != 0:
@@ -345,6 +364,29 @@ def start_inotify_daemon(sandbox) -> None:
             "Failed to start inotify daemon (session tracking disabled): %s",
             response.result,
         )
+        return
+
+    out = response.result or ""
+    # Watch-limit exhaustion: inotifywait prints a message mentioning the
+    # inotify watch limit (wording varies across versions, but always
+    # references the limit / max_user_watches) and exits during setup.
+    lowered = out.lower()
+    hit_watch_limit = "inotify" in lowered and (
+        "upgrade" in lowered or "watch limit" in lowered or "max_user_watches" in lowered or "no space left" in lowered
+    )
+    if "INOTIFY_DEAD" in out:
+        if hit_watch_limit:
+            logger.warning(
+                "inotify daemon exited at startup — kernel watch limit (max_user_watches) "
+                "exhausted on the recursive /data watch; session tracking disabled. "
+                "Raise fs.inotify.max_user_watches or narrow the watched tree. Detail: %s",
+                out.strip(),
+            )
+        else:
+            logger.warning(
+                "inotify daemon exited at startup (session tracking disabled): %s",
+                out.strip(),
+            )
 
 
 def _inotify_daemon_alive(sandbox) -> bool:
